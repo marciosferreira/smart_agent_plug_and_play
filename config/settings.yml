@@ -2,11 +2,22 @@
 # Trocar o conteúdo desta pasta (settings.yml + dominio.md) re-aponta o sistema
 # para outro banco. Requer restart do app.
 app:
-  nome: "KA Allocation"
-  descricao: "Análise de alocação de supply por Key Account (Request/Deal/Retail, Score de priorização, WOI, rollover/rollback)"
+  nome: "Posh"
+  #nome: "Alocation"
+
+  descricao: "Plataforma de gestão de pedidos de compra (Brazil Purchase Orders)"
+  #descricao: "Plataforma de gestão de alocação de pedidos (MDSC)"
+
+  # Arquivo de domínio ativo dentro desta pasta — troque para alternar de domínio
+  # (ex: dominio_alocacao.md volta ao pack de alocação KA + url sqlite:///allocation.db)
+  dominio: "dominio_posh.md"
+  #dominio: "dominio_alocacao.md"
 database:
   # Qualquer URL SQLAlchemy. Caminho sqlite relativo é resolvido contra a raiz do projeto.
   # Segredos: use ${VAR} para interpolar variáveis de ambiente
   # (ex: "postgresql://user:${DB_PASS}@host:5432/db"). A env DATABASE_URL, se
   # definida, tem precedência total sobre esta URL.
-  url: "sqlite:///allocation.db"
+  url: "postgresql://postgres:Moto%231234@127.0.0.1:5432/postgres"
+  #url: "sqlite:///allocation.db"
+
+

@@ -12,8 +12,11 @@ from typing import Optional
 
 from langchain_core.tools import tool
 
+import db_config
 from db import get_db
 from .widget_runner import run_widget_code, default_test_range, WidgetCodeError
+
+_DOMINIO_CLAUSE = "(dominio = ? OR dominio IS NULL)"
 
 
 def _current_user_id() -> str | None:
@@ -26,16 +29,19 @@ def _current_user_id() -> str | None:
 
 
 def _all_widgets(user_id: str | None = None) -> list[dict]:
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         if user_id:
             rows = conn.execute(
                 "SELECT id, title, description, created_at FROM dashboard_widgets "
-                "WHERE user_id=? OR user_id IS NULL ORDER BY created_at DESC",
-                (user_id,),
+                f"WHERE (user_id=? OR user_id IS NULL) AND {_DOMINIO_CLAUSE} ORDER BY created_at DESC",
+                (user_id, dominio),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT id, title, description, created_at FROM dashboard_widgets ORDER BY created_at DESC"
+                f"SELECT id, title, description, created_at FROM dashboard_widgets "
+                f"WHERE {_DOMINIO_CLAUSE} ORDER BY created_at DESC",
+                (dominio,),
             ).fetchall()
     return [dict(r) for r in rows]
 
@@ -139,9 +145,9 @@ def add_chart_to_dashboard(title: str, description: str, code: str) -> str:
 
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO dashboard_widgets (id, title, description, code, created_at, user_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (widget_id, title, description, code, now, user_id),
+            "INSERT INTO dashboard_widgets (id, title, description, code, created_at, user_id, dominio) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (widget_id, title, description, code, now, user_id, db_config.dominio_filename()),
         )
         conn.commit()
 
@@ -171,14 +177,15 @@ def list_dashboard_widgets() -> str:
 
 def _resolve_widget(conn, widget_id: str):
     """Retorna a row do widget aceitando ID completo ou prefixo de 8 chars."""
+    dominio = db_config.dominio_filename()
     if len(widget_id) <= 8:
         return conn.execute(
-            "SELECT id, title, description, code FROM dashboard_widgets WHERE id LIKE ?",
-            (widget_id + "%",),
+            f"SELECT id, title, description, code FROM dashboard_widgets WHERE id LIKE ? AND {_DOMINIO_CLAUSE}",
+            (widget_id + "%", dominio),
         ).fetchone()
     return conn.execute(
-        "SELECT id, title, description, code FROM dashboard_widgets WHERE id = ?",
-        (widget_id,),
+        f"SELECT id, title, description, code FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}",
+        (widget_id, dominio),
     ).fetchone()
 
 
@@ -273,17 +280,18 @@ def delete_dashboard_widget(widget_id: str) -> str:
                    Use list_dashboard_widgets para ver os IDs.
     """
     user_id = _current_user_id()
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         # Aceita ID completo ou prefixo de 8 chars
         if len(widget_id) == 8:
             row = conn.execute(
-                "SELECT id, title FROM dashboard_widgets WHERE id LIKE ?",
-                (widget_id + "%",),
+                f"SELECT id, title FROM dashboard_widgets WHERE id LIKE ? AND {_DOMINIO_CLAUSE}",
+                (widget_id + "%", dominio),
             ).fetchone()
         else:
             row = conn.execute(
-                "SELECT id, title FROM dashboard_widgets WHERE id = ?",
-                (widget_id,),
+                f"SELECT id, title FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}",
+                (widget_id, dominio),
             ).fetchone()
         if not row:
             return f"Painel '{widget_id}' não encontrado."

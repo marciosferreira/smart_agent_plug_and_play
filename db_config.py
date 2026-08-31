@@ -16,7 +16,7 @@ _RAIZ = Path(__file__).parent
 CONFIG_DIR = Path(os.getenv("CONFIG_DIR", str(_RAIZ / "config")))
 
 _SETTINGS_FILE = "settings.yml"
-_DOMINIO_FILE = "dominio.md"
+_DOMINIO_FILE_PADRAO = "dominio.md"
 
 MSG_NAO_CONFIGURADO = (
     "Sistema sem banco configurado — crie config/settings.yml e config/dominio.md "
@@ -44,8 +44,10 @@ def _read_cached(path: Path) -> "str | None":
         if hit and hit[0] == mtime:
             return hit[1]
         text = path.read_text(encoding="utf-8")
+        recarga = hit is not None
         _cache[str(path)] = (mtime, text)
-        return text
+    print(f"[config] {'recarregado' if recarga else 'lido'}: {path}")
+    return text
 
 
 # ── settings.yml ──────────────────────────────────────────────────────────────
@@ -86,8 +88,17 @@ def app_descricao() -> str:
     return (_settings().get("app") or {}).get("descricao") or ""
 
 
+def dominio_filename() -> str:
+    """Nome do arquivo de domínio ativo, definido em settings.yml (app.dominio).
+
+    Permite manter vários domínios na pasta (dominio_posh.md, dominio_alocacao.md, ...)
+    e trocar o ativo mudando uma linha no settings.yml. Default: dominio.md.
+    """
+    return (_settings().get("app") or {}).get("dominio") or _DOMINIO_FILE_PADRAO
+
+
 def is_configured() -> bool:
-    return _database_url() is not None and (CONFIG_DIR / _DOMINIO_FILE).exists()
+    return _database_url() is not None and (CONFIG_DIR / dominio_filename()).exists()
 
 
 # ── Engine SQLAlchemy (singleton lazy) ────────────────────────────────────────
@@ -108,6 +119,7 @@ def get_engine():
 
             _engine = create_engine(url, pool_pre_ping=True)
             _engine_url = url
+            print(f"[config] banco conectado: {_mask_url(url)}")
         return _engine
 
 
@@ -147,12 +159,16 @@ def run_select(sql: str, params: "dict | None" = None) -> "list[dict]":
         return [dict(row._mapping) for row in result]
 
 
+def _mask_url(url: str) -> str:
+    return re.sub(r"(://[^:/@]+:)[^@]+(@)", r"\1***\2", url)
+
+
 def url_mascarada() -> str:
     """URL com senha ocultada, para logs de startup."""
     url = _database_url()
     if not url:
         return "(não configurada)"
-    return re.sub(r"(://[^:/@]+:)[^@]+(@)", r"\1***\2", url)
+    return _mask_url(url)
 
 
 # ── dominio.md — seções canônicas ─────────────────────────────────────────────
@@ -161,7 +177,7 @@ _SECOES_NAO_SKILL = ("Períodos", "Regras do agente", "Regras do orquestrador")
 
 
 def _dominio_texto() -> str:
-    return _read_cached(CONFIG_DIR / _DOMINIO_FILE) or ""
+    return _read_cached(CONFIG_DIR / dominio_filename()) or ""
 
 
 def _split_secoes(texto: str) -> "list[tuple[str, str]]":

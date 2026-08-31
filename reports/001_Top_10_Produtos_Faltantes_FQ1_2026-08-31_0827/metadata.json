@@ -1,0 +1,14 @@
+{
+  "task_id": "001",
+  "task_name": "Top 10 Produtos Faltantes FQ1",
+  "run_at": "2026-08-31T08:27:39.719124",
+  "status": "pending_send",
+  "pdf_urls": [],
+  "email": null,
+  "schedule": {
+    "frequency": "once",
+    "weekday": null,
+    "day": null,
+    "time": null
+  }
+}

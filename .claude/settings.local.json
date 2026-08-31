@@ -4,7 +4,10 @@
       "PowerShell(Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue)",
       "PowerShell(Stop-Process -Name \"python3.13\" -Force -ErrorAction SilentlyContinue)",
       "Bash(.docling_venv/Scripts/python.exe load_ka_allocation.py)",
-      "Bash(.venv/Scripts/python.exe test_agent_questions.py Q5)"
+      "Bash(.venv/Scripts/python.exe test_agent_questions.py Q5)",
+      "Bash(python -m py_compile scheduler/daemon.py)",
+      "Bash(python -m py_compile scheduler/widget_tools.py)",
+      "Bash(python -m py_compile main.py seed_widgets_allocation.py)"
     ]
   }
 }

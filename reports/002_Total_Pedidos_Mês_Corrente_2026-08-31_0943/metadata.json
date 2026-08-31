@@ -1,0 +1,14 @@
+{
+  "task_id": "002",
+  "task_name": "Total Pedidos Mês Corrente",
+  "run_at": "2026-08-31T09:43:21.890765",
+  "status": "pending_send",
+  "pdf_urls": [],
+  "email": null,
+  "schedule": {
+    "frequency": "daily",
+    "weekday": null,
+    "day": null,
+    "time": null
+  }
+}

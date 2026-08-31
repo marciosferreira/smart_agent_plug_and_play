@@ -9,6 +9,7 @@ de risco". Idempotente — não duplica se os títulos já existirem.
 import uuid
 from datetime import datetime
 
+import db_config
 from db import get_db
 from scheduler.widget_runner import run_widget_code, default_test_range
 
@@ -80,10 +81,10 @@ def main() -> None:
             config = run_widget_code(w["code"], from_date, to_date, "seed-widgets")
             assert config.get("type") and config.get("data"), "widget não retornou config Chart.js"
             conn.execute(
-                "INSERT INTO dashboard_widgets (id, title, description, code, created_at, user_id) "
-                "VALUES (?, ?, ?, ?, ?, NULL)",
+                "INSERT INTO dashboard_widgets (id, title, description, code, created_at, user_id, dominio) "
+                "VALUES (?, ?, ?, ?, ?, NULL, ?)",
                 (str(uuid.uuid4()), w["title"], w["description"], w["code"],
-                 datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"), db_config.dominio_filename()),
             )
             print(f"  criado: {w['title']} ({len(config['data']['labels'])} categorias)")
         conn.commit()

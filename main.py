@@ -186,6 +186,7 @@ def _demo_reset():
                     conn.execute(f"DELETE FROM {tbl}")
                 except Exception:
                     pass
+            conn.execute("DELETE FROM session_dominio")
             conn.commit()
 
         # Alertas e artefatos ficam em uma conexão separada (chart_store)
@@ -357,6 +358,12 @@ async def chat_history(session_id: str = "default"):
         state = _checkpointer.get({"configurable": {"thread_id": session_id}})
         if not state:
             return []
+        with get_db() as conn:
+            tag = conn.execute(
+                "SELECT dominio FROM session_dominio WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        if tag and tag["dominio"] and tag["dominio"] != db_config.dominio_filename():
+            return []
         from langchain_core.messages import HumanMessage, AIMessage
         result = []
         for msg in state.get("channel_values", {}).get("messages", []):
@@ -387,10 +394,11 @@ async def list_chat_sessions(user_id: str = Query(default=None)):
             return []
         conn = _checkpointer.conn
         rows = conn.execute(
-            "SELECT thread_id, MAX(checkpoint_id) as latest FROM checkpoints "
-            "WHERE thread_id = ? OR thread_id LIKE ? "
-            "GROUP BY thread_id ORDER BY latest DESC",
-            (user_id, user_id + "_%"),
+            "SELECT c.thread_id, MAX(c.checkpoint_id) as latest FROM checkpoints c "
+            "LEFT JOIN session_dominio sd ON sd.session_id = c.thread_id "
+            "WHERE (c.thread_id = ? OR c.thread_id LIKE ?) AND (sd.dominio IS NULL OR sd.dominio = ?) "
+            "GROUP BY c.thread_id ORDER BY latest DESC",
+            (user_id, user_id + "_%", db_config.dominio_filename()),
         ).fetchall()
         sessions = []
         for row in rows:
@@ -439,6 +447,7 @@ async def delete_chat_session(session_id: str):
                     conn.execute(f"DELETE FROM {tbl} WHERE thread_id = ?", (session_id,))
                 except Exception:
                     pass
+            conn.execute("DELETE FROM session_dominio WHERE session_id = ?", (session_id,))
             conn.commit()
         import chart_store as cs
         cs.delete_charts_for_session(session_id)
@@ -503,23 +512,29 @@ def root():
 
 # ── agenda ────────────────────────────────────────────────────────────────────
 
+_DOMINIO_CLAUSE = "(dominio = ? OR dominio IS NULL)"
+
+
 @app.get("/tasks")
 def get_tasks(user_id: str = Query(default=None)):
     """Retorna as tarefas agendadas com as últimas 5 execuções de cada uma."""
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         if user_id:
             tasks = conn.execute(
                 "SELECT id, name, description, frequency, time, weekday, day, email, notify, "
                 "date_range, condition_sql, condition_operator, condition_threshold, condition_state, "
                 "status, next_run, last_run, created_at, retry_count, max_retries "
-                "FROM scheduled_tasks WHERE user_id=? ORDER BY id DESC", (user_id,)
+                f"FROM scheduled_tasks WHERE user_id=? AND {_DOMINIO_CLAUSE} ORDER BY id DESC",
+                (user_id, dominio),
             ).fetchall()
         else:
             tasks = conn.execute(
                 "SELECT id, name, description, frequency, time, weekday, day, email, notify, "
                 "date_range, condition_sql, condition_operator, condition_threshold, condition_state, "
                 "status, next_run, last_run, created_at, retry_count, max_retries "
-                "FROM scheduled_tasks ORDER BY id DESC"
+                f"FROM scheduled_tasks WHERE {_DOMINIO_CLAUSE} ORDER BY id DESC",
+                (dominio,),
             ).fetchall()
         task_ids = tuple(dict(t)["id"] for t in tasks)
         runs = (
@@ -549,11 +564,19 @@ def get_tasks(user_id: str = Query(default=None)):
 @app.get("/tasks/{task_id}/runs")
 def get_task_runs(task_id: str, user_id: str = Query(default=None)):
     """Retorna o histórico completo de execuções de uma tarefa."""
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         if user_id:
-            exists = conn.execute("SELECT id FROM scheduled_tasks WHERE id=? AND user_id=?", (task_id, user_id)).fetchone()
-            if not exists:
-                return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
+            exists = conn.execute(
+                f"SELECT id FROM scheduled_tasks WHERE id=? AND user_id=? AND {_DOMINIO_CLAUSE}",
+                (task_id, user_id, dominio),
+            ).fetchone()
+        else:
+            exists = conn.execute(
+                f"SELECT id FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE}", (task_id, dominio)
+            ).fetchone()
+        if not exists:
+            return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
         rows = conn.execute(
             "SELECT * FROM task_runs WHERE task_id=? ORDER BY started_at DESC",
             (task_id,),
@@ -605,10 +628,11 @@ def delete_all_code_audit():
 @app.post("/tasks/{task_id}/run-now")
 async def run_task_now(task_id: str, user_id: str = Query(default=None)):
     """Dispara execução imediata da task em background. Só funciona se status=active."""
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            "SELECT * FROM scheduled_tasks WHERE id=?" + (" AND user_id=?" if user_id else ""),
-            (task_id, user_id) if user_id else (task_id,),
+            f"SELECT * FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE}" + (" AND user_id=?" if user_id else ""),
+            (task_id, dominio, user_id) if user_id else (task_id, dominio),
         ).fetchone()
     if not row:
         return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
@@ -622,10 +646,11 @@ async def run_task_now(task_id: str, user_id: str = Query(default=None)):
 @app.post("/tasks/{task_id}/toggle-pause")
 def toggle_pause_task(task_id: str, user_id: str = Query(default=None)):
     """Alterna entre pausado e ativo. Não afeta tasks em execução ou concluídas."""
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id, status FROM scheduled_tasks WHERE id=?" + (" AND user_id=?" if user_id else ""),
-            (task_id, user_id) if user_id else (task_id,),
+            f"SELECT id, status FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE}" + (" AND user_id=?" if user_id else ""),
+            (task_id, dominio, user_id) if user_id else (task_id, dominio),
         ).fetchone()
         if not row:
             return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
@@ -641,10 +666,12 @@ def toggle_pause_task(task_id: str, user_id: str = Query(default=None)):
 @app.post("/tasks/{task_id}/toggle-notify")
 def toggle_notify_task(task_id: str, user_id: str = Query(default=None)):
     """Alterna notificações de uma tarefa (notify 0↔1). Bloqueado para tarefas com condition_sql."""
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id, notify, condition_sql FROM scheduled_tasks WHERE id=?" + (" AND user_id=?" if user_id else ""),
-            (task_id, user_id) if user_id else (task_id,),
+            f"SELECT id, notify, condition_sql FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE}"
+            + (" AND user_id=?" if user_id else ""),
+            (task_id, dominio, user_id) if user_id else (task_id, dominio),
         ).fetchone()
         if not row:
             return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
@@ -659,10 +686,11 @@ def toggle_notify_task(task_id: str, user_id: str = Query(default=None)):
 @app.delete("/tasks/{task_id}")
 def delete_task_endpoint(task_id: str, user_id: str = Query(default=None)):
     """Remove uma tarefa do banco pelo ID."""
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id FROM scheduled_tasks WHERE id=?" + (" AND user_id=?" if user_id else ""),
-            (task_id, user_id) if user_id else (task_id,),
+            f"SELECT id FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE}" + (" AND user_id=?" if user_id else ""),
+            (task_id, dominio, user_id) if user_id else (task_id, dominio),
         ).fetchone()
         if not row:
             return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
@@ -674,11 +702,12 @@ def delete_task_endpoint(task_id: str, user_id: str = Query(default=None)):
 @app.get("/tasks/{task_id}/code")
 def get_task_code(task_id: str, user_id: str = Query(default=None)):
     """Retorna o código atual da tarefa e o histórico de versões anteriores."""
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id, name, task_code, instructions FROM scheduled_tasks WHERE id=?"
+            f"SELECT id, name, task_code, instructions FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE}"
             + (" AND user_id=?" if user_id else ""),
-            (task_id, user_id) if user_id else (task_id,),
+            (task_id, dominio, user_id) if user_id else (task_id, dominio),
         ).fetchone()
         if not row:
             return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
@@ -717,16 +746,19 @@ def get_artifacts():
 @app.get("/dashboard-widgets")
 def get_dashboard_widgets(user_id: str = Query(default=None)):
     """Lista os painéis customizados do dashboard para um usuário."""
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         if user_id:
             rows = conn.execute(
                 "SELECT id, title, description, created_at FROM dashboard_widgets "
-                "WHERE user_id=? OR user_id IS NULL ORDER BY created_at ASC",
-                (user_id,),
+                f"WHERE (user_id=? OR user_id IS NULL) AND {_DOMINIO_CLAUSE} ORDER BY created_at ASC",
+                (user_id, dominio),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT id, title, description, created_at FROM dashboard_widgets ORDER BY created_at ASC"
+                f"SELECT id, title, description, created_at FROM dashboard_widgets "
+                f"WHERE {_DOMINIO_CLAUSE} ORDER BY created_at ASC",
+                (dominio,),
             ).fetchall()
     return [dict(r) for r in rows]
 
@@ -739,7 +771,8 @@ def get_dashboard_widget_data(widget_id: str):
 
     with get_db() as conn:
         row = conn.execute(
-            "SELECT code FROM dashboard_widgets WHERE id = ?", (widget_id,)
+            f"SELECT code FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}",
+            (widget_id, db_config.dominio_filename()),
         ).fetchone()
     if not row:
         return JSONResponse(status_code=404, content={"error": True, "message": "Painel não encontrado."})
@@ -761,8 +794,8 @@ def get_dashboard_widget_data(widget_id: str):
 def delete_dashboard_widget_endpoint(widget_id: str, user_id: str = Query(default=None)):
     """Remove um painel customizado do dashboard."""
     with get_db() as conn:
-        query = "SELECT id FROM dashboard_widgets WHERE id = ?"
-        params = [widget_id]
+        query = f"SELECT id FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}"
+        params = [widget_id, db_config.dominio_filename()]
         if user_id:
             query += " AND (user_id = ? OR user_id IS NULL)"
             params.append(user_id)

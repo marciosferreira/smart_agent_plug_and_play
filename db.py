@@ -1,7 +1,7 @@
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 DB_PATH = Path(os.getenv("DB_PATH", str(Path(__file__).parent / "mfg.db")))
@@ -118,7 +118,9 @@ def migrate_db():
             "ALTER TABLE scheduled_tasks ADD COLUMN condition_sql TEXT",
             "ALTER TABLE scheduled_tasks ADD COLUMN condition_operator TEXT",
             "ALTER TABLE scheduled_tasks ADD COLUMN condition_threshold REAL",
+            "ALTER TABLE scheduled_tasks ADD COLUMN dominio TEXT",
             "ALTER TABLE threshold_alerts ADD COLUMN user_id TEXT",
+            "ALTER TABLE threshold_alerts ADD COLUMN dominio TEXT",
             # dashboard_widgets pode não existir em bancos antigos
             """CREATE TABLE IF NOT EXISTS dashboard_widgets (
                 id          TEXT    PRIMARY KEY,
@@ -126,8 +128,10 @@ def migrate_db():
                 description TEXT,
                 code        TEXT    NOT NULL,
                 created_at  TEXT    NOT NULL,
-                user_id     TEXT
+                user_id     TEXT,
+                dominio     TEXT
             )""",
+            "ALTER TABLE dashboard_widgets ADD COLUMN dominio TEXT",
             # auditoria de erros durante geração/correção de task_code
             """CREATE TABLE IF NOT EXISTS task_code_audit (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,11 +143,32 @@ def migrate_db():
                 created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
             )""",
             "CREATE INDEX IF NOT EXISTS idx_tca_task_id ON task_code_audit(task_id)",
+            # marca cada sessão de chat com o domínio ativo no primeiro turno
+            """CREATE TABLE IF NOT EXISTS session_dominio (
+                session_id TEXT PRIMARY KEY,
+                dominio    TEXT,
+                created_at TEXT NOT NULL
+            )""",
         ):
             try:
                 conn.execute(stmt)
             except Exception:
                 pass  # coluna/tabela já existe
+        conn.commit()
+
+
+def tag_session_dominio(session_id: str, dominio: str) -> None:
+    """Marca uma sessão de chat com o domínio ativo no momento em que ela começou.
+
+    Idempotente — só grava na primeira chamada por session_id (INSERT OR IGNORE),
+    então o domínio de uma sessão não muda mesmo que settings.yml seja trocado
+    no meio da conversa.
+    """
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO session_dominio (session_id, dominio, created_at) VALUES (?, ?, ?)",
+            (session_id, dominio, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
         conn.commit()
 
 
@@ -279,7 +304,8 @@ def init_db():
                 created_at   TEXT NOT NULL,
                 retry_count  INTEGER NOT NULL DEFAULT 0,
                 max_retries  INTEGER NOT NULL DEFAULT 3,
-                user_id      TEXT
+                user_id      TEXT,
+                dominio      TEXT
             );
 
             -- Histórico de versões de código das tarefas
@@ -326,7 +352,8 @@ def init_db():
                 description TEXT,
                 code        TEXT    NOT NULL,
                 created_at  TEXT    NOT NULL,
-                user_id     TEXT
+                user_id     TEXT,
+                dominio     TEXT
             );
 
             -- Histórico de modelos por linha (qual modelo cada linha estava produzindo)
@@ -338,6 +365,13 @@ def init_db():
                 ended_at   TEXT                -- NULL = vigente hoje
             );
             CREATE INDEX IF NOT EXISTS idx_lmh_line ON line_model_history(line);
+
+            -- Marca cada sessão de chat com o domínio ativo no primeiro turno
+            CREATE TABLE IF NOT EXISTS session_dominio (
+                session_id TEXT PRIMARY KEY,
+                dominio    TEXT,
+                created_at TEXT NOT NULL
+            );
         """)
         _seed(conn)
         # Sincroniza a sequência com o MAX real do banco (idempotente)

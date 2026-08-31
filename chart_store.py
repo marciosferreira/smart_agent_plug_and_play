@@ -13,6 +13,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import db_config
+
 _conn: sqlite3.Connection | None = None
 _lock = threading.Lock()
 
@@ -63,7 +65,8 @@ def init_chart_store(db_path: Path) -> None:
             threshold  REAL,
             created_at TEXT NOT NULL,
             read       INTEGER NOT NULL DEFAULT 0,
-            user_id    TEXT
+            user_id    TEXT,
+            dominio    TEXT
         )
     """)
     _conn.commit()
@@ -236,8 +239,9 @@ def save_alert(session_id: str, message: str, value: float | None = None, thresh
     safe_threshold = float(threshold) if threshold is not None else None
     with _lock:
         _conn.execute(
-            "INSERT INTO threshold_alerts (id, task_id, message, value, threshold, created_at, read, user_id) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
-            (alert_id, task_id, message, safe_value, safe_threshold, _now(), user_id),
+            "INSERT INTO threshold_alerts (id, task_id, message, value, threshold, created_at, read, user_id, dominio) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
+            (alert_id, task_id, message, safe_value, safe_threshold, _now(), user_id, db_config.dominio_filename()),
         )
         _conn.commit()
     return alert_id
@@ -247,20 +251,20 @@ def get_alerts(unread_only: bool = True, user_id: str | None = None) -> list[dic
     if _conn is None:
         return []
     base = "SELECT id, task_id, message, value, threshold, created_at, read FROM threshold_alerts"
-    clauses = [] if user_id is None else ["user_id = ?"]
-    if unread_only:
-        clauses.append("read = 0")
-    where = (f" WHERE {' AND '.join(clauses)}" if clauses else "")
-    params = ([user_id] if user_id else []) + ([] if not unread_only else [])
-    # rebuild cleanly
+    dominio_clause = "(dominio = ? OR dominio IS NULL)"
+    dominio = db_config.dominio_filename()
     if user_id and unread_only:
-        sql, params = base + " WHERE user_id=? AND read=0 ORDER BY created_at DESC", (user_id,)
+        sql = base + f" WHERE user_id=? AND read=0 AND {dominio_clause} ORDER BY created_at DESC"
+        params = (user_id, dominio)
     elif user_id:
-        sql, params = base + " WHERE user_id=? ORDER BY created_at DESC LIMIT 100", (user_id,)
+        sql = base + f" WHERE user_id=? AND {dominio_clause} ORDER BY created_at DESC LIMIT 100"
+        params = (user_id, dominio)
     elif unread_only:
-        sql, params = base + " WHERE read=0 ORDER BY created_at DESC", ()
+        sql = base + f" WHERE read=0 AND {dominio_clause} ORDER BY created_at DESC"
+        params = (dominio,)
     else:
-        sql, params = base + " ORDER BY created_at DESC LIMIT 100", ()
+        sql = base + f" WHERE {dominio_clause} ORDER BY created_at DESC LIMIT 100"
+        params = (dominio,)
     with _lock:
         rows = _conn.execute(sql, params).fetchall()
 

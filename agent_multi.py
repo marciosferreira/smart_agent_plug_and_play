@@ -64,7 +64,7 @@ from scheduler.widget_tools import (
 
 logger = logging.getLogger(__name__)
 
-from db import DB_PATH
+from db import DB_PATH, tag_session_dominio
 import db_config
 
 SKILLS_FOLDER = Path(__file__).parent / "skills"
@@ -518,7 +518,9 @@ def rag_dominio() -> str:
     Use quando o usuário perguntar: o que este sistema faz, o que significa um termo ou
     métrica do domínio, como um valor é calculado, quais são as regras de negócio, etc.
     """
+    _tlog("rag_dominio", "CHAMADA", arquivo=db_config.dominio_filename())
     corpo = db_config.get_secao("Domínio de negócio")
+    _tlog("rag_dominio", "RETORNO", arquivo=db_config.dominio_filename(), chars=len(corpo))
     return corpo or db_config.MSG_NAO_CONFIGURADO
 
 
@@ -533,6 +535,7 @@ def rag_capacidades() -> str:
     como agendar um relatório, como criar um alerta, quais frequências existem, como editar
     uma tarefa, como funciona o agendamento, etc.
     """
+    _tlog("rag_capacidades", "CHAMADA", arquivo=str(_RAG_DIR / "capacidades.md"))
     return (_RAG_DIR / "capacidades.md").read_text(encoding="utf-8")
 
 
@@ -547,6 +550,7 @@ def rag_arquitetura() -> str:
     existem, como funciona o agendamento por baixo, o que é o modo determinístico,
     o que é o sub-agente analista, como o orquestrador decide o que fazer, etc.
     """
+    _tlog("rag_arquitetura", "CHAMADA", arquivo=str(_RAG_DIR / "arquitetura.md"))
     return (_RAG_DIR / "arquitetura.md").read_text(encoding="utf-8")
 
 
@@ -558,7 +562,9 @@ def rag_dados() -> str:
     Use quando o usuário perguntar: quais tabelas existem, qual o schema do banco,
     como cruzar tabelas, quais campos estão disponíveis para análise, etc.
     """
+    _tlog("rag_dados", "CHAMADA", arquivo=db_config.dominio_filename())
     corpo = db_config.get_secao("Modelo de dados")
+    _tlog("rag_dados", "RETORNO", arquivo=db_config.dominio_filename(), chars=len(corpo))
     return corpo or db_config.MSG_NAO_CONFIGURADO
 
 @tool
@@ -2471,6 +2477,7 @@ def invoke_multi_agent(query: str, session_id: str = "default") -> str:
     if _orchestrator_graph is None:
         raise RuntimeError("Multi-agente não inicializado.")
     _current_session.set(session_id)
+    tag_session_dominio(session_id, db_config.dominio_filename())
     resultado = _orchestrator_graph.invoke(
         {"messages": [_build_human_message(query, session_id)]},
         config={"configurable": {"thread_id": session_id}, "recursion_limit": 50},
@@ -2498,6 +2505,7 @@ def stream_multi_agent(query: str, session_id: str = "default"):
         return
 
     _current_session.set(session_id)
+    tag_session_dominio(session_id, db_config.dominio_filename())
 
     event_queue: _queue_module.Queue = _queue_module.Queue()
     with _eq_lock:

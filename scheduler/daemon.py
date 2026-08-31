@@ -10,6 +10,7 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import db_config
 from db import get_db
 from .md_parser import calculate_next_run
 from .runner import run_task_code, TaskCodeError
@@ -356,7 +357,9 @@ def check_due_tasks() -> None:
     with get_db() as conn:
         rows = conn.execute(
             # 'running' é excluído — evita execução dupla em tasks lentas
-            "SELECT * FROM scheduled_tasks WHERE status = 'active'"
+            # tarefas de outro domínio (dominio != ativo) nunca disparam aqui
+            "SELECT * FROM scheduled_tasks WHERE status = 'active' AND (dominio = ? OR dominio IS NULL)",
+            (db_config.dominio_filename(),),
         ).fetchall()
 
     now = datetime.now()

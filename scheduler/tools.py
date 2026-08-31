@@ -10,10 +10,13 @@ from typing import Optional
 
 from langchain_core.tools import tool
 
+import db_config
 from db import get_db
 from .md_parser import calculate_next_run
 
 logger = logging.getLogger(__name__)
+
+_DOMINIO_CLAUSE = "(dominio = ? OR dominio IS NULL)"
 
 _MIN_INTERVAL_MINUTES = 5
 
@@ -123,11 +126,17 @@ def _current_user_id() -> str | None:
 
 
 def _all_tasks(user_id: str | None = None) -> list[dict]:
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         if user_id:
-            rows = conn.execute("SELECT * FROM scheduled_tasks WHERE user_id=? ORDER BY id", (user_id,)).fetchall()
+            rows = conn.execute(
+                f"SELECT * FROM scheduled_tasks WHERE user_id=? AND {_DOMINIO_CLAUSE} ORDER BY id",
+                (user_id, dominio),
+            ).fetchall()
         else:
-            rows = conn.execute("SELECT * FROM scheduled_tasks ORDER BY id").fetchall()
+            rows = conn.execute(
+                f"SELECT * FROM scheduled_tasks WHERE {_DOMINIO_CLAUSE} ORDER BY id", (dominio,)
+            ).fetchall()
     return [_row_to_dict(r) for r in rows]
 
 
@@ -174,10 +183,11 @@ def schedule_task(
             conn.execute(
                 """INSERT INTO scheduled_tasks
                    (id, name, description, instructions, frequency, time, weekday,
-                    day, email, notify, date_range, status, next_run, last_run, created_at, user_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,'draft',?,NULL,?,?)""",
+                    day, email, notify, date_range, status, next_run, last_run, created_at, user_id, dominio)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,'draft',?,NULL,?,?,?)""",
                 (task_id, name, description, instructions, frequency, time,
-                 weekday, day, email, int(notify), date_range, next_run, now, user_id),
+                 weekday, day, email, int(notify), date_range, next_run, now, user_id,
+                 db_config.dominio_filename()),
             )
             conn.commit()
     except Exception as exc:
@@ -286,11 +296,11 @@ def schedule_monitor(
                 """INSERT INTO scheduled_tasks
                    (id, name, description, task_code, frequency, time, weekday, day,
                     notify, date_range, condition_sql, condition_operator, condition_threshold,
-                    status, next_run, last_run, created_at, user_id)
-                   VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?,'active',?,NULL,?,?)""",
+                    status, next_run, last_run, created_at, user_id, dominio)
+                   VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?,'active',?,NULL,?,?,?)""",
                 (task_id, name, description, default_code, frequency, time, weekday, day,
                  effective_date_range, condition_sql, condition_operator, condition_threshold,
-                 next_run, now, user_id),
+                 next_run, now, user_id, db_config.dominio_filename()),
             )
             conn.commit()
     except Exception as exc:
@@ -324,7 +334,8 @@ def set_task_instructions(task_id: str, instructions: str) -> str:
     """
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id FROM scheduled_tasks WHERE id = ?", (task_id,)
+            f"SELECT id FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}",
+            (task_id, db_config.dominio_filename()),
         ).fetchone()
         if not row:
             return f"Tarefa '{task_id}' não encontrada."
@@ -359,7 +370,8 @@ def get_task_instructions(task_id: str) -> str:
     """
     with get_db() as conn:
         row = conn.execute(
-            "SELECT name, instructions FROM scheduled_tasks WHERE id = ?", (task_id,)
+            f"SELECT name, instructions FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}",
+            (task_id, db_config.dominio_filename()),
         ).fetchone()
     if not row:
         return f"Tarefa '{task_id}' não encontrada."
@@ -376,12 +388,16 @@ def toggle_pause_task(task_id: str) -> str:
     Args:
         task_id: ID da tarefa (ex: "001"). Use list_scheduled_tasks para ver os IDs.
     """
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            "SELECT name, status FROM scheduled_tasks WHERE id = ?", (task_id,)
+            f"SELECT name, status FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}",
+            (task_id, dominio),
         ).fetchone()
         if not row:
-            ids = [r['id'] for r in conn.execute("SELECT id FROM scheduled_tasks").fetchall()]
+            ids = [r['id'] for r in conn.execute(
+                f"SELECT id FROM scheduled_tasks WHERE {_DOMINIO_CLAUSE}", (dominio,)
+            ).fetchall()]
             return f"Tarefa '{task_id}' não encontrada. IDs existentes: {ids}"
         current = row["status"]
         if current not in ("active", "paused"):
@@ -406,12 +422,16 @@ def delete_scheduled_task(task_id: str) -> str:
         task_id: ID da tarefa (ex: "001"). Use list_scheduled_tasks para ver os IDs.
     """
     uid = _current_user_id()
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            "SELECT name FROM scheduled_tasks WHERE id = ?", (task_id,)
+            f"SELECT name FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}",
+            (task_id, dominio),
         ).fetchone()
         if not row:
-            ids = [r['id'] for r in conn.execute("SELECT id FROM scheduled_tasks WHERE user_id=?", (uid,)).fetchall()]
+            ids = [r['id'] for r in conn.execute(
+                f"SELECT id FROM scheduled_tasks WHERE user_id=? AND {_DOMINIO_CLAUSE}", (uid, dominio)
+            ).fetchall()]
             return f"Tarefa '{task_id}' não encontrada. IDs existentes: {ids}"
         name = row['name']
         conn.execute("DELETE FROM scheduled_tasks WHERE id = ?", (task_id,))
@@ -463,12 +483,15 @@ def update_scheduled_task(
         condition_operator: Novo operador (">" | "<" | ">=" | "<=" | "==" | "!=" | "is_empty" | "is_not_empty").
         condition_threshold: Novo threshold numérico.
     """
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            "SELECT * FROM scheduled_tasks WHERE id = ?", (task_id,)
+            f"SELECT * FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}", (task_id, dominio)
         ).fetchone()
         if not row:
-            ids = [r['id'] for r in conn.execute("SELECT id FROM scheduled_tasks").fetchall()]
+            ids = [r['id'] for r in conn.execute(
+                f"SELECT id FROM scheduled_tasks WHERE {_DOMINIO_CLAUSE}", (dominio,)
+            ).fetchall()]
             return f"Tarefa '{task_id}' não encontrada. IDs existentes: {ids}"
 
         task = _row_to_dict(row)
@@ -538,7 +561,8 @@ def get_task_code(task_id: str) -> str:
     """
     with get_db() as conn:
         row = conn.execute(
-            "SELECT name, task_code FROM scheduled_tasks WHERE id = ?", (task_id,)
+            f"SELECT name, task_code FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}",
+            (task_id, db_config.dominio_filename()),
         ).fetchone()
     if not row:
         return f"Tarefa '{task_id}' não encontrada."
@@ -573,7 +597,8 @@ def test_task_code(task_id: str, code: str, from_date: str = "", to_date: str = 
         from .daemon import _date_range_for_task
         with get_db() as conn:
             row = conn.execute(
-                "SELECT date_range, frequency FROM scheduled_tasks WHERE id = ?", (task_id,)
+                f"SELECT date_range, frequency FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}",
+                (task_id, db_config.dominio_filename()),
             ).fetchone()
         if row and row["date_range"]:
             from_date, to_date = _date_range_for_task(dict(row))
@@ -630,7 +655,8 @@ def save_task_code(task_id: str, code: str) -> str:
     try:
         with get_db() as conn:
             row = conn.execute(
-                "SELECT name, task_code, condition_sql FROM scheduled_tasks WHERE id = ?", (task_id,)
+                f"SELECT name, task_code, condition_sql FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}",
+                (task_id, db_config.dominio_filename()),
             ).fetchone()
             if not row:
                 return f"Tarefa '{task_id}' não encontrada."
@@ -736,7 +762,8 @@ def restore_task_code_version(task_id: str, version: int) -> str:
             return f"Versão {version} não encontrada para a tarefa [{task_id}]."
 
         task_row = conn.execute(
-            "SELECT name, task_code FROM scheduled_tasks WHERE id = ?", (task_id,)
+            f"SELECT name, task_code FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}",
+            (task_id, db_config.dominio_filename()),
         ).fetchone()
         if not task_row:
             return f"Tarefa '{task_id}' não encontrada."
