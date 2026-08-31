@@ -1,6 +1,6 @@
 """
-MFG Control — Backend FastAPI
-==============================
+Smart Agent Plug and Play — Backend FastAPI
+============================================
 Rodar:
     python -m uvicorn main:app --reload
 
@@ -116,7 +116,7 @@ def _init_vertex():
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="MFG Control API", version="4.0.0")
+app = FastAPI(title="Smart Agent Plug and Play API", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,

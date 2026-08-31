@@ -20,7 +20,7 @@ _DOMINIO_FILE_PADRAO = "dominio.md"
 
 MSG_NAO_CONFIGURADO = (
     "Sistema sem banco configurado — crie config/settings.yml e config/dominio.md "
-    "(veja GUIA.md)."
+    "(veja ARQUITETURA.md)."
 )
 
 

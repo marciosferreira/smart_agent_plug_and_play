@@ -275,7 +275,7 @@ FROM ka_deal_allocation WHERE month_status IN ('done', 'ongoing')
 
 | Coluna | Tabela | Observação |
 | --- | --- | --- |
-| `year_month` | ambas | Confiável em ambas as tabelas. O arquivo de origem de `ka_deal_allocation` vinha com essa coluna corrompida (bug de exportação, colapsava para ~1969-12-31) — o valor foi corrigido no momento da carga (`load_ka_allocation.py`), usando o `year_month` de `ka_input_data` via join em `(quarter, material_id, key_account_id, month_seq)`. |
+| `year_month` | ambas | Confiável em ambas as tabelas. O arquivo de origem de `ka_deal_allocation` vinha com essa coluna corrompida (bug de exportação, colapsava para ~1969-12-31) — o valor foi corrigido no momento da carga (`scripts_manuais/load_ka_allocation.py`), usando o `year_month` de `ka_input_data` via join em `(quarter, material_id, key_account_id, month_seq)`. |
 | `month_seq` | ambas | Posição do mês (1/2/3) dentro do grupo `(quarter, material_id, key_account_id)`, na ordem original do arquivo — útil para ordenar sem depender de `year_month`. |
 | `month_status` | ambas | `done`/`ongoing` = meses do quarter atual (sempre nessa ordem: 2× `done`, depois `ongoing`); `next` = os 3 meses do próximo quarter. |
 | `allocation_allowed` | `ka_deal_allocation` | Armazenada como INTEGER (1/0), não texto `"true"/"false"`. |

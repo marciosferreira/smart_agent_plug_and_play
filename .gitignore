@@ -13,6 +13,9 @@ env/
 # Banco de dados local
 *.db
 
+# Scripts manuais — utilitários de setup/carga de dados, não usados pelo app
+scripts_manuais/
+
 # IDEs
 .vscode/
 .idea/
