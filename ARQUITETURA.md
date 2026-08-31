@@ -64,6 +64,58 @@ Na prática: apagar/mover `mfg.db` reseta tarefas, alertas e widgets sem afetar 
 
 ---
 
+## Identidade do usuário (`user_id`) — como é coletada e usada
+
+O sistema **não implementa login**. Ele é pensado para ser embutido (iframe/embed) dentro de um app host que já resolveu autenticação — o `user_id` é apenas um identificador que separa os dados de cada usuário dentro do mesmo domínio ativo. A responsabilidade de garantir que a pessoa certa está vendo o `user_id` certo é do app host, não deste sistema.
+
+### Como o `user_id` chega ao sistema
+
+```text
+App host (já autenticado)
+  └── carrega a página com ?user_id=<id-do-usuário-no-host>
+        └── dashboard.html lê o parâmetro na URL (new URLSearchParams(location.search))
+              ├── se presente → sobrescreve o valor salvo em localStorage (fonte da verdade é sempre o host)
+              └── se ausente  → usa o valor já salvo em localStorage, ou gera um UUID novo (modo standalone/demo)
+                    └── persiste em localStorage['mfg_user_id'] para sobreviver a reloads
+```
+
+Esse `_userId` do frontend é então enviado **explicitamente** em toda chamada que precisa de isolamento por usuário: `/chat/stream?...&user_id=...`, `/tasks?user_id=...`, `/dashboard-widgets?user_id=...`, `/artifacts?user_id=...`, etc. Não existe cookie de sessão nem header de autenticação — é um parâmetro de query passado a cada request, no mesmo espírito plug-and-play do resto do sistema.
+
+**Modo standalone/demo**: quando não há host embutindo a página (ex: `http://localhost:8000` aberto direto no browser), o sistema gera um UUID aleatório na primeira visita e o guarda em `localStorage`. Cada browser/perfil vira, na prática, "um usuário" — suficiente para demonstração, mas não é autenticação real.
+
+### Como o `user_id` percorre o backend
+
+No FastAPI, `/chat` e `/chat/stream` recebem `user_id` como parâmetro e o repassam para `invoke_multi_agent()` / `stream_multi_agent()`. De lá, o valor entra num `contextvars.ContextVar` próprio (`_current_user_id`, em `agent_multi.py`), separado do `_current_session` (que carrega o `session_id`/thread de conversa). A separação existe porque as duas coisas são independentes: o mesmo `user_id` pode ter várias conversas (`session_id`s) abertas, e o `session_id` sozinho nunca deveria ser usado para inferir quem é o usuário.
+
+Como `ContextVar` não atravessa `threading.Thread` criadas manualmente (só atravessa pools como o `ThreadPoolExecutor` que o LangGraph usa internamente), o valor é re-setado explicitamente no ponto onde o streaming SSE sobe uma thread própria para rodar o orquestrador — o mesmo cuidado que já existia para `session_id`.
+
+Tools como as de painéis customizados (`add_chart_to_dashboard`, `list_dashboard_widgets`, etc., em `scheduler/widget_tools.py`) leem o usuário atual direto desse `ContextVar` — não inferem mais nada a partir do formato do `session_id`.
+
+Tarefas agendadas são o único fluxo que não passa pelo `ContextVar`: o `user_id` fica gravado na própria linha da tarefa (`scheduled_tasks.user_id`) no momento da criação, e o daemon o repassa diretamente ao `TaskContext` de cada execução — por isso um monitor criado por um usuário continua rodando (e gerando artefatos com o `user_id` correto) mesmo sem nenhuma sessão de chat ativa.
+
+### Onde o `user_id` separa dados
+
+| Tabela / recurso | Coluna | Sem `user_id` no request |
+| --- | --- | --- |
+| `scheduled_tasks` (tarefas agendadas) | `user_id` | Vê só as tarefas sem dono (`user_id IS NULL`) |
+| `dashboard_widgets` (painéis customizados) | `user_id` | Vê só os painéis sem dono |
+| `threshold_alerts` (alertas de threshold) | `user_id` | Vê só alertas sem dono |
+| `charts` / `pdfs` / `excels` (artefatos gerados no chat) | `user_id` | Vê só artefatos sem dono |
+
+Em todos os casos a regra é a mesma cláusula SQL — `(user_id = ? OR user_id IS NULL)` — aplicada com o parâmetro vindo do request: uma linha com `user_id` preenchido só aparece para o dono; uma linha com `user_id NULL` é tratada como "compartilhada" e aparece para qualquer um (esse é o caso de registros antigos, criados antes dessa separação existir, e serve como modo degradado seguro quando o host esquece de mandar o parâmetro — ninguém vê dados de outro usuário, só dados sem dono).
+
+### `user_id` × `dominio` — eixos independentes
+
+Não confundir os dois: `dominio` (ver [Plug-and-play](#plug-and-play--trocar-de-banco-e-domínio-sem-mexer-em-código)) é **global ao processo**, definido em `settings.yml` — decide *qual banco de negócio* está ativo para toda a instalação. `user_id` é **por requisição**, informado pelo host — decide *de quem* são os dados dentro daquele domínio. Trocar o domínio não redistribui usuários; trocar de usuário não troca o banco de negócio consultado.
+
+### Histórico de conversa
+
+O histórico de chat (checkpointer LangGraph) continua isolado por `session_id`, não por `user_id` diretamente — mas o frontend gera `session_id` como `<user_id>_<timestamp>` (`newChat()` em `dashboard.html`), e `/chat/sessions?user_id=...` lista as sessões cujo `thread_id` começa com esse prefixo. Ou seja, a listagem de conversas de um usuário depende da convenção de nomenclatura do `session_id`, enquanto tarefas, painéis, alertas e artefatos usam uma coluna `user_id` real no banco.
+
+Isso tem uma implicação direta para onde o `session_id` **ativo** fica guardado no browser: a chave de `localStorage` que lembra "qual foi a última conversa aberta" é namespaced por `user_id` (`mfg_session_id::<user_id>`, em `dashboard.html`) — nunca uma chave global única. Sem esse namespacing, trocar o `user_id` na URL (ex: simular um segundo usuário no mesmo browser) continuaria devolvendo a última conversa de *outro* usuário salva naquele mesmo `localStorage`, porque a busca de histórico é por `session_id` e o `session_id` reaproveitado não teria trocado junto. Cada `user_id` mantém assim sua própria sessão ativa lembrada entre reloads, sem vazar para outro usuário do mesmo browser.
+
+---
+
 ## Grafo multi-agente (LangGraph)
 
 A espinha dorsal é um grafo de estados (StateGraph) em dois níveis:
@@ -238,6 +290,7 @@ A combinação desses elementos resolve os problemas reais de quem quer colocar 
 | "O modelo fica confuso com muitas APIs ao mesmo tempo" | Lazy-loading de skills — só carrega o que vai usar |
 | "Preciso exportar os dados para o Excel" | `gerar_excel()` cria um `.xlsx` formatado e disponibiliza link de download direto no chat |
 | "Preciso atender outro cliente/domínio sem duplicar o projeto" | Trocar `config/settings.yml` + `dominio_*.md` reaponta o sistema inteiro — ver [Plug-and-play](#plug-and-play--trocar-de-banco-e-domínio-sem-mexer-em-código) |
+| "Preciso plugar isso num app que já tem usuários e login" | O host passa `?user_id=...`; o sistema não reimplementa autenticação, só separa tarefas, painéis, alertas e artefatos por esse `user_id` — ver [Identidade do usuário](#identidade-do-usuário-user_id--como-é-coletada-e-usada) |
 
 ---
 

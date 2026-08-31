@@ -87,7 +87,7 @@ class TaskContext:
             Token '[pdf:uuid]' para incluir na resposta.
         """
         from agent_multi import _build_pdf
-        pdf_id = _build_pdf(titulo, conteudo, self.session_id)
+        pdf_id = _build_pdf(titulo, conteudo, self.session_id, self.user_id)
         token = f"[pdf:{pdf_id}]"
         self._tokens.append(token)
         return token
@@ -133,7 +133,7 @@ class TaskContext:
 
         safe_name = re.sub(r'[^\w\- ]', '', nome_arquivo)[:40].strip().replace(" ", "_")
         filename = f"{safe_name or 'relatorio'}.xlsx"
-        excel_id = chart_store.save_excel(self.session_id, output.getvalue(), filename)
+        excel_id = chart_store.save_excel(self.session_id, output.getvalue(), filename, self.user_id)
         token = f"[excel:{excel_id}]"
         self._tokens.append(token)
         return token
@@ -147,7 +147,7 @@ class TaskContext:
         fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight",
                     facecolor=fig.get_facecolor())
         buf.seek(0)
-        chart_id = chart_store.save_chart(self.session_id, buf.read())
+        chart_id = chart_store.save_chart(self.session_id, buf.read(), self.user_id)
         token = f"[chart:{chart_id}]"
         self._tokens.append(token)
         import matplotlib.pyplot as plt
@@ -164,7 +164,7 @@ class TaskContext:
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
-        excel_id = chart_store.save_excel(self.session_id, buf.read(), filename)
+        excel_id = chart_store.save_excel(self.session_id, buf.read(), filename, self.user_id)
         token = f"[excel:{excel_id}]"
         self._tokens.append(token)
         return token
@@ -178,7 +178,7 @@ class TaskContext:
         import chart_store
         from weasyprint import HTML
         pdf_bytes = HTML(string=html).write_pdf()
-        pdf_id = chart_store.save_pdf(self.session_id, pdf_bytes, filename)
+        pdf_id = chart_store.save_pdf(self.session_id, pdf_bytes, filename, self.user_id)
         token = f"[pdf:{pdf_id}]"
         self._tokens.append(token)
         return token

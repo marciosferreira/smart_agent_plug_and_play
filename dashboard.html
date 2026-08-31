@@ -1395,13 +1395,24 @@ async function initDashboard() {
 }
 
 // ── CHAT ──────────────────────────────────────────────
-// _userId persiste entre reloads — identifica o usuário neste browser
-let _userId = localStorage.getItem('mfg_user_id');
-if (!_userId) { _userId = crypto.randomUUID(); localStorage.setItem('mfg_user_id', _userId); }
+// _userId identifica o usuário perante o backend (separa histórico, tarefas,
+// painéis e artefatos por usuário). Quando este app está plugado num app host
+// que já tem controle de usuários, o host informa o user_id via query string
+// (?user_id=...) ao carregar a página — esse valor é sempre a fonte da verdade
+// e sobrescreve qualquer valor salvo antes. Sem host (uso standalone/demo),
+// cai de volta para um UUID gerado no browser e persistido em localStorage.
+const _hostUserId = new URLSearchParams(location.search).get('user_id');
+let _userId = _hostUserId || localStorage.getItem('mfg_user_id');
+if (!_userId) { _userId = crypto.randomUUID(); }
+localStorage.setItem('mfg_user_id', _userId);
 
-// _sessionId persiste entre reloads para restaurar a conversa ativa
-let _sessionId = localStorage.getItem('mfg_session_id') || _userId;
-function _setSession(id) { _sessionId = id; localStorage.setItem('mfg_session_id', id); }
+// _sessionId persiste entre reloads para restaurar a conversa ativa.
+// A chave é namespaced por _userId — trocar de usuário (?user_id= diferente)
+// não pode reaproveitar a última sessão de outro usuário salva no mesmo browser.
+function _sessionKey() { return 'mfg_session_id::' + _userId; }
+let _sessionId = localStorage.getItem(_sessionKey()) || (_userId + '_' + Date.now());
+function _setSession(id) { _sessionId = id; localStorage.setItem(_sessionKey(), id); }
+_setSession(_sessionId);
 let _msgId = 0;
 let _selMode = false;
 const _selectedIds = new Set();
@@ -1787,7 +1798,7 @@ async function getChartSnapshot() {
 
   // Artifacts — sem conteúdo, apenas metadados descritivos
   try {
-    const src = _allArtifacts?.length ? _allArtifacts : await fetch('/artifacts').then(r => r.json());
+    const src = _allArtifacts?.length ? _allArtifacts : await fetch(`/artifacts?user_id=${_userId}`).then(r => r.json());
     snapshot.artifacts = (src || [])
       .filter(a => !a.session_id?.startsWith('test_'))
       .map(a => ({ id: a.id, type: a.type, label: a.label ?? a.filename ?? a.id, created_at: a.created_at ?? '' }));
@@ -2064,7 +2075,7 @@ async function sendChat() {
   let stepN = 0;
   let hasEvents = false;
 
-  const url = `${API_BASE}/chat/stream?` + new URLSearchParams({ message: text, session_id: _sessionId });
+  const url = `${API_BASE}/chat/stream?` + new URLSearchParams({ message: text, session_id: _sessionId, user_id: _userId });
   const es = new EventSource(url);
 
   let lastThought = '';
@@ -3068,7 +3079,7 @@ async function deleteSelectedArtifacts() {
   if (!confirm(`Deletar ${n} artifact${n > 1 ? 's' : ''} selecionado${n > 1 ? 's' : ''}?`)) return;
   await Promise.all([..._selectedArtifacts].map(key => {
     const [type, id] = key.split(':');
-    return fetch(`/artifacts/${type}/${id}`, { method: 'DELETE' });
+    return fetch(`/artifacts/${type}/${id}?user_id=${_userId}`, { method: 'DELETE' });
   }));
   _selectedArtifacts.clear();
   loadArtifacts();
@@ -3173,7 +3184,7 @@ async function loadArtifacts() {
   _selectedArtifacts.clear();
   _updateSelectionUI();
   try {
-    const res = await fetch('/artifacts');
+    const res = await fetch(`/artifacts?user_id=${_userId}`);
     _allArtifacts = await res.json();
     renderArtifactList();
   } catch(e) {
@@ -3183,7 +3194,7 @@ async function loadArtifacts() {
 
 async function deleteArtifact(type, id) {
   if (!confirm(`Deletar este ${ARTIFACT_LABELS[type]}?`)) return;
-  await fetch(`/artifacts/${type}/${id}`, { method: 'DELETE' });
+  await fetch(`/artifacts/${type}/${id}?user_id=${_userId}`, { method: 'DELETE' });
   loadArtifacts();
 }
 

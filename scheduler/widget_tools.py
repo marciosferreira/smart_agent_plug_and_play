@@ -20,10 +20,15 @@ _DOMINIO_CLAUSE = "(dominio = ? OR dominio IS NULL)"
 
 
 def _current_user_id() -> str | None:
+    """Identidade do usuário atual, repassada explicitamente pelo app host.
+
+    Lida do contextvar preenchido em invoke_multi_agent/stream_multi_agent a partir
+    do user_id recebido na requisição — não é mais inferida do formato do session_id.
+    """
     try:
-        from agent_multi import _current_session
-        sid = _current_session.get("")
-        return sid[:36] if sid else None
+        from agent_multi import _current_user_id as _uid_ctx
+        uid = _uid_ctx.get("")
+        return uid or None
     except Exception:
         return None
 

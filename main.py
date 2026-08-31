@@ -243,6 +243,7 @@ async def startup():
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
+    user_id: str = ""
 
 
 class ChartSnapshotRequest(BaseModel):
@@ -265,7 +266,7 @@ async def chat(req: ChatRequest):
             status_code=503,
             content=_error_body(503, "ServiceUnavailable", "Agente IA não configurado. Verifique PROJECT_ID, LOCATION e credentials.json.", "/chat"),
         )
-    reply = await asyncio.to_thread(lambda: invoke_multi_agent(req.message, req.session_id))
+    reply = await asyncio.to_thread(lambda: invoke_multi_agent(req.message, req.session_id, req.user_id))
     return {"reply": _embed_charts(reply)}
 
 
@@ -309,7 +310,7 @@ def download_excel(excel_id: str):
 
 
 @app.get("/chat/stream")
-async def chat_stream(request: Request, message: str, session_id: str = "default"):
+async def chat_stream(request: Request, message: str, session_id: str = "default", user_id: str = ""):
     """Endpoint SSE — transmite thinking, tool calls e resposta final em tempo real."""
     if not is_multi_agent_ready():
         async def _err():
@@ -322,7 +323,7 @@ async def chat_stream(request: Request, message: str, session_id: str = "default
 
         def _run():
             try:
-                for event in stream_multi_agent(message, session_id):
+                for event in stream_multi_agent(message, session_id, user_id):
                     if event.get("type") == "reply":
                         event["text"] = _embed_charts(event["text"])
                     asyncio.run_coroutine_threadsafe(queue.put(event), loop)
@@ -513,6 +514,11 @@ def root():
 # ── agenda ────────────────────────────────────────────────────────────────────
 
 _DOMINIO_CLAUSE = "(dominio = ? OR dominio IS NULL)"
+# user_id=? combinado com user_id IS NULL: quando o request não informa user_id
+# (parâmetro None), a comparação "user_id = NULL" nunca é verdadeira em SQL, então
+# a cláusula naturalmente restringe a linhas sem dono (compartilhadas), em vez de
+# devolver os dados de todos os usuários por omissão.
+_USER_CLAUSE = "(user_id = ? OR user_id IS NULL)"
 
 
 @app.get("/tasks")
@@ -520,22 +526,13 @@ def get_tasks(user_id: str = Query(default=None)):
     """Retorna as tarefas agendadas com as últimas 5 execuções de cada uma."""
     dominio = db_config.dominio_filename()
     with get_db() as conn:
-        if user_id:
-            tasks = conn.execute(
-                "SELECT id, name, description, frequency, time, weekday, day, email, notify, "
-                "date_range, condition_sql, condition_operator, condition_threshold, condition_state, "
-                "status, next_run, last_run, created_at, retry_count, max_retries "
-                f"FROM scheduled_tasks WHERE user_id=? AND {_DOMINIO_CLAUSE} ORDER BY id DESC",
-                (user_id, dominio),
-            ).fetchall()
-        else:
-            tasks = conn.execute(
-                "SELECT id, name, description, frequency, time, weekday, day, email, notify, "
-                "date_range, condition_sql, condition_operator, condition_threshold, condition_state, "
-                "status, next_run, last_run, created_at, retry_count, max_retries "
-                f"FROM scheduled_tasks WHERE {_DOMINIO_CLAUSE} ORDER BY id DESC",
-                (dominio,),
-            ).fetchall()
+        tasks = conn.execute(
+            "SELECT id, name, description, frequency, time, weekday, day, email, notify, "
+            "date_range, condition_sql, condition_operator, condition_threshold, condition_state, "
+            "status, next_run, last_run, created_at, retry_count, max_retries "
+            f"FROM scheduled_tasks WHERE {_USER_CLAUSE} AND {_DOMINIO_CLAUSE} ORDER BY id DESC",
+            (user_id, dominio),
+        ).fetchall()
         task_ids = tuple(dict(t)["id"] for t in tasks)
         runs = (
             conn.execute(
@@ -566,15 +563,10 @@ def get_task_runs(task_id: str, user_id: str = Query(default=None)):
     """Retorna o histórico completo de execuções de uma tarefa."""
     dominio = db_config.dominio_filename()
     with get_db() as conn:
-        if user_id:
-            exists = conn.execute(
-                f"SELECT id FROM scheduled_tasks WHERE id=? AND user_id=? AND {_DOMINIO_CLAUSE}",
-                (task_id, user_id, dominio),
-            ).fetchone()
-        else:
-            exists = conn.execute(
-                f"SELECT id FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE}", (task_id, dominio)
-            ).fetchone()
+        exists = conn.execute(
+            f"SELECT id FROM scheduled_tasks WHERE id=? AND {_USER_CLAUSE} AND {_DOMINIO_CLAUSE}",
+            (task_id, user_id, dominio),
+        ).fetchone()
         if not exists:
             return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
         rows = conn.execute(
@@ -631,8 +623,8 @@ async def run_task_now(task_id: str, user_id: str = Query(default=None)):
     dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            f"SELECT * FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE}" + (" AND user_id=?" if user_id else ""),
-            (task_id, dominio, user_id) if user_id else (task_id, dominio),
+            f"SELECT * FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE} AND {_USER_CLAUSE}",
+            (task_id, dominio, user_id),
         ).fetchone()
     if not row:
         return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
@@ -649,8 +641,8 @@ def toggle_pause_task(task_id: str, user_id: str = Query(default=None)):
     dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            f"SELECT id, status FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE}" + (" AND user_id=?" if user_id else ""),
-            (task_id, dominio, user_id) if user_id else (task_id, dominio),
+            f"SELECT id, status FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE} AND {_USER_CLAUSE}",
+            (task_id, dominio, user_id),
         ).fetchone()
         if not row:
             return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
@@ -669,9 +661,8 @@ def toggle_notify_task(task_id: str, user_id: str = Query(default=None)):
     dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            f"SELECT id, notify, condition_sql FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE}"
-            + (" AND user_id=?" if user_id else ""),
-            (task_id, dominio, user_id) if user_id else (task_id, dominio),
+            f"SELECT id, notify, condition_sql FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE} AND {_USER_CLAUSE}",
+            (task_id, dominio, user_id),
         ).fetchone()
         if not row:
             return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
@@ -689,8 +680,8 @@ def delete_task_endpoint(task_id: str, user_id: str = Query(default=None)):
     dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            f"SELECT id FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE}" + (" AND user_id=?" if user_id else ""),
-            (task_id, dominio, user_id) if user_id else (task_id, dominio),
+            f"SELECT id FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE} AND {_USER_CLAUSE}",
+            (task_id, dominio, user_id),
         ).fetchone()
         if not row:
             return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
@@ -705,9 +696,8 @@ def get_task_code(task_id: str, user_id: str = Query(default=None)):
     dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            f"SELECT id, name, task_code, instructions FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE}"
-            + (" AND user_id=?" if user_id else ""),
-            (task_id, dominio, user_id) if user_id else (task_id, dominio),
+            f"SELECT id, name, task_code, instructions FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE} AND {_USER_CLAUSE}",
+            (task_id, dominio, user_id),
         ).fetchone()
         if not row:
             return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
@@ -725,10 +715,10 @@ def get_task_code(task_id: str, user_id: str = Query(default=None)):
 
 
 @app.get("/artifacts")
-def get_artifacts():
-    """Lista todos os artefatos (PDFs, gráficos, Excel) com origem e data."""
+def get_artifacts(user_id: str = Query(default=None)):
+    """Lista os artefatos (PDFs, gráficos, Excel) do usuário, com origem e data."""
     import re as _re
-    artifacts = cs.list_artifacts()
+    artifacts = cs.list_artifacts(user_id)
     for a in artifacts:
         sid = a.get("session_id", "")
         m = _re.match(r'^daemon_(\d+)_', sid)
@@ -748,18 +738,11 @@ def get_dashboard_widgets(user_id: str = Query(default=None)):
     """Lista os painéis customizados do dashboard para um usuário."""
     dominio = db_config.dominio_filename()
     with get_db() as conn:
-        if user_id:
-            rows = conn.execute(
-                "SELECT id, title, description, created_at FROM dashboard_widgets "
-                f"WHERE (user_id=? OR user_id IS NULL) AND {_DOMINIO_CLAUSE} ORDER BY created_at ASC",
-                (user_id, dominio),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                f"SELECT id, title, description, created_at FROM dashboard_widgets "
-                f"WHERE {_DOMINIO_CLAUSE} ORDER BY created_at ASC",
-                (dominio,),
-            ).fetchall()
+        rows = conn.execute(
+            "SELECT id, title, description, created_at FROM dashboard_widgets "
+            f"WHERE {_USER_CLAUSE} AND {_DOMINIO_CLAUSE} ORDER BY created_at ASC",
+            (user_id, dominio),
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -794,12 +777,10 @@ def get_dashboard_widget_data(widget_id: str):
 def delete_dashboard_widget_endpoint(widget_id: str, user_id: str = Query(default=None)):
     """Remove um painel customizado do dashboard."""
     with get_db() as conn:
-        query = f"SELECT id FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}"
-        params = [widget_id, db_config.dominio_filename()]
-        if user_id:
-            query += " AND (user_id = ? OR user_id IS NULL)"
-            params.append(user_id)
-        row = conn.execute(query, params).fetchone()
+        row = conn.execute(
+            f"SELECT id FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE} AND {_USER_CLAUSE}",
+            (widget_id, db_config.dominio_filename(), user_id),
+        ).fetchone()
         if not row:
             return JSONResponse(status_code=404, content={"error": True, "message": "Painel não encontrado."})
         conn.execute("DELETE FROM dashboard_widgets WHERE id = ?", (widget_id,))
@@ -808,9 +789,9 @@ def delete_dashboard_widget_endpoint(widget_id: str, user_id: str = Query(defaul
 
 
 @app.delete("/artifacts/{artifact_type}/{artifact_id}")
-def delete_artifact(artifact_type: str, artifact_id: str):
+def delete_artifact(artifact_type: str, artifact_id: str, user_id: str = Query(default=None)):
     """Remove um artefato do banco pelo tipo e ID."""
-    ok = cs.delete_artifact(artifact_type, artifact_id)
+    ok = cs.delete_artifact(artifact_type, artifact_id, user_id)
     if not ok:
         return JSONResponse(status_code=404, content={"error": True, "message": "Artefato não encontrado."})
     return {"ok": True}

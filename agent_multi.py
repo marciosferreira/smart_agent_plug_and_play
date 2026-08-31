@@ -82,6 +82,11 @@ _checkpointer = None
 _current_session: contextvars.ContextVar[str] = contextvars.ContextVar(
     "mfg_session", default="default"
 )
+# Identidade do usuário, repassada explicitamente pelo app host (não inferida
+# do session_id). Vazio quando não há host com controle de usuário (modo standalone).
+_current_user_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "mfg_user_id", default=""
+)
 _sandbox_mode: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "sandbox_mode", default=False
 )
@@ -461,7 +466,7 @@ def _pdf_render_text(pdf, text: str) -> None:
     flush_table()
 
 
-def _build_pdf(titulo: str, conteudo: str, session_id: str) -> str:
+def _build_pdf(titulo: str, conteudo: str, session_id: str, user_id: str | None = None) -> str:
     from fpdf import FPDF
 
     pdf = FPDF()
@@ -502,7 +507,7 @@ def _build_pdf(titulo: str, conteudo: str, session_id: str) -> str:
     pdf_bytes = bytes(pdf.output())
     safe_name = _re.sub(r'[^\w\- ]', '', titulo)[:40].strip().replace(" ", "_")
     filename = f"{safe_name or 'relatorio'}.pdf"
-    return chart_store.save_pdf(session_id, pdf_bytes, filename)
+    return chart_store.save_pdf(session_id, pdf_bytes, filename, user_id if user_id is not None else _current_user_id.get())
 
 
 # ── Tools do orquestrador ─────────────────────────────────────────────────────
@@ -679,7 +684,7 @@ def gerar_excel(nome_dataframe: str, nome_arquivo: str, sheets: Optional[str] = 
         excel_bytes = output.getvalue()
         safe_name = _re.sub(r'[^\w\- ]', '', nome_arquivo)[:40].strip().replace(" ", "_")
         filename = f"{safe_name or 'dados'}.xlsx"
-        excel_id = chart_store.save_excel(_current_session.get(), excel_bytes, filename)
+        excel_id = chart_store.save_excel(_current_session.get(), excel_bytes, filename, _current_user_id.get())
         result = f"[excel:{excel_id}]"
         _tlog("gerar_excel", "RETORNO", status="OK", excel_id=excel_id, filename=filename)
         return result
@@ -934,7 +939,7 @@ def analisar_dataframe(script: str) -> str:
                     facecolor="white", edgecolor="none",
                 )
                 buf.seek(0)
-                chart_id = chart_store.save_chart(_current_session.get(), buf.getvalue())
+                chart_id = chart_store.save_chart(_current_session.get(), buf.getvalue(), _current_user_id.get())
                 plt.close(result)
                 parts.append(f"[chart:{chart_id}]")
             elif isinstance(result, pd.DataFrame):
@@ -2468,15 +2473,18 @@ def _build_human_message(query: str, session_id: str) -> HumanMessage:
     return HumanMessage(content=parts)
 
 
-def invoke_multi_agent(query: str, session_id: str = "default") -> str:
+def invoke_multi_agent(query: str, session_id: str = "default", user_id: str = "") -> str:
     """Executa o orquestrador com a query do usuário e retorna a resposta final.
 
     O session_id isola o histórico de conversa — cada sessão tem seu próprio contexto
     persistido no mfg.db via SqliteSaver, e seus DataFrames no store em memória.
+    O user_id, quando informado pelo app host, isola painéis, tarefas e artefatos
+    (gráficos/PDF/Excel) entre usuários dentro do mesmo domínio.
     """
     if _orchestrator_graph is None:
         raise RuntimeError("Multi-agente não inicializado.")
     _current_session.set(session_id)
+    _current_user_id.set(user_id)
     tag_session_dominio(session_id, db_config.dominio_filename())
     resultado = _orchestrator_graph.invoke(
         {"messages": [_build_human_message(query, session_id)]},
@@ -2486,7 +2494,7 @@ def invoke_multi_agent(query: str, session_id: str = "default") -> str:
 
 
 
-def stream_multi_agent(query: str, session_id: str = "default"):
+def stream_multi_agent(query: str, session_id: str = "default", user_id: str = ""):
     """Gerador que yields dicts de eventos SSE enquanto o agente processa.
 
     Tipos de evento:
@@ -2505,6 +2513,7 @@ def stream_multi_agent(query: str, session_id: str = "default"):
         return
 
     _current_session.set(session_id)
+    _current_user_id.set(user_id)
     tag_session_dominio(session_id, db_config.dominio_filename())
 
     event_queue: _queue_module.Queue = _queue_module.Queue()
@@ -2518,6 +2527,7 @@ def stream_multi_agent(query: str, session_id: str = "default"):
     def _run_orchestrator():
         # ContextVar não se propaga para threading.Thread — precisa setar explicitamente.
         _current_session.set(session_id)
+        _current_user_id.set(user_id)
         try:
             for chunk in _orchestrator_graph.stream(
                 {"messages": [human_message]},

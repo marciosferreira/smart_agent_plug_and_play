@@ -35,7 +35,8 @@ def init_chart_store(db_path: Path) -> None:
             chart_id   TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
             png_blob   BLOB NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            user_id    TEXT
         )
     """)
     _conn.execute("""
@@ -44,7 +45,8 @@ def init_chart_store(db_path: Path) -> None:
             session_id TEXT NOT NULL,
             pdf_blob   BLOB NOT NULL,
             filename   TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            user_id    TEXT
         )
     """)
     _conn.execute("""
@@ -53,9 +55,20 @@ def init_chart_store(db_path: Path) -> None:
             session_id TEXT NOT NULL,
             excel_blob BLOB NOT NULL,
             filename   TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            user_id    TEXT
         )
     """)
+    # Migração best-effort para bancos existentes (colunas já criadas são ignoradas)
+    for stmt in (
+        "ALTER TABLE charts ADD COLUMN user_id TEXT",
+        "ALTER TABLE pdfs ADD COLUMN user_id TEXT",
+        "ALTER TABLE excels ADD COLUMN user_id TEXT",
+    ):
+        try:
+            _conn.execute(stmt)
+        except Exception:
+            pass
     _conn.execute("""
         CREATE TABLE IF NOT EXISTS threshold_alerts (
             id         TEXT PRIMARY KEY,
@@ -76,27 +89,27 @@ def _now() -> str:
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
-def save_chart(session_id: str, png_bytes: bytes) -> str:
+def save_chart(session_id: str, png_bytes: bytes, user_id: str | None = None) -> str:
     if _conn is None:
         raise RuntimeError("chart_store não inicializado.")
     chart_id = str(uuid.uuid4())
     with _lock:
         _conn.execute(
-            "INSERT INTO charts (chart_id, session_id, png_blob, created_at) VALUES (?, ?, ?, ?)",
-            (chart_id, session_id, png_bytes, _now()),
+            "INSERT INTO charts (chart_id, session_id, png_blob, created_at, user_id) VALUES (?, ?, ?, ?, ?)",
+            (chart_id, session_id, png_bytes, _now(), user_id or None),
         )
         _conn.commit()
     return chart_id
 
 
-def save_pdf(session_id: str, pdf_bytes: bytes, filename: str) -> str:
+def save_pdf(session_id: str, pdf_bytes: bytes, filename: str, user_id: str | None = None) -> str:
     if _conn is None:
         raise RuntimeError("chart_store não inicializado.")
     pdf_id = str(uuid.uuid4())
     with _lock:
         _conn.execute(
-            "INSERT INTO pdfs (pdf_id, session_id, pdf_blob, filename, created_at) VALUES (?, ?, ?, ?, ?)",
-            (pdf_id, session_id, pdf_bytes, filename, _now()),
+            "INSERT INTO pdfs (pdf_id, session_id, pdf_blob, filename, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (pdf_id, session_id, pdf_bytes, filename, _now(), user_id or None),
         )
         _conn.commit()
     return pdf_id
@@ -141,14 +154,14 @@ def get_pdf(pdf_id: str) -> tuple[bytes, str] | None:
     return row[0], row[1]
 
 
-def save_excel(session_id: str, excel_bytes: bytes, filename: str) -> str:
+def save_excel(session_id: str, excel_bytes: bytes, filename: str, user_id: str | None = None) -> str:
     if _conn is None:
         raise RuntimeError("chart_store não inicializado.")
     excel_id = str(uuid.uuid4())
     with _lock:
         _conn.execute(
-            "INSERT INTO excels (excel_id, session_id, excel_blob, filename, created_at) VALUES (?, ?, ?, ?, ?)",
-            (excel_id, session_id, excel_bytes, filename, _now()),
+            "INSERT INTO excels (excel_id, session_id, excel_blob, filename, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (excel_id, session_id, excel_bytes, filename, _now(), user_id or None),
         )
         _conn.commit()
     return excel_id
@@ -166,23 +179,37 @@ def get_excel(excel_id: str) -> tuple[bytes, str] | None:
     return row[0], row[1]
 
 
-def list_artifacts() -> list[dict]:
+def list_artifacts(user_id: str | None = None) -> list[dict]:
     """Retorna artefatos ordenados por data desc.
 
     Gráficos de sessões que também produziram um PDF são omitidos — eles já
     estão embutidos no PDF e não precisam aparecer como item separado.
+
+    Filtra por user_id quando informado (aceita também registros antigos com
+    user_id NULL, gerados antes da separação por usuário).
     """
     if _conn is None:
         return []
+    user_clause = " WHERE (user_id = ? OR user_id IS NULL)"
+    params = (user_id,)
     with _lock:
         charts = _conn.execute(
-            "SELECT chart_id, session_id, created_at FROM charts ORDER BY created_at DESC"
+            "SELECT chart_id, session_id, created_at FROM charts"
+            + (user_clause if user_id else "")
+            + " ORDER BY created_at DESC",
+            params if user_id else (),
         ).fetchall()
         pdfs = _conn.execute(
-            "SELECT pdf_id, session_id, filename, created_at FROM pdfs ORDER BY created_at DESC"
+            "SELECT pdf_id, session_id, filename, created_at FROM pdfs"
+            + (user_clause if user_id else "")
+            + " ORDER BY created_at DESC",
+            params if user_id else (),
         ).fetchall()
         excels = _conn.execute(
-            "SELECT excel_id, session_id, filename, created_at FROM excels ORDER BY created_at DESC"
+            "SELECT excel_id, session_id, filename, created_at FROM excels"
+            + (user_clause if user_id else "")
+            + " ORDER BY created_at DESC",
+            params if user_id else (),
         ).fetchall()
 
     result = []
@@ -215,15 +242,22 @@ def promote_test_artifacts(task_id: str, real_session_id: str) -> None:
         _conn.commit()
 
 
-def delete_artifact(artifact_type: str, artifact_id: str) -> bool:
+def delete_artifact(artifact_type: str, artifact_id: str, user_id: str | None = None) -> bool:
+    """Remove um artefato. Se user_id for informado, só apaga quando o artefato
+    pertence a esse usuário ou não tem dono (user_id NULL)."""
     if _conn is None:
         return False
     table_col = {"chart": ("charts", "chart_id"), "pdf": ("pdfs", "pdf_id"), "excel": ("excels", "excel_id")}
     if artifact_type not in table_col:
         return False
     table, col = table_col[artifact_type]
+    sql = f"DELETE FROM {table} WHERE {col} = ?"
+    params: tuple = (artifact_id,)
+    if user_id:
+        sql += " AND (user_id = ? OR user_id IS NULL)"
+        params = (artifact_id, user_id)
     with _lock:
-        cur = _conn.execute(f"DELETE FROM {table} WHERE {col} = ?", (artifact_id,))
+        cur = _conn.execute(sql, params)
         _conn.commit()
     return cur.rowcount > 0
 
