@@ -212,6 +212,8 @@ O frontend não espera a resposta final. Cada etapa do processo chega em tempo r
 
 O desafio aqui é que o sub-agente roda dentro de um `@tool` do orquestrador — fora do stream principal do LangGraph. A solução é um **side-channel por sessão**: uma `queue.Queue` por `session_id` captura os eventos do sub-agente em tempo real e os entrega ao gerador SSE que está servindo o frontend.
 
+**Importante: SSE é só para o chat.** O resto do dashboard não é push-based — não há WebSocket nem um segundo canal SSE. O sino de alertas 🔔 e o badge da agenda fazem **polling simples via `setInterval` a cada 15s** (`updateAlertsBadge`/`updateAgendaBadge` em `dashboard.html`, GET em `/alerts` e `/tasks`). Os gráficos e KPIs principais do dashboard (produção, OEE, etc.) carregam uma vez no load da página e não se auto-atualizam sozinhos. Um novo desenvolvedor que for adicionar "tempo real" em outra parte do dashboard deve decidir entre reaproveitar esse padrão de polling (simples, já testado) ou abrir um canal push novo — hoje não existe abstração compartilhada para isso além da SSE do chat.
+
 ---
 
 ## Comando de voz — gravar, revisar e enviar
@@ -276,6 +278,88 @@ O mesmo padrão se aplica a PDFs gerados por `gerar_pdf()` e a planilhas geradas
 
 ---
 
+## Referência de rotas HTTP
+
+Toda a API vive num único `FastAPI` (`main.py`), sem prefixo/versionamento (`/chat`, não `/api/v1/chat`). Rotas que isolam dado por usuário aceitam `user_id` como **query param opcional** — ver [Identidade do usuário](#identidade-do-usuário-user_id--como-é-coletada-e-usada) para a semântica de quando ele falta.
+
+### Chat e voz
+
+| Rota | Método | Para que serve |
+| --- | --- | --- |
+| `/chat` | POST | Envia uma mensagem e espera a resposta completa (sem streaming) — `{message, session_id, user_id}` |
+| `/chat/stream` | GET (SSE) | Mesma coisa, mas via Server-Sent Events — thinking/tool/reply em tempo real. É o que o frontend usa de fato |
+| `/chat/history` | GET | Histórico de mensagens (Human/AI) de um `session_id` |
+| `/chat/sessions` | GET | Lista as conversas de um `user_id` (título + contagem de mensagens), filtradas pelo domínio ativo |
+| `/chat/sessions/{session_id}` | DELETE | Apaga uma conversa e os artefatos (charts/pdfs/excels) associados a ela |
+| `/chat/transcribe` | POST | Recebe áudio (webm/opus) e devolve a transcrição via Gemini |
+| `/chart-snapshot` | POST | Frontend envia o estado atual dos gráficos/KPIs do dashboard antes de cada mensagem — usado por `get_dashboard_charts()` |
+
+### Artefatos (gráficos, PDF, Excel)
+
+| Rota | Método | Para que serve |
+| --- | --- | --- |
+| `/chart/{chart_id}` | GET | Serve o PNG de um gráfico gerado pelo agente |
+| `/pdf/{pdf_id}` | GET | Download do PDF gerado |
+| `/excel/{excel_id}` | GET | Download da planilha gerada |
+| `/artifacts` | GET | Lista todos os artefatos (chart/pdf/excel) de um `user_id`, com origem (`chat` ou `task`) |
+| `/artifacts/{type}/{id}` | DELETE | Apaga um artefato específico (`type` = `chart`\|`pdf`\|`excel`) |
+
+### Agenda (tarefas agendadas)
+
+| Rota | Método | Para que serve |
+| --- | --- | --- |
+| `/tasks` | GET | Lista as tarefas de um `user_id`, com as últimas 5 execuções de cada |
+| `/tasks/{id}/runs` | GET | Histórico completo de execuções de uma tarefa |
+| `/tasks/{id}/run-now` | POST | Dispara execução imediata (só funciona se `status=active`) |
+| `/tasks/{id}/toggle-pause` | POST | Alterna `active` ↔ `paused` |
+| `/tasks/{id}/toggle-notify` | POST | Liga/desliga notificações da tarefa (bloqueado se ela tiver `condition_sql`) |
+| `/tasks/{id}` | DELETE | Remove a tarefa |
+| `/tasks/{id}/code` | GET | Código atual (`task_code`) + histórico de versões |
+| `/tasks/{id}/code-audit` | GET | Log de erros durante a geração/correção automática do código da tarefa |
+| `/tasks/code-audit/summary` | GET | Resumo agregado de erros de geração de código (todas as tarefas, últimos 200) |
+| `/tasks/code-audit/{id}` | DELETE | Apaga uma entrada de auditoria |
+| `/tasks/code-audit` | DELETE | Apaga toda a auditoria |
+| `/reports/{task_id}` | GET | Lista os relatórios (PDF/e-mail) gerados por execuções passadas dessa tarefa |
+
+### Painéis customizados do dashboard
+
+| Rota | Método | Para que serve |
+| --- | --- | --- |
+| `/dashboard-widgets` | GET | Lista os painéis fixados de um `user_id` |
+| `/dashboard-widgets/{id}/data` | GET | Reexecuta o `widget_code` e devolve a config Chart.js atualizada — é o que o dashboard chama a cada refresh |
+| `/dashboard-widgets/{id}` | DELETE | Remove um painel |
+
+### Alertas
+
+| Rota | Método | Para que serve |
+| --- | --- | --- |
+| `/alerts` | GET | Alertas de threshold; por padrão só não-lidos, `?all=true` traz os últimos 100 |
+| `/alerts/{id}/read` | POST | Marca um alerta como lido |
+| `/alerts/read-all` | POST | Marca todos como lidos |
+| `/alerts/{id}` | DELETE | Apaga um alerta |
+| `/alerts` | DELETE | Apaga todos os alertas |
+
+### Diversos
+
+| Rota | Método | Para que serve |
+| --- | --- | --- |
+| `/app-info` | GET | Nome/descrição do pack de configuração ativo — usado pelo dashboard para branding |
+| `/` | GET | Serve `dashboard.html` (a SPA inteira) |
+| `/static/*` | GET | Assets estáticos (`Chart.js`, `marked.js`, Tailwind, fontes) |
+| `/docs`, `/redoc` | GET | Swagger/Redoc gerados automaticamente pelo FastAPI |
+
+---
+
+## Transporte, CORS e autenticação
+
+Pontos que um novo desenvolvedor precisa saber antes de expor isso além do `localhost`:
+
+- **HTTP puro dentro do container.** O `uvicorn` (ver `Dockerfile`/`run.py`) não termina TLS — ele serve HTTP simples na porta 8000. Em produção (o `Dockerfile` é feito para EasyPanel), HTTPS é responsabilidade da camada na frente do container (reverse proxy/PaaS) — a aplicação em si não sabe nem precisa saber que existe TLS.
+- **CORS totalmente aberto.** `CORSMiddleware` está configurado com `allow_origins=["*"]` (`main.py`) — qualquer origem pode chamar a API. Isso é deliberado para o cenário de embed (o app host pode estar em qualquer domínio), mas significa que restringir origem, se algum dia for necessário, precisa entrar aqui.
+- **Sem autenticação na API.** Não há API key, JWT nem sessão de servidor — nenhuma rota valida quem está fazendo a chamada. O único controle de acesso é a separação de dados por `user_id` (ver [Identidade do usuário](#identidade-do-usuário-user_id--como-é-coletada-e-usada)), e esse `user_id` é um query param em texto puro, não assinado — qualquer cliente que descubra/adivinhe o `user_id` de outra pessoa consegue ler os dados dela. O modelo de segurança inteiro depende do app host controlar quem recebe qual `user_id`.
+
+---
+
 ## Por que isso importa para a sua fábrica
 
 A combinação desses elementos resolve os problemas reais de quem quer colocar IA generativa num ambiente industrial:
@@ -321,6 +405,7 @@ Ver [Plug-and-play](#plug-and-play--trocar-de-banco-e-domínio-sem-mexer-em-cód
 | --- | --- | --- |
 | `DATABASE_URL` | Sobrepõe `database.url` do `settings.yml` — tem precedência total | — |
 | `CONFIG_DIR` | Pasta do pack de configuração, se não for `config/` na raiz | `config/` |
+| `DB_PATH` | Caminho do banco local do app (`mfg.db`) — em produção (Docker/EasyPanel) aponta para um volume montado, ex. `/data/mfg.db` | `<raiz do projeto>/mfg.db` |
 | `PROJECT_ID` | Projeto GCP para o Vertex AI — sem ele o chat IA fica desabilitado | — |
 | `LOCATION` | Região do Vertex AI | `us-central1` |
 | `MODEL_NAME` | Modelo Gemini usado pelo agente | `gemini-2.5-flash` |
@@ -340,6 +425,29 @@ python run.py
 Servidor sobe em `http://localhost:8000`. Docs automáticas do FastAPI em `/docs` (Swagger) e `/redoc`.
 
 Na primeira execução, `db.py` cria e semeia `mfg.db` (dados de demo de manufatura) se ele ainda não existir — isso é independente do banco de domínio configurado em `config/`.
+
+---
+
+## Frontend — SPA estática, sem build
+
+`dashboard.html` é a aplicação inteira: um único arquivo (~3500 linhas) com HTML + CSS + JavaScript vanilla, servido diretamente pelo FastAPI na rota `/`. Não há framework (React/Vue/etc.), não há bundler, não há transpilação — editar o arquivo e recarregar a página já reflete a mudança. As bibliotecas de terceiro (`Chart.js`, `marked.js`, `html-to-image`, Tailwind) ficam como arquivos estáticos em `static/`, sem gerenciador de pacotes JS (`npm`/`package.json` não existem no projeto).
+
+Identidade (`_userId`) e sessão (`_sessionId`) vivem em variáveis globais de módulo no topo do `<script>`, persistidas em `localStorage` — ver [Identidade do usuário](#identidade-do-usuário-user_id--como-é-coletada-e-usada). Um novo desenvolvedor que for além de ajustes pontuais deve considerar se vale a pena quebrar esse arquivo em módulos antes de crescer mais.
+
+---
+
+## Limitações conhecidas — estado em memória, processo único
+
+Vários pontos do sistema guardam estado em `dict`s Python globais dentro do processo do `uvicorn`, não em algo externo (Redis, banco). Isso é simples e suficiente para **um único processo/worker**, mas é uma armadilha real se alguém tentar escalar horizontalmente (`--workers N` do uvicorn, múltiplas réplicas atrás de um load balancer) sem revisar esse ponto primeiro:
+
+| Estado | Onde vive | Por que importa |
+| --- | --- | --- |
+| Namespace Python por sessão (`_namespaces`) | `agent_multi.py` | Os DataFrames de uma análise incremental (ver [Namespace persistente](#namespace-persistente--o-ambiente-jupyter-do-agente)) só existem na memória do worker que os criou. Duas réplicas = a próxima mensagem pode cair num worker que nunca viu o DataFrame anterior |
+| Fila de eventos SSE por sessão (`_event_queues`) | `agent_multi.py` | Se o request de streaming e a tool que produz eventos caírem em processos diferentes, os eventos nunca chegam ao gerador SSE |
+| Snapshot do dashboard (`_chart_snapshots`) | `agent_multi.py` | Usado por `get_dashboard_charts()`/perguntas sobre "o que está na tela" — mesma limitação |
+| `mfg.db` (SQLite) | `db.py`, `chart_store.py` | SQLite aceita um único escritor por vez; sob carga concorrente alta (muitos usuários simultâneos escrevendo tarefas/alertas/artefatos ao mesmo tempo) isso vira gargalo antes da CPU/rede virarem gargalo |
+
+Hoje o deploy de referência (`Dockerfile`) sobe um único processo (`uvicorn main:app`, sem `--workers`), o que é consistente com essas premissas. Se o requisito mudar para múltiplas réplicas, os três `dict`s em memória precisam virar algo compartilhado (Redis, por exemplo) antes disso funcionar corretamente — não é só trocar a infra.
 
 ---
 
