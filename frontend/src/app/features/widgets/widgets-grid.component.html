@@ -1,0 +1,31 @@
+<div style="padding:0 24px 32px;">
+  <div class="section-bar" style="margin-bottom:16px;">
+    <div class="section-lbl">Painéis Customizados</div>
+    <button class="refresh-btn" (click)="widgets.load()" title="Atualizar painéis" style="gap:4px;">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>
+      Atualizar
+    </button>
+  </div>
+
+  @if (widgets.loaded() && !widgets.widgets().length) {
+    <div style="text-align:center;padding:48px 16px;color:var(--txt3);border:1px dashed var(--border);border-radius:12px;font-size:13px;">
+      Nenhum painel ainda.<br />
+      Peça no chat: <em>"adiciona ao dashboard um painel de ..."</em>
+    </div>
+  } @else {
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:16px;">
+      @for (w of widgets.widgets(); track w.id) {
+        <div
+          draggable="true"
+          (dragstart)="onDragStart(w.id, $event)"
+          (dragover)="onDragOver(w.id, $event)"
+          (dragleave)="onDragLeave(w.id)"
+          (drop)="onDrop(w.id, $event)"
+          (dragend)="onDragEnd()"
+        >
+          <app-widget-card [widget]="w" [dragOver]="dragOverId() === w.id" />
+        </div>
+      }
+    </div>
+  }
+</div>

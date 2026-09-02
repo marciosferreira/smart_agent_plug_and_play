@@ -1,0 +1,74 @@
+<div id="chatBackdrop" [class.visible]="chatPanel.showBackdrop()" (click)="close()"></div>
+
+<aside class="chat-sidebar" [class.collapsed]="!chatPanel.isOpen()" #sidebar>
+  <div
+    class="chat-resize-handle"
+    [class.active]="handleActive()"
+    (mousedown)="onHandleMouseDown($event)"
+    (touchstart)="onHandleTouchStart($event)"
+  ></div>
+
+  <div class="chat-head">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+      <div class="chat-head-title"><div class="ctdot" style="background:var(--cyan)"></div>ASSISTENTE IA</div>
+      <button class="chat-collapse-btn" (click)="close()" title="Fechar chat">✕</button>
+    </div>
+    <div class="chat-head-sub" style="display:flex;align-items:center;justify-content:space-between;">
+      <span>Pergunte sobre os dados, solicite gráficos, análises estatística ou relatórios.</span>
+      <button
+        (click)="chat.showHistory()"
+        title="Conversas"
+        style="background:none;border:1px solid rgba(249,115,22,.25);color:var(--cyan);font-size:9px;font-family:'JetBrains Mono',monospace;letter-spacing:.08em;padding:3px 9px;cursor:pointer;border-radius:4px;transition:all .15s;"
+      >
+        ≡ CONVERSAS
+      </button>
+    </div>
+  </div>
+
+  <div class="chat-body">
+    <div class="chat-msgs" #chatMsgs>
+      @for (m of chat.messages(); track m.id) {
+        <app-chat-message [message]="m" />
+      }
+    </div>
+
+    <div class="chat-input-wrap">
+      <textarea
+        class="chat-input"
+        rows="1"
+        placeholder="Ex: qual turno tem mais defeitos?"
+        [style.display]="voice.hasAudio() ? 'none' : ''"
+        [ngModel]="text()"
+        (ngModelChange)="text.set($event)"
+        (input)="onInput($event)"
+        (keydown)="onKeydown($event)"
+      ></textarea>
+
+      <div class="audio-review" [class.visible]="voice.hasAudio()">
+        <audio [src]="voice.audioUrl() ?? ''" controls></audio>
+        <button class="audio-discard" (click)="voice.discard()" title="Descartar gravação">✕</button>
+      </div>
+
+      @if (screenshot.pendingImages().length) {
+        <div id="imagePreviewWrap" class="visible">
+          @for (b64 of screenshot.pendingImages(); track $index) {
+            <div class="img-thumb-wrap">
+              <img class="img-thumb" [src]="'data:image/png;base64,' + b64" (click)="openImagePreview(b64)" [title]="'Ver imagem ' + ($index + 1)" />
+              <button class="img-thumb-remove" (click)="screenshot.removeImage($index)" title="Remover">✕</button>
+            </div>
+          }
+        </div>
+      }
+
+      <div class="chat-actions">
+        <button class="chat-screenshot" (click)="screenshot.start()" title="Selecionar área da tela">📷</button>
+        <button class="chat-mic" [class.recording]="voice.recording()" [disabled]="transcribing()" (click)="toggleRecording()" title="Gravar voz">🎤</button>
+        <button class="chat-send" [class.loading]="transcribing()" [disabled]="chat.sending() || transcribing()" (click)="handleSend()">{{ transcribing() ? '' : '↑' }}</button>
+      </div>
+    </div>
+
+    <app-chat-history-list />
+  </div>
+</aside>
+
+<button class="chat-open-btn" [class.visible]="!chatPanel.isOpen()" (click)="chatPanel.open()">CHAT IA</button>

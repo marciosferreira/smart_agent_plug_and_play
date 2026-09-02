@@ -1,0 +1,50 @@
+@if (panelState.open() === 'alerts') {
+  <div
+    style="position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:1000;backdrop-filter:blur(2px);"
+    (click)="panelState.close()"
+  ></div>
+  <aside
+    style="position:fixed;top:var(--hdr-h);right:0;height:calc(100dvh - var(--hdr-h));width:380px;max-width:95vw;background:#ffffff;border-left:1px solid #e2e8f0;z-index:1001;display:flex;flex-direction:column;"
+  >
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #e2e8f0;flex-shrink:0;">
+      <div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#ef4444;letter-spacing:.14em;text-transform:uppercase;margin-bottom:3px;">Alertas do Agente</div>
+        <div style="font-size:14px;font-weight:600;color:#1e293b;">Notificações</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button (click)="alerts.markAllRead()" style="background:none;border:1px solid #e2e8f0;border-radius:6px;color:#94a3b8;padding:4px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace;">✓ Marcar todas lidas</button>
+        <button (click)="alerts.deleteAll()" style="background:none;border:1px solid #fecaca;border-radius:6px;color:#7f1d1d;padding:4px 10px;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace;">🗑 Apagar todas</button>
+        <button (click)="panelState.close()" style="background:none;border:none;color:#64748b;font-size:20px;cursor:pointer;line-height:1;">✕</button>
+      </div>
+    </div>
+
+    <div style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;">
+      @if (!alerts.alerts().length) {
+        <div style="text-align:center;color:#475569;padding:40px 0;font-size:13px;">
+          {{ alerts.loading() ? 'Carregando...' : 'Nenhum alerta.' }}
+        </div>
+      }
+      @for (a of alerts.alerts(); track a.id) {
+        <div
+          [style.background]="a.read ? '#ffffff' : '#fef2f2'"
+          [style.border-left]="a.read ? '3px solid #e2e8f0' : '3px solid #ef4444'"
+          style="padding:10px 12px;border-radius:6px;transition:background .15s;position:relative;"
+        >
+          <button (click)="alerts.deleteOne(a.id)" title="Apagar" style="position:absolute;top:6px;right:6px;background:none;border:none;color:#94a3b8;font-size:14px;cursor:pointer;line-height:1;padding:2px 4px;border-radius:4px;">✕</button>
+          <div style="display:flex;align-items:flex-start;gap:8px;padding-right:20px;">
+            <div [style.color]="a.read ? '#94a3b8' : '#fca5a5'" style="font-size:12px;line-height:1.4;flex:1;">{{ a.message }}</div>
+            @if (a.task_id) {
+              <span [title]="a.task_name ?? ''" style="font-size:9px;background:#e2e8f0;color:#94a3b8;padding:1px 6px;border-radius:4px;font-family:'JetBrains Mono',monospace;">[{{ a.task_id }}]</span>
+            }
+          </div>
+          @if (a.value != null && a.threshold != null) {
+            <div style="font-size:10px;color:#64748b;margin-top:4px;font-family:'JetBrains Mono',monospace;">
+              valor: {{ a.value.toFixed(2) }} · threshold: {{ a.threshold.toFixed(2) }}
+            </div>
+          }
+          <div style="font-size:10px;color:#94a3b8;margin-top:6px;">{{ fmtDate(a.created_at) }}</div>
+        </div>
+      }
+    </div>
+  </aside>
+}

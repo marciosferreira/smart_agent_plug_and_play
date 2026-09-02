@@ -1,0 +1,25 @@
+<div class="card" style="overflow:hidden;transition:opacity .15s,box-shadow .15s;" [style.box-shadow]="dragOver ? '0 0 0 2px #6366f1' : 'none'">
+  <div class="card-head" style="display:flex;align-items:center;gap:8px;padding:10px 16px;cursor:grab;" title="Arraste para reordenar">
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style="flex-shrink:0;opacity:.4;">
+      <circle cx="4" cy="3" r="1.2" fill="currentColor" />
+      <circle cx="8" cy="3" r="1.2" fill="currentColor" />
+      <circle cx="4" cy="6" r="1.2" fill="currentColor" />
+      <circle cx="8" cy="6" r="1.2" fill="currentColor" />
+      <circle cx="4" cy="9" r="1.2" fill="currentColor" />
+      <circle cx="8" cy="9" r="1.2" fill="currentColor" />
+    </svg>
+    <span class="card-title" style="flex:1;font-size:12px;font-weight:600;color:#1e293b;letter-spacing:.02em;">
+      {{ widget.title }}
+      <span style="font-weight:400;color:#94a3b8;font-size:10px;margin-left:6px;">{{ rangeLabel() }}</span>
+    </span>
+    <button (click)="removeWidget()" title="Remover painel" style="background:none;border:none;cursor:pointer;color:#475569;font-size:16px;line-height:1;padding:2px 4px;">&times;</button>
+  </div>
+  <div class="card-body" style="padding:8px 16px 16px;">
+    <div class="ch-wrap" style="height:220px;position:relative;">
+      <canvas #canvas></canvas>
+    </div>
+    @if (error(); as msg) {
+      <div style="color:#f87171;font-size:11px;padding:4px 0;">{{ msg }}</div>
+    }
+  </div>
+</div>

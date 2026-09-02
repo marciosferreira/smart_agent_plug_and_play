@@ -1,0 +1,32 @@
+<div
+  [style.border-color]="selected ? '#6366f1' : '#e2e8f0'"
+  style="background:#f8fafc;border:1px solid;border-radius:8px;padding:12px 14px;transition:border-color .15s;"
+>
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+    <input
+      type="checkbox"
+      [checked]="selected"
+      (change)="onSelectChange($any($event.target).checked)"
+      style="accent-color:#6366f1;width:14px;height:14px;cursor:pointer;flex-shrink:0;"
+    />
+    <span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:#1e293b;">task {{ entry.task_id }}</span>
+    <span [style.color]="phaseColor" style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:1px 7px;border-radius:99px;border:1px solid;">{{ entry.phase }}</span>
+    <span [style.color]="attemptColor" style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:1px 7px;border-radius:99px;border:1px solid;">tentativa {{ entry.attempt }}</span>
+    <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10px;color:#94a3b8;">{{ timestamp }}</span>
+  </div>
+  <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#94a3b8;white-space:pre-wrap;word-break:break-all;line-height:1.5;">
+    {{ errorShort }}@if (errorIsLong) {<span style="color:#475569;">…</span>}
+  </div>
+  <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;">
+    @if (errorIsLong) {
+      <button (click)="openError()" style="background:none;border:1px solid #7f1d1d;border-radius:4px;color:#f87171;font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;cursor:pointer;">Ver erro completo</button>
+    }
+    @if (hasCode) {
+      <button (click)="openCode()" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#6366f1;font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;cursor:pointer;">⬡ Código com erro</button>
+      <button (click)="copyCode()" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#475569;font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;cursor:pointer;">{{ copied() ? '✔ Copiado' : 'Copiar' }}</button>
+    }
+    <button [disabled]="deleting()" (click)="deleteEntry()" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#475569;font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;cursor:pointer;margin-left:auto;" title="Apagar este registro">
+    {{ deleting() ? '…' : '🗑' }}
+    </button>
+  </div>
+</div>

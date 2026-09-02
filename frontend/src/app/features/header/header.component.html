@@ -1,0 +1,60 @@
+<header>
+  <div class="logo">
+    <img src="/static/images/logo.png" alt="POSH" class="logo-img" />
+    <span
+      class="brand-title"
+      style="font-size:14px;font-weight:700;letter-spacing:.06em;color:var(--txt1,#1e293b);margin-left:10px;"
+      [title]="branding.info()?.descricao ?? ''"
+    >
+      {{ branding.info()?.nome?.toUpperCase() ?? '' }}
+    </span>
+  </div>
+  <div class="hdr-r">
+    <div class="api-status" style="cursor:pointer;" [title]="userIdCopied() ? 'Copiado!' : 'user_id: ' + userSession.userId + ' (clique para copiar)'" (click)="copyUserId()">
+      {{ userIdCopied() ? 'copiado!' : 'uid: ' + userSession.userId.slice(0, 8) }}
+    </div>
+    <div class="api-status" [ngClass]="{ ok: apiStatus.status() === 'online', err: apiStatus.status() === 'offline' }">
+      {{ apiStatus.status() === 'online' ? 'API ONLINE' : apiStatus.status() === 'offline' ? 'API OFFLINE' : 'API —' }}
+    </div>
+    <div class="live">
+      <div class="dot" [class.offline]="apiStatus.status() !== 'online'"></div>
+      <span>{{ apiStatus.status() === 'online' ? 'AO VIVO' : apiStatus.status() === 'offline' ? 'DESCONECTADO' : 'CONECTANDO' }}</span>
+    </div>
+    <div class="clk">{{ clock() }}</div>
+    <button class="refresh-btn" [class.spinning]="apiStatus.refreshing()" (click)="apiStatus.refreshAll()">
+      <span class="refresh-icon">↺</span> Atualizar
+    </button>
+    <button class="refresh-btn" style="position:relative;gap:6px;" (click)="panelState.toggle('agenda')">
+      🗓
+      @if (agenda.newCount() > 0) {
+        <span style="position:absolute;top:-7px;right:-4px;background:#6366f1;color:#fff;font-size:8px;font-weight:700;border-radius:99px;padding:1px 5px;letter-spacing:.08em;">NEW</span>
+      }
+      Tarefas<span style="color:#475569;font-size:11px;font-weight:400;">{{ agenda.activeCount() > 0 ? ' (' + agenda.activeCount() + ')' : '' }}</span>
+    </button>
+    <button class="refresh-btn" style="position:relative;gap:6px;" (click)="panelState.toggle('artifacts')">
+      🗂 Artifacts
+    </button>
+    <button class="refresh-btn" style="position:relative;gap:6px;" (click)="panelState.toggle('alerts')">
+      🔔
+      @if (alerts.unreadCount() > 0) {
+        <span style="position:absolute;top:-5px;right:-5px;background:#ef4444;color:#fff;font-size:9px;font-weight:700;border-radius:99px;padding:1px 5px;letter-spacing:.04em;min-width:16px;text-align:center;">
+          {{ alerts.unreadCount() > 99 ? '99+' : alerts.unreadCount() }}
+        </span>
+      }
+      Alertas
+    </button>
+    @if (apiStatus.lastUpdate()) {
+      <span class="last-update">{{ apiStatus.lastUpdate() }}</span>
+    }
+  </div>
+</header>
+
+<nav class="tab-nav">
+  <button
+    title="Auditoria de erros de geração de código"
+    style="margin-left:auto;background:none;border:1px solid #e2e8f0;border-radius:5px;color:#475569;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.1em;padding:4px 10px;cursor:pointer;display:flex;align-items:center;gap:6px;transition:color .15s,border-color .15s;"
+    (click)="panelState.toggle('audit')"
+  >
+    <i class="fa-solid fa-bug" style="font-size:10px;"></i> error audit
+  </button>
+</nav>

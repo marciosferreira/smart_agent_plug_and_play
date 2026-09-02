@@ -1,0 +1,14 @@
+{
+  "/chat": { "target": "http://localhost:8000", "secure": false },
+  "/tasks": { "target": "http://localhost:8000", "secure": false },
+  "/alerts": { "target": "http://localhost:8000", "secure": false },
+  "/artifacts": { "target": "http://localhost:8000", "secure": false },
+  "/dashboard-widgets": { "target": "http://localhost:8000", "secure": false },
+  "/reports": { "target": "http://localhost:8000", "secure": false },
+  "/app-info": { "target": "http://localhost:8000", "secure": false },
+  "/chart": { "target": "http://localhost:8000", "secure": false },
+  "/pdf": { "target": "http://localhost:8000", "secure": false },
+  "/excel": { "target": "http://localhost:8000", "secure": false },
+  "/chart-snapshot": { "target": "http://localhost:8000", "secure": false },
+  "/static": { "target": "http://localhost:8000", "secure": false }
+}

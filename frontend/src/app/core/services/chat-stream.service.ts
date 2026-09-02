@@ -1,0 +1,34 @@
+import { Injectable } from '@angular/core';
+import { Observable } from 'rxjs';
+import { ChatStreamEvent } from '../models/chat.model';
+
+/**
+ * Envolve EventSource nativo — porta dashboard.html:2080-2136.
+ * EventSource não passa pelo HttpClient/interceptors do Angular; a URL é
+ * montada manualmente a partir de identidade (user/session) + texto.
+ */
+@Injectable({ providedIn: 'root' })
+export class ChatStreamService {
+  open(message: string, sessionId: string, userId: string): Observable<ChatStreamEvent> {
+    return new Observable<ChatStreamEvent>((subscriber) => {
+      const url =
+        '/chat/stream?' +
+        new URLSearchParams({ message, session_id: sessionId, user_id: userId }).toString();
+      const es = new EventSource(url);
+
+      es.onmessage = (e) => {
+        try {
+          subscriber.next(JSON.parse(e.data) as ChatStreamEvent);
+        } catch (err) {
+          subscriber.error(err);
+        }
+      };
+
+      es.onerror = () => {
+        subscriber.error(new Error('sse-connection-lost'));
+      };
+
+      return () => es.close();
+    });
+  }
+}

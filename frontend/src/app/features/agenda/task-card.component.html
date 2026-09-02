@@ -1,0 +1,140 @@
+<div
+  style="background:#f8fafc;border:1px solid;border-radius:10px;padding:16px;position:relative;"
+  [style.border-color]="isNew ? '#6366f1' : '#e2e8f0'"
+  [style.box-shadow]="isNew ? '0 0 0 2px rgba(99,102,241,.18)' : 'none'"
+>
+  @if (isNew) {
+    <span style="position:absolute;top:-8px;left:12px;background:#6366f1;color:#fff;font-size:9px;font-weight:700;border-radius:99px;padding:1px 8px;letter-spacing:.06em;">NOVA</span>
+  }
+
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:10px;">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#6366f1;font-weight:700;">[{{ task.id }}]</span>
+      <span style="font-size:13px;font-weight:600;color:#1e293b;">{{ task.name || '—' }}</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+      <span
+        [style.background]="statusBadge().bg"
+        [style.color]="statusBadge().color"
+        style="font-size:10px;font-family:'JetBrains Mono',monospace;letter-spacing:.08em;padding:2px 8px;border-radius:99px;border:1px solid;"
+      >
+        {{ statusBadge().label }}
+      </span>
+      @if (task.retry_count > 0) {
+        <span style="font-size:10px;color:#fb923c;font-family:'JetBrains Mono',monospace;"> · tentativa {{ task.retry_count }}/{{ task.max_retries }}</span>
+      }
+      @if (task.status === 'active') {
+        <button
+          (click)="runNow()"
+          [disabled]="runBusy()"
+          title="Executar agora (sem aguardar o horário agendado)"
+          style="background:none;border:1px solid #16a34a;border-radius:6px;color:#16a34a;padding:3px 7px;font-size:12px;cursor:pointer;"
+        >
+          {{ runBusy() ? '…' : runDone() ? '✓' : '▶' }}
+        </button>
+      }
+      @if (task.status === 'active' || task.status === 'paused') {
+        <button
+          (click)="togglePause()"
+          [disabled]="pauseBusy()"
+          [title]="task.status === 'paused' ? 'Retomar tarefa' : 'Pausar tarefa'"
+          style="background:none;border:1px solid #3f3f46;border-radius:6px;color:#71717a;padding:3px 7px;font-size:12px;cursor:pointer;"
+        >
+          {{ task.status === 'paused' ? '▶' : '⏸' }}
+        </button>
+      }
+      <button (click)="openCode()" title="Ver código da tarefa" style="background:none;border:1px solid #3f3f46;border-radius:6px;color:#71717a;padding:3px 7px;font-size:12px;cursor:pointer;font-family:'JetBrains Mono',monospace;">&lt;/&gt;</button>
+      <button (click)="deleteTask()" title="Remover tarefa" style="background:none;border:1px solid #3f3f46;border-radius:6px;color:#71717a;padding:3px 7px;font-size:12px;cursor:pointer;">✕</button>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;margin-bottom:10px;">
+    <div>
+      <div style="font-size:9px;color:#475569;font-family:'JetBrains Mono',monospace;letter-spacing:.1em;margin-bottom:2px;">FREQUÊNCIA</div>
+      <div style="font-size:12px;color:#94a3b8;">
+        {{ freqLabel() }}
+        @if (task.date_range) {
+          <span style="margin-left:6px;font-size:10px;color:#6366f1;font-family:'JetBrains Mono',monospace;">{{ task.date_range }}</span>
+        }
+      </div>
+    </div>
+    @if (task.frequency !== 'on_demand') {
+      <div>
+        <div style="font-size:9px;color:#475569;font-family:'JetBrains Mono',monospace;letter-spacing:.1em;margin-bottom:2px;">PRÓXIMA EXEC.</div>
+        <div style="font-size:12px;color:#f97316;">{{ task.next_run || '—' }}</div>
+      </div>
+    } @else {
+      <div></div>
+    }
+    <div>
+      <div style="font-size:9px;color:#475569;font-family:'JetBrains Mono',monospace;letter-spacing:.1em;margin-bottom:2px;">NOTIFICAÇÕES</div>
+      @if (task.condition_sql) {
+        <span title="Notificações sempre ativas em tarefas com condição de threshold" style="font-size:12px;color:#fbbf24;cursor:default;">🔔 sim</span>
+      } @else {
+        <button
+          (click)="toggleNotify()"
+          [disabled]="notifyBusy()"
+          [title]="task.notify ? 'Desativar notificações' : 'Ativar notificações'"
+          [style.color]="task.notify ? '#fbbf24' : '#475569'"
+          style="background:none;border:none;padding:0;cursor:pointer;font-size:12px;"
+        >
+          {{ task.notify ? '🔔 sim' : '🔕 não' }}
+        </button>
+      }
+    </div>
+    @if (task.condition_sql) {
+      <div style="grid-column:1/-1;">
+        <div style="font-size:9px;color:#475569;font-family:'JetBrains Mono',monospace;letter-spacing:.1em;margin-bottom:2px;">CONDIÇÃO</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <div style="font-size:11px;color:#818cf8;font-family:'JetBrains Mono',monospace;">{{ conditionLabel() }}</div>
+          <span
+            [style.background]="task.condition_state ? '#fecaca' : '#e2e8f0'"
+            [style.color]="task.condition_state ? '#dc2626' : '#475569'"
+            style="font-size:10px;font-family:'JetBrains Mono',monospace;padding:1px 6px;border-radius:4px;"
+          >
+            {{ task.condition_state ? '● ativa' : '○ aguardando' }}
+          </span>
+        </div>
+      </div>
+    }
+    @if (task.email) {
+      <div style="grid-column:1/-1;">
+        <div style="font-size:9px;color:#475569;font-family:'JetBrains Mono',monospace;letter-spacing:.1em;margin-bottom:2px;">EMAIL</div>
+        <div style="font-size:12px;color:#94a3b8;word-break:break-all;">{{ task.email }}</div>
+      </div>
+    }
+  </div>
+
+  <div style="font-size:11px;color:#475569;line-height:1.5;border-top:1px solid #e2e8f0;padding-top:8px;word-break:break-word;">{{ task.description }}</div>
+
+  @if (task.runs?.length) {
+    <div style="margin-top:10px;border-top:1px solid #e2e8f0;padding-top:8px;">
+      <div style="font-size:9px;color:#475569;font-family:'JetBrains Mono',monospace;letter-spacing:.1em;margin-bottom:6px;">ÚLTIMAS EXECUÇÕES</div>
+      <div style="max-height:160px;overflow-y:auto;">
+        @for (r of task.runs; track $index) {
+          <div style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #e2e8f0;">
+            <span
+              [style.background]="runDotColor(r.status)"
+              [style.animation]="r.status === 'running' ? 'pulse 1.6s ease-in-out infinite' : 'none'"
+              style="display:inline-block;width:7px;height:7px;border-radius:50%;flex-shrink:0;margin-top:3px;"
+            ></span>
+            <div style="flex:1;min-width:0;">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <span style="font-size:11px;color:#64748b;font-family:'JetBrains Mono',monospace;">{{ runTime(r) }}</span>
+                @if (runDuration(r); as dur) {
+                  <span style="font-size:10px;color:#475569;">{{ dur }}</span>
+                }
+                @if (r.status === 'running') {
+                  <span style="font-size:10px;color:#f97316;font-family:'JetBrains Mono',monospace;">em execução…</span>
+                }
+              </div>
+              @if (r.error) {
+                <div (click)="showRunError(r.error)" style="font-size:10px;color:#f87171;margin-top:2px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;">⚠ ver erro ↗</div>
+              }
+            </div>
+          </div>
+        }
+      </div>
+    </div>
+  }
+</div>
