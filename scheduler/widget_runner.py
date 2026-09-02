@@ -143,3 +143,21 @@ def default_test_range() -> tuple[str, str]:
     end   = date.today()
     start = end - timedelta(days=6)
     return start.isoformat(), end.isoformat()
+
+
+RANGE_UNITS = {"days", "months"}
+
+
+def compute_widget_range(range_unit: str, range_value: int) -> tuple[str, str]:
+    """Calcula from_date/to_date a partir do período estruturado salvo no widget.
+
+    Substitui a antiga convenção de o próprio widget_code recalcular o período
+    internamente — from_date/to_date agora sempre refletem o range configurado.
+    """
+    end = date.today()
+    if range_unit == "months":
+        import pandas as pd
+        start = (pd.Timestamp(end) - pd.DateOffset(months=range_value)).date()
+    else:
+        start = end - timedelta(days=range_value)
+    return start.isoformat(), end.isoformat()

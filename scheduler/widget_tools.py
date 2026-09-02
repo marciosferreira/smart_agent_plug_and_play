@@ -14,7 +14,7 @@ from langchain_core.tools import tool
 
 import db_config
 from db import get_db
-from .widget_runner import run_widget_code, default_test_range, WidgetCodeError
+from .widget_runner import run_widget_code, default_test_range, compute_widget_range, RANGE_UNITS, WidgetCodeError
 
 _DOMINIO_CLAUSE = "(dominio = ? OR dominio IS NULL)"
 
@@ -101,7 +101,13 @@ def test_widget_code(title: str, code: str, from_date: str = "", to_date: str = 
 
 
 @tool
-def add_chart_to_dashboard(title: str, description: str, code: str) -> str:
+def add_chart_to_dashboard(
+    title: str,
+    description: str,
+    code: str,
+    range_unit: str = "days",
+    range_value: int = 7,
+) -> str:
     """Adiciona um painel de gráfico customizado e persistente ao dashboard do usuário.
 
     ⚠️  Use SOMENTE quando o usuário pedir EXPLICITAMENTE para ADICIONAR, INSERIR
@@ -115,22 +121,27 @@ def add_chart_to_dashboard(title: str, description: str, code: str) -> str:
     Chart.js {"type": ..., "data": {...}, "options": {...}}.
     Use test_widget_code para validar ANTES de chamar esta tool.
 
-    ⚠️  IMPORTANTE sobre datas: a cada refresh do dashboard, `from_date`/`to_date`
-    recebidos por run() são SEMPRE os últimos 7 dias (janela fixa do dashboard) —
-    NÃO refletem o período que o usuário pediu ao criar o painel.
-    Se o usuário pediu um período diferente (ex: "últimos 3 meses", "últimos 30 dias",
-    "este mês"), o código DEVE calcular seu próprio range internamente a partir de
-    `date.today()` (ex: `pd.Timestamp(date.today()) - pd.DateOffset(months=3)`) e
-    usar esse range na query — ignorando os `from_date`/`to_date` recebidos.
-    Use `from_date`/`to_date` recebidos apenas quando o painel for explicitamente
-    "rolling últimos 7 dias" (o padrão do dashboard).
+    ⚠️  SOBRE DATAS: declare o período pretendido do painel via range_unit/range_value
+    (ex: usuário pediu "últimos 30 dias" → range_unit="days", range_value=30; "últimos
+    3 meses" → range_unit="months", range_value=3). O dashboard calcula from_date/to_date
+    corretamente a partir desses valores a CADA refresh e os passa para run(from_date,
+    to_date, ctx) — o código NÃO deve recalcular ou hardcodar o período sozinho, apenas
+    usar os from_date/to_date recebidos na query.
 
     Args:
         title: Título exibido no painel (ex: "Defeitos por Categoria — Últimos 7 dias").
         description: Descrição curta do que o painel mostra.
-        code: Código Python validado com `def run(from_date, to_date, ctx)`.
+        code: Código Python validado com `def run(from_date, to_date, ctx)`, que usa
+            os from_date/to_date RECEBIDOS (não recalcula o período internamente).
+        range_unit: Unidade do período do painel: "days" ou "months" (padrão: "days").
+        range_value: Quantidade da unidade acima (padrão: 7, ou seja, últimos 7 dias).
     """
-    from_date, to_date = default_test_range()
+    if range_unit not in RANGE_UNITS:
+        return f"❌ range_unit inválido: '{range_unit}'. Use um de: {sorted(RANGE_UNITS)}"
+    if range_value <= 0:
+        return "❌ range_value deve ser um inteiro positivo."
+
+    from_date, to_date = compute_widget_range(range_unit, range_value)
     session_id = f"widget_validate_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
     # Valida antes de salvar
@@ -150,9 +161,11 @@ def add_chart_to_dashboard(title: str, description: str, code: str) -> str:
 
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO dashboard_widgets (id, title, description, code, created_at, user_id, dominio) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (widget_id, title, description, code, now, user_id, db_config.dominio_filename()),
+            "INSERT INTO dashboard_widgets "
+            "(id, title, description, code, created_at, user_id, dominio, range_unit, range_value) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (widget_id, title, description, code, now, user_id, db_config.dominio_filename(),
+             range_unit, range_value),
         )
         conn.commit()
 
@@ -183,13 +196,14 @@ def list_dashboard_widgets() -> str:
 def _resolve_widget(conn, widget_id: str):
     """Retorna a row do widget aceitando ID completo ou prefixo de 8 chars."""
     dominio = db_config.dominio_filename()
+    cols = "id, title, description, code, range_unit, range_value"
     if len(widget_id) <= 8:
         return conn.execute(
-            f"SELECT id, title, description, code FROM dashboard_widgets WHERE id LIKE ? AND {_DOMINIO_CLAUSE}",
+            f"SELECT {cols} FROM dashboard_widgets WHERE id LIKE ? AND {_DOMINIO_CLAUSE}",
             (widget_id + "%", dominio),
         ).fetchone()
     return conn.execute(
-        f"SELECT id, title, description, code FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}",
+        f"SELECT {cols} FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}",
         (widget_id, dominio),
     ).fetchone()
 
@@ -210,34 +224,54 @@ def get_widget_code(widget_id: str) -> str:
         return f"Painel '{widget_id}' não encontrado."
     return (
         f"**Painel:** {row['title']}\n"
-        f"**ID:** `{row['id']}`\n\n"
+        f"**ID:** `{row['id']}`\n"
+        f"**Período:** últimos {row['range_value']} {row['range_unit']}\n\n"
         f"```python\n{row['code']}\n```"
     )
 
 
 @tool
-def update_widget(widget_id: str, code: str, title: str = "", description: str = "") -> str:
-    """Atualiza o código (e opcionalmente título/descrição) de um painel existente.
+def update_widget(
+    widget_id: str,
+    code: str,
+    title: str = "",
+    description: str = "",
+    range_unit: str = "",
+    range_value: int = 0,
+) -> str:
+    """Atualiza o código (e opcionalmente título/descrição/período) de um painel existente.
 
     Fluxo correto para editar um painel:
     1. list_dashboard_widgets → obter o ID
-    2. get_widget_code → ler o código atual
+    2. get_widget_code → ler o código atual (mostra o período configurado)
     3. Modificar o código
     4. test_widget_code → validar
     5. update_widget → salvar e atualizar no dashboard
 
-    ⚠️  Mesma regra de datas do add_chart_to_dashboard: `from_date`/`to_date`
-    recebidos por run() são sempre os últimos 7 dias. Para períodos fixos
-    diferentes (ex: "últimos 3 meses"), calcule o range internamente a partir
-    de `date.today()`.
+    ⚠️  SOBRE DATAS: mesma regra do add_chart_to_dashboard — o código deve usar os
+    from_date/to_date RECEBIDOS por run(), sem recalculá-los. Se o usuário pedir para
+    mudar o período (ex: "de 30 para 90 dias"), passe range_unit/range_value novos;
+    caso contrário deixe-os vazios/zero para manter o período atual do painel.
 
     Args:
         widget_id: ID completo ou primeiros 8 caracteres do ID do painel.
         code: Novo código Python com `def run(from_date, to_date, ctx)`.
         title: Novo título (deixe vazio para manter o atual).
         description: Nova descrição (deixe vazio para manter a atual).
+        range_unit: Nova unidade de período ("days"/"months"); vazio mantém a atual.
+        range_value: Novo valor do período; 0 mantém o atual.
     """
-    from_date, to_date = default_test_range()
+    if range_unit and range_unit not in RANGE_UNITS:
+        return f"❌ range_unit inválido: '{range_unit}'. Use um de: {sorted(RANGE_UNITS)}"
+
+    with get_db() as conn:
+        existing = _resolve_widget(conn, widget_id)
+    if not existing:
+        return f"Painel '{widget_id}' não encontrado."
+
+    final_unit  = range_unit or existing["range_unit"]
+    final_value = range_value or existing["range_value"]
+    from_date, to_date = compute_widget_range(final_unit, final_value)
     session_id = f"widget_validate_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
     try:
@@ -258,8 +292,8 @@ def update_widget(widget_id: str, code: str, title: str = "", description: str =
         new_title = title.strip() or row["title"]
         new_desc  = description.strip() or row["description"]
         conn.execute(
-            "UPDATE dashboard_widgets SET code=?, title=?, description=? WHERE id=?",
-            (code, new_title, new_desc, full_id),
+            "UPDATE dashboard_widgets SET code=?, title=?, description=?, range_unit=?, range_value=? WHERE id=?",
+            (code, new_title, new_desc, final_unit, final_value, full_id),
         )
         conn.commit()
 

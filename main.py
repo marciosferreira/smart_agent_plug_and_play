@@ -739,7 +739,7 @@ def get_dashboard_widgets(user_id: str = Query(default=None)):
     dominio = db_config.dominio_filename()
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id, title, description, created_at FROM dashboard_widgets "
+            "SELECT id, title, description, created_at, range_unit, range_value FROM dashboard_widgets "
             f"WHERE {_USER_CLAUSE} AND {_DOMINIO_CLAUSE} ORDER BY created_at ASC",
             (user_id, dominio),
         ).fetchall()
@@ -749,18 +749,18 @@ def get_dashboard_widgets(user_id: str = Query(default=None)):
 @app.get("/dashboard-widgets/{widget_id}/data")
 def get_dashboard_widget_data(widget_id: str):
     """Re-executa o widget_code e retorna a configuração Chart.js atualizada."""
-    from scheduler.widget_runner import run_widget_code, default_test_range, WidgetCodeError
+    from scheduler.widget_runner import run_widget_code, compute_widget_range, WidgetCodeError
     from datetime import datetime as _dt
 
     with get_db() as conn:
         row = conn.execute(
-            f"SELECT code FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}",
+            f"SELECT code, range_unit, range_value FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}",
             (widget_id, db_config.dominio_filename()),
         ).fetchone()
     if not row:
         return JSONResponse(status_code=404, content={"error": True, "message": "Painel não encontrado."})
 
-    from_date, to_date = default_test_range()
+    from_date, to_date = compute_widget_range(row["range_unit"], row["range_value"])
     session_id = f"widget_{widget_id[:8]}_{_dt.now().strftime('%Y%m%d%H%M%S')}"
     try:
         config = run_widget_code(row["code"], from_date, to_date, session_id)

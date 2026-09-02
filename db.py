@@ -129,9 +129,13 @@ def migrate_db():
                 code        TEXT    NOT NULL,
                 created_at  TEXT    NOT NULL,
                 user_id     TEXT,
-                dominio     TEXT
+                dominio     TEXT,
+                range_unit  TEXT    NOT NULL DEFAULT 'days',
+                range_value INTEGER NOT NULL DEFAULT 7
             )""",
             "ALTER TABLE dashboard_widgets ADD COLUMN dominio TEXT",
+            "ALTER TABLE dashboard_widgets ADD COLUMN range_unit TEXT NOT NULL DEFAULT 'days'",
+            "ALTER TABLE dashboard_widgets ADD COLUMN range_value INTEGER NOT NULL DEFAULT 7",
             # auditoria de erros durante geração/correção de task_code
             """CREATE TABLE IF NOT EXISTS task_code_audit (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -346,6 +350,8 @@ def init_db():
             );
 
             -- Painéis de gráfico customizados criados sob demanda pelo agente
+            -- range_unit/range_value: período pretendido do painel (ex: 30 dias, 6 meses),
+            -- usado para calcular from_date/to_date corretos a cada refresh (não hardcoded no code).
             CREATE TABLE IF NOT EXISTS dashboard_widgets (
                 id          TEXT    PRIMARY KEY,
                 title       TEXT    NOT NULL,
@@ -353,7 +359,9 @@ def init_db():
                 code        TEXT    NOT NULL,
                 created_at  TEXT    NOT NULL,
                 user_id     TEXT,
-                dominio     TEXT
+                dominio     TEXT,
+                range_unit  TEXT    NOT NULL DEFAULT 'days',
+                range_value INTEGER NOT NULL DEFAULT 7
             );
 
             -- Histórico de modelos por linha (qual modelo cada linha estava produzindo)

@@ -1271,7 +1271,9 @@ async function loadCustomWidgets() {
               <circle cx="4" cy="9" r="1.2" fill="currentColor"/>
               <circle cx="8" cy="9" r="1.2" fill="currentColor"/>
             </svg>
-            <span class="card-title" style="flex:1;font-size:12px;font-weight:600;color:#1e293b;letter-spacing:.02em;">${_escHtml(w.title)}</span>
+            <span class="card-title" style="flex:1;font-size:12px;font-weight:600;color:#1e293b;letter-spacing:.02em;">${_escHtml(w.title)}
+              <span style="font-weight:400;color:#94a3b8;font-size:10px;margin-left:6px;">últimos ${w.range_value} ${w.range_unit === 'months' ? 'meses' : 'dias'}</span>
+            </span>
             <button onclick="removeWidget('${w.id}')" title="Remover painel"
               style="background:none;border:none;cursor:pointer;color:#475569;font-size:16px;line-height:1;padding:2px 4px;">&times;</button>
           </div>

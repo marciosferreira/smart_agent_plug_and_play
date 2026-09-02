@@ -278,6 +278,75 @@ O mesmo padrão se aplica a PDFs gerados por `gerar_pdf()` e a planilhas geradas
 
 ---
 
+## Painéis customizados do dashboard — JSON gerado em sandbox, nunca persistido
+
+Este fluxo é fácil de confundir com o de "Gráficos, PDFs e Excels" acima, mas é um mecanismo **diferente**: um gráfico de chat é uma imagem PNG estática; um painel fixado no dashboard (seção "Painéis Customizados") é recalculado a cada refresh, e **o que fica salvo no banco não é o gráfico, é o código-fonte que o gera**.
+
+Não existe HTML gerado pelo agente em nenhum dos dois casos — o `<canvas>` do painel já existe fixo no `dashboard.html`; o agente só produz configuração de dados.
+
+### O que é salvo (`dashboard_widgets` em `mfg.db`)
+
+```sql
+CREATE TABLE dashboard_widgets (
+    id           TEXT PRIMARY KEY,
+    title        TEXT NOT NULL,
+    description  TEXT,
+    code         TEXT NOT NULL,   -- código-fonte Python, NÃO o gráfico renderizado
+    created_at   TEXT NOT NULL,
+    user_id      TEXT,
+    dominio      TEXT,
+    range_unit   TEXT NOT NULL DEFAULT 'days',   -- período pretendido: 'days' | 'months'
+    range_value  INTEGER NOT NULL DEFAULT 7
+);
+```
+
+A coluna `code` guarda uma função Python (`def run(from_date, to_date, ctx): ...`) escrita pelo LLM — nunca o JSON Chart.js pronto, nunca uma imagem. `range_unit`/`range_value` guardam o período que o usuário pediu ao criar o painel (ex: "últimos 30 dias", "últimos 3 meses") como dado estruturado, não embutido no código.
+
+### Onde o JSON é gerado — sandbox, sob demanda, a cada refresh
+
+```text
+Criação/edição do painel (via chat, uma única vez)
+  Usuário: "adiciona ao dashboard as vendas por produto dos últimos 30 dias"
+    └── LLM escreve code = "def run(from_date, to_date, ctx): ..."
+          └── test_widget_code(code)              → valida em sandbox (scheduler/widget_runner.py)
+          └── add_chart_to_dashboard(code, range_unit="days", range_value=30)
+                └── valida de novo e faz INSERT em dashboard_widgets
+
+Refresh do dashboard (toda vez que a página carrega ou o usuário clica "Atualizar")
+  dashboard.html → GET /dashboard-widgets/{id}/data
+    └── main.py lê a coluna `code` + range_unit/range_value do banco
+          └── compute_widget_range(range_unit, range_value)   → calcula from_date/to_date
+                a partir de date.today() NAQUELE INSTANTE (scheduler/widget_runner.py)
+          └── run_widget_code(code, from_date, to_date, session_id)
+                └── exec() do `code` num sandbox restrito (mesmo padrão do task runner):
+                      imports bloqueados exceto pandas/numpy/datetime/etc,
+                      variáveis pré-injetadas: pd, np, ctx, from_date, to_date, date, datetime, timedelta
+                └── run(from_date, to_date, ctx) executa queries reais (ctx.sql/ctx.api)
+                      contra o banco de domínio NAQUELE INSTANTE
+                └── retorna um dict Chart.js validado: {"type", "data": {"labels","datasets"}, "options"?}
+    └── response JSON volta para o browser (nunca é gravado de volta no banco)
+```
+
+Esse JSON é **efêmero**: existe só na resposta HTTP daquela requisição. Não há tabela nem cache que guarde o resultado — a próxima chamada a `/dashboard-widgets/{id}/data` reexecuta tudo do zero.
+
+### Onde e como o front renderiza — Chart.js client-side, sem HTML injetado
+
+`dashboard.html` mantém um `<canvas id="wcanvas-{widget_id}">` fixo por painel. Ao receber o JSON do passo acima, o JavaScript instancia a lib **Chart.js** (`static/chart.umd.min.js`) diretamente sobre esse canvas:
+
+```js
+new Chart(canvas, { type: config.type, data: config.data, options: {...} });
+```
+
+Não há `innerHTML`/`dangerouslySetInnerHTML` de gráfico, nem iframe — é renderização nativa via `<canvas>` 2D. `loadCustomWidgets()` busca a lista de painéis (`GET /dashboard-widgets`) e, para cada um, chama `_renderWidget(id)` — que é o trecho acima. Eventos SSE (`widget_added`, `widget_updated`, `widget_deleted`, ver [Streaming SSE](#streaming-sse--a-interface-que-pensa-em-voz-alta)) disparam esse mesmo recarregamento automaticamente quando o agente cria/edita/remove um painel durante uma conversa — sem precisar dar F5.
+
+**⚠️ Fonte comum de confusão:** existe sim um `card.innerHTML = ...` em `dashboard.html`, na função que monta o card de cada painel — e esse HTML **contém** o `<canvas>` (`<div class="card-head">...<canvas id="wcanvas-${w.id}"></canvas>...`). É fácil, numa leitura rápida, ver `innerHTML` bem ao lado de `canvas`/`chart` e concluir que "o gráfico é injetado como HTML". Não é: esse `innerHTML` roda **uma única vez**, quando o card é criado, e monta só a casca estática vazia (título, botão de remover, moldura do canvas — sem nenhum dado). O gráfico em si só existe depois, quando `new Chart(canvas, config)` desenha sobre esse canvas já existente a partir do JSON vindo do backend. São dois passos desacoplados e sequenciais — construir a casca HTML do card, depois desenhar os dados no canvas — não a mesma operação.
+
+### Regra crítica sobre datas — por que `range_unit`/`range_value` existem
+
+Antes de existirem essas duas colunas, `from_date`/`to_date` eram sempre calculados como "hoje − 7 dias" fixo, e o único jeito de um painel mostrar um período diferente era o próprio `code` recalcular a data internamente (`date.today() - timedelta(...)`), ignorando os parâmetros recebidos — uma convenção sustentada só por instrução de prompt, sem garantia estrutural. Isso ainda funciona (o LLM foi instruído a seguir o padrão), mas o comportamento correto e a fonte de verdade agora são `range_unit`/`range_value`: o backend calcula `from_date`/`to_date` certos a partir deles antes de chamar `run()`, e o `code` gerado deve apenas usar o que recebeu — não recalcular nada.
+
+---
+
 ## Referência de rotas HTTP
 
 Toda a API vive num único `FastAPI` (`main.py`), sem prefixo/versionamento (`/chat`, não `/api/v1/chat`). Rotas que isolam dado por usuário aceitam `user_id` como **query param opcional** — ver [Identidade do usuário](#identidade-do-usuário-user_id--como-é-coletada-e-usada) para a semântica de quando ele falta.
