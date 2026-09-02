@@ -73,7 +73,7 @@ O sistema **não implementa login**. Ele é pensado para ser embutido (iframe/em
 ```text
 App host (já autenticado)
   └── carrega a página com ?user_id=<id-do-usuário-no-host>
-        └── dashboard.html lê o parâmetro na URL (new URLSearchParams(location.search))
+        └── UserSessionService (Angular) lê o parâmetro na URL (new URLSearchParams(location.search))
               ├── se presente → sobrescreve o valor salvo em localStorage (fonte da verdade é sempre o host)
               └── se ausente  → usa o valor já salvo em localStorage, ou gera um UUID novo (modo standalone/demo)
                     └── persiste em localStorage['mfg_user_id'] para sobreviver a reloads
@@ -110,9 +110,9 @@ Não confundir os dois: `dominio` (ver [Plug-and-play](#plug-and-play--trocar-de
 
 ### Histórico de conversa
 
-O histórico de chat (checkpointer LangGraph) continua isolado por `session_id`, não por `user_id` diretamente — mas o frontend gera `session_id` como `<user_id>_<timestamp>` (`newChat()` em `dashboard.html`), e `/chat/sessions?user_id=...` lista as sessões cujo `thread_id` começa com esse prefixo. Ou seja, a listagem de conversas de um usuário depende da convenção de nomenclatura do `session_id`, enquanto tarefas, painéis, alertas e artefatos usam uma coluna `user_id` real no banco.
+O histórico de chat (checkpointer LangGraph) continua isolado por `session_id`, não por `user_id` diretamente — mas o frontend gera `session_id` como `<user_id>_<timestamp>` (`ChatService.newChat()`, Angular), e `/chat/sessions?user_id=...` lista as sessões cujo `thread_id` começa com esse prefixo. Ou seja, a listagem de conversas de um usuário depende da convenção de nomenclatura do `session_id`, enquanto tarefas, painéis, alertas e artefatos usam uma coluna `user_id` real no banco.
 
-Isso tem uma implicação direta para onde o `session_id` **ativo** fica guardado no browser: a chave de `localStorage` que lembra "qual foi a última conversa aberta" é namespaced por `user_id` (`mfg_session_id::<user_id>`, em `dashboard.html`) — nunca uma chave global única. Sem esse namespacing, trocar o `user_id` na URL (ex: simular um segundo usuário no mesmo browser) continuaria devolvendo a última conversa de *outro* usuário salva naquele mesmo `localStorage`, porque a busca de histórico é por `session_id` e o `session_id` reaproveitado não teria trocado junto. Cada `user_id` mantém assim sua própria sessão ativa lembrada entre reloads, sem vazar para outro usuário do mesmo browser.
+Isso tem uma implicação direta para onde o `session_id` **ativo** fica guardado no browser: a chave de `localStorage` que lembra "qual foi a última conversa aberta" é namespaced por `user_id` (`mfg_session_id::<user_id>`, em `UserSessionService`) — nunca uma chave global única. Sem esse namespacing, trocar o `user_id` na URL (ex: simular um segundo usuário no mesmo browser) continuaria devolvendo a última conversa de *outro* usuário salva naquele mesmo `localStorage`, porque a busca de histórico é por `session_id` e o `session_id` reaproveitado não teria trocado junto. Cada `user_id` mantém assim sua própria sessão ativa lembrada entre reloads, sem vazar para outro usuário do mesmo browser.
 
 ---
 
@@ -212,7 +212,7 @@ O frontend não espera a resposta final. Cada etapa do processo chega em tempo r
 
 O desafio aqui é que o sub-agente roda dentro de um `@tool` do orquestrador — fora do stream principal do LangGraph. A solução é um **side-channel por sessão**: uma `queue.Queue` por `session_id` captura os eventos do sub-agente em tempo real e os entrega ao gerador SSE que está servindo o frontend.
 
-**Importante: SSE é só para o chat.** O resto do dashboard não é push-based — não há WebSocket nem um segundo canal SSE. O sino de alertas 🔔 e o badge da agenda fazem **polling simples via `setInterval` a cada 15s** (`updateAlertsBadge`/`updateAgendaBadge` em `dashboard.html`, GET em `/alerts` e `/tasks`). Os gráficos e KPIs principais do dashboard (produção, OEE, etc.) carregam uma vez no load da página e não se auto-atualizam sozinhos. Um novo desenvolvedor que for adicionar "tempo real" em outra parte do dashboard deve decidir entre reaproveitar esse padrão de polling (simples, já testado) ou abrir um canal push novo — hoje não existe abstração compartilhada para isso além da SSE do chat.
+**Importante: SSE é só para o chat.** O resto do dashboard não é push-based — não há WebSocket nem um segundo canal SSE. O sino de alertas 🔔 e o badge da agenda fazem **polling simples via `setInterval` a cada 15s** (`AlertsService`/`AgendaService`, Angular, GET em `/alerts` e `/tasks`). Os gráficos e KPIs principais do dashboard (produção, OEE, etc.) carregam uma vez no load da página e não se auto-atualizam sozinhos. Um novo desenvolvedor que for adicionar "tempo real" em outra parte do dashboard deve decidir entre reaproveitar esse padrão de polling (simples, já testado) ou abrir um canal push novo — hoje não existe abstração compartilhada para isso além da SSE do chat.
 
 ---
 
@@ -282,7 +282,7 @@ O mesmo padrão se aplica a PDFs gerados por `gerar_pdf()` e a planilhas geradas
 
 Este fluxo é fácil de confundir com o de "Gráficos, PDFs e Excels" acima, mas é um mecanismo **diferente**: um gráfico de chat é uma imagem PNG estática; um painel fixado no dashboard (seção "Painéis Customizados") é recalculado a cada refresh, e **o que fica salvo no banco não é o gráfico, é o código-fonte que o gera**.
 
-Não existe HTML gerado pelo agente em nenhum dos dois casos — o `<canvas>` do painel já existe fixo no `dashboard.html`; o agente só produz configuração de dados.
+Não existe HTML gerado pelo agente em nenhum dos dois casos — o `<canvas>` do painel já existe fixo no `WidgetCardComponent` (Angular); o agente só produz configuração de dados.
 
 ### O que é salvo (`dashboard_widgets` em `mfg.db`)
 
@@ -313,7 +313,7 @@ Criação/edição do painel (via chat, uma única vez)
                 └── valida de novo e faz INSERT em dashboard_widgets
 
 Refresh do dashboard (toda vez que a página carrega ou o usuário clica "Atualizar")
-  dashboard.html → GET /dashboard-widgets/{id}/data
+  WidgetsService (Angular) → GET /dashboard-widgets/{id}/data
     └── main.py lê a coluna `code` + range_unit/range_value do banco
           └── compute_widget_range(range_unit, range_value)   → calcula from_date/to_date
                 a partir de date.today() NAQUELE INSTANTE (scheduler/widget_runner.py)
@@ -331,15 +331,13 @@ Esse JSON é **efêmero**: existe só na resposta HTTP daquela requisição. Nã
 
 ### Onde e como o front renderiza — Chart.js client-side, sem HTML injetado
 
-`dashboard.html` mantém um `<canvas id="wcanvas-{widget_id}">` fixo por painel. Ao receber o JSON do passo acima, o JavaScript instancia a lib **Chart.js** (`static/chart.umd.min.js`) diretamente sobre esse canvas:
+Cada painel é um `WidgetCardComponent` (Angular) com um `<canvas>` no seu template. O ponto não-óbvio: as instâncias do **Chart.js** não pertencem ao componente — elas ficam centralizadas dentro do `WidgetsService` (`frontend/src/app/core/services/widgets.service.ts`), num `Map<widgetId, Chart>`, no mesmo espírito do dict global `_widgetCharts` que existia no `dashboard.html` original. `WidgetCardComponent.ngAfterViewInit()` só registra seu `<canvas>` no serviço (`registerCanvas(id, canvas)`); é o serviço que decide quando criar/recriar/destruir o gráfico:
 
-```js
+```ts
 new Chart(canvas, { type: config.type, data: config.data, options: {...} });
 ```
 
-Não há `innerHTML`/`dangerouslySetInnerHTML` de gráfico, nem iframe — é renderização nativa via `<canvas>` 2D. `loadCustomWidgets()` busca a lista de painéis (`GET /dashboard-widgets`) e, para cada um, chama `_renderWidget(id)` — que é o trecho acima. Eventos SSE (`widget_added`, `widget_updated`, `widget_deleted`, ver [Streaming SSE](#streaming-sse--a-interface-que-pensa-em-voz-alta)) disparam esse mesmo recarregamento automaticamente quando o agente cria/edita/remove um painel durante uma conversa — sem precisar dar F5.
-
-**⚠️ Fonte comum de confusão:** existe sim um `card.innerHTML = ...` em `dashboard.html`, na função que monta o card de cada painel — e esse HTML **contém** o `<canvas>` (`<div class="card-head">...<canvas id="wcanvas-${w.id}"></canvas>...`). É fácil, numa leitura rápida, ver `innerHTML` bem ao lado de `canvas`/`chart` e concluir que "o gráfico é injetado como HTML". Não é: esse `innerHTML` roda **uma única vez**, quando o card é criado, e monta só a casca estática vazia (título, botão de remover, moldura do canvas — sem nenhum dado). O gráfico em si só existe depois, quando `new Chart(canvas, config)` desenha sobre esse canvas já existente a partir do JSON vindo do backend. São dois passos desacoplados e sequenciais — construir a casca HTML do card, depois desenhar os dados no canvas — não a mesma operação.
+Essa centralização existe por um motivo concreto: os eventos SSE do chat (`widget_added`, `widget_updated`, `widget_deleted`, ver [Streaming SSE](#streaming-sse--a-interface-que-pensa-em-voz-alta)) chegam no `ChatService`, que não tem — e não deveria precisar ter — uma referência ao componente visual de um widget específico. Em vez disso, `ChatService` chama `WidgetsService.onWidgetAdded()` / `onWidgetUpdated(id)` / `onWidgetDeleted(id)` diretamente; o serviço recarrega a lista, busca o `/dashboard-widgets/{id}/data` de novo e redesenha (ou destrói) a instância Chart.js correspondente — sem precisar dar F5, e sem o componente precisar "escutar" nada.
 
 ### Regra crítica sobre datas — por que `range_unit`/`range_value` existem
 
@@ -413,8 +411,9 @@ Toda a API vive num único `FastAPI` (`main.py`), sem prefixo/versionamento (`/c
 | Rota | Método | Para que serve |
 | --- | --- | --- |
 | `/app-info` | GET | Nome/descrição do pack de configuração ativo — usado pelo dashboard para branding |
-| `/` | GET | Serve `dashboard.html` (a SPA inteira) |
-| `/static/*` | GET | Assets estáticos (`Chart.js`, `marked.js`, Tailwind, fontes) |
+| `/` | GET | Serve o `index.html` do build Angular (`frontend/dist/frontend/browser/`) — a SPA inteira |
+| `/{arquivo estático do build}` | GET | JS/CSS com hash, `favicon.ico` etc. — mount `StaticFiles` do build Angular, registrado por último para não sombrear as rotas de API acima |
+| `/static/*` | GET | Assets estáticos legados (hoje só `logo.png` é de fato usado pelo header — as demais libs de terceiro do `dashboard.html` antigo, como Chart.js/marked/Tailwind, viraram dependências `npm` do Angular) |
 | `/docs`, `/redoc` | GET | Swagger/Redoc gerados automaticamente pelo FastAPI |
 
 ---
@@ -424,7 +423,7 @@ Toda a API vive num único `FastAPI` (`main.py`), sem prefixo/versionamento (`/c
 Pontos que um novo desenvolvedor precisa saber antes de expor isso além do `localhost`:
 
 - **HTTP puro dentro do container.** O `uvicorn` (ver `Dockerfile`/`run.py`) não termina TLS — ele serve HTTP simples na porta 8000. Em produção (o `Dockerfile` é feito para EasyPanel), HTTPS é responsabilidade da camada na frente do container (reverse proxy/PaaS) — a aplicação em si não sabe nem precisa saber que existe TLS.
-- **CORS totalmente aberto.** `CORSMiddleware` está configurado com `allow_origins=["*"]` (`main.py`) — qualquer origem pode chamar a API. Isso é deliberado para o cenário de embed (o app host pode estar em qualquer domínio), mas significa que restringir origem, se algum dia for necessário, precisa entrar aqui.
+- **CORS totalmente aberto, mas só relevante para consumidores externos.** `CORSMiddleware` está configurado com `allow_origins=["*"]` e `allow_methods=["GET", "POST"]` (`main.py`) — note que `DELETE`/`PUT` não estão liberados. Isso não afeta o dashboard Angular porque ele é servido **same-origin** (o próprio FastAPI serve o `index.html` na raiz — ver [Frontend](#frontend--angular-19-standalone-components)), então suas chamadas `DELETE` nunca passam por preflight de CORS. Só importa se algum dia um cliente rodando em outra origem precisar chamar essas rotas.
 - **Sem autenticação na API.** Não há API key, JWT nem sessão de servidor — nenhuma rota valida quem está fazendo a chamada. O único controle de acesso é a separação de dados por `user_id` (ver [Identidade do usuário](#identidade-do-usuário-user_id--como-é-coletada-e-usada)), e esse `user_id` é um query param em texto puro, não assinado — qualquer cliente que descubra/adivinhe o `user_id` de outra pessoa consegue ler os dados dela. O modelo de segurança inteiro depende do app host controlar quem recebe qual `user_id`.
 
 ---
@@ -452,6 +451,7 @@ A combinação desses elementos resolve os problemas reais de quem quer colocar 
 ### Pré-requisitos
 
 - Python 3.11+ (o projeto usa `langgraph`/`langchain` atuais — ver `requirements.txt`)
+- Node.js 20+ e npm, para o frontend Angular (ver [Frontend](#frontend--angular-19-standalone-components))
 - Um projeto Google Cloud com Vertex AI habilitado, se for usar o chat IA (`PROJECT_ID`)
 
 ### Setup
@@ -462,6 +462,8 @@ venv\Scripts\activate          # Windows
 source venv/bin/activate       # Linux/Mac
 
 pip install -r requirements.txt
+
+cd frontend && npm install && cd ..
 ```
 
 ### Configurar o pack de domínio
@@ -486,22 +488,71 @@ Ver [Plug-and-play](#plug-and-play--trocar-de-banco-e-domínio-sem-mexer-em-cód
 
 ### Rodar
 
+**Desenvolvimento** (dois processos em paralelo, cada um no seu terminal):
+
 ```bash
-python run.py
+python run.py            # backend — http://localhost:8000
 # equivalente a: uvicorn main:app --reload --host 0.0.0.0
+
+cd frontend && npm start # frontend — http://localhost:4200, com proxy para o backend acima
 ```
 
-Servidor sobe em `http://localhost:8000`. Docs automáticas do FastAPI em `/docs` (Swagger) e `/redoc`.
+Acesse `http://localhost:4200` durante o desenvolvimento — é o Angular com hot-reload. `http://localhost:8000` sozinho só serve o frontend se `npm run build` já tiver sido rodado (ver [Frontend](#frontend--angular-19-standalone-components)).
+
+**"Produção local"** (um único processo, caminho igual ao do Docker):
+
+```bash
+cd frontend && npm run build && cd ..
+python run.py
+```
+
+Acesse `http://localhost:8000` — o próprio FastAPI serve o Angular já compilado. Docs automáticas do FastAPI em `/docs` (Swagger) e `/redoc`.
 
 Na primeira execução, `db.py` cria e semeia `mfg.db` (dados de demo de manufatura) se ele ainda não existir — isso é independente do banco de domínio configurado em `config/`.
 
 ---
 
-## Frontend — SPA estática, sem build
+## Frontend — Angular 19, standalone components
 
-`dashboard.html` é a aplicação inteira: um único arquivo (~3500 linhas) com HTML + CSS + JavaScript vanilla, servido diretamente pelo FastAPI na rota `/`. Não há framework (React/Vue/etc.), não há bundler, não há transpilação — editar o arquivo e recarregar a página já reflete a mudança. As bibliotecas de terceiro (`Chart.js`, `marked.js`, `html-to-image`, Tailwind) ficam como arquivos estáticos em `static/`, sem gerenciador de pacotes JS (`npm`/`package.json` não existem no projeto).
+O frontend vive em `frontend/` (workspace Angular separado do backend Python) e é uma SPA sem rotas — não há Angular Router, porque não existe hoje nenhuma view endereçável por URL: tudo é painel/slide-over/modal sobre uma única tela, exatamente como no `dashboard.html` que ela substituiu. Standalone components (padrão do Angular 19, sem `NgModule`) e **signals** no lugar de `RxJS`/`Observable` para todo o estado local — a única exceção é `ChatStreamService`, que envolve o `EventSource` do SSE num `Observable` porque é o formato que a API do browser expõe.
 
-Identidade (`_userId`) e sessão (`_sessionId`) vivem em variáveis globais de módulo no topo do `<script>`, persistidas em `localStorage` — ver [Identidade do usuário](#identidade-do-usuário-user_id--como-é-coletada-e-usada). Um novo desenvolvedor que for além de ajustes pontuais deve considerar se vale a pena quebrar esse arquivo em módulos antes de crescer mais.
+```text
+frontend/src/app/
+  core/services/      # UserSessionService, ChatService, AlertsService, AgendaService,
+                       # ArtifactsService, WidgetsService, ChatStreamService, ...
+  core/models/         # interfaces TypeScript dos payloads da API
+  shared/components/   # modais reaproveitados entre features (ChartModal, TaskCodeModal, ...)
+  features/            # chat/, header/, agenda/, alerts/, audit/, artifacts/, widgets/
+  app.component.ts      # shell: header + painéis + grid de widgets + chat sidebar
+```
+
+Cada `feature` segue o mesmo padrão: um `*Service` (`providedIn: 'root'`, injetável, dono do estado e das chamadas HTTP) e um ou mais componentes "burros" que só leem signals do serviço e disparam métodos nele — nenhum componente chama `HttpClient` diretamente.
+
+Identidade (`UserSessionService.userId`) e sessão (`UserSessionService.sessionId`, um `signal`) — ver [Identidade do usuário](#identidade-do-usuário-user_id--como-é-coletada-e-usada) — persistem em `localStorage`, portados do `dashboard.html` original com o mesmo comportamento: o `?user_id=` do host sempre vence sobre o valor salvo.
+
+### Rodando em desenvolvimento
+
+```bash
+cd frontend
+npm install
+npm start            # = ng serve — sobe em http://localhost:4200
+```
+
+`ng serve` usa `frontend/proxy.conf.json` para redirecionar `/chat`, `/tasks`, `/alerts`, `/artifacts`, `/dashboard-widgets`, `/static`, etc. para o backend FastAPI local (`http://localhost:8000`, precisa estar rodando via `python run.py` em paralelo). Isso torna o dev server **same-origin** do ponto de vista do browser — sem isso, chamadas `DELETE` esbarrariam no `allow_methods=["GET", "POST"]` do CORS (ver [Transporte, CORS e autenticação](#transporte-cors-e-autenticação)).
+
+### Build de produção e como o FastAPI serve o resultado
+
+```bash
+cd frontend
+npm run build         # = ng build — gera frontend/dist/frontend/browser/
+```
+
+Em produção, `main.py` **não roda o Angular** — ele só serve os arquivos estáticos já compilados:
+
+- `GET /` devolve `frontend/dist/frontend/browser/index.html` (`FileResponse`)
+- Um `StaticFiles` é montado em `/` para os demais arquivos do build (JS/CSS com hash, `favicon.ico`) — **registrado por último no arquivo**, depois de todas as rotas de API, para que o Starlette resolva as rotas explícitas (`/chat`, `/tasks`, etc.) antes de cair no mount
+
+Isso significa: **rodar `python run.py` sem antes rodar `npm run build` serve uma tela em branco** (o backend loga um warning e a rota `/` devolve um `index.html` inexistente). O `Dockerfile` cuida disso automaticamente com um estágio `node:20-slim` que roda `npm ci && npm run build` antes do estágio Python final, que só copia o resultado (`frontend/dist/frontend/browser/`) — a imagem final não tem Node, só o build já pronto.
 
 ---
 
@@ -525,6 +576,7 @@ Hoje o deploy de referência (`Dockerfile`) sobe um único processo (`uvicorn ma
 - **LLM**: Gemini 2.5 Flash (Google Vertex AI)
 - **Orquestração**: LangGraph 1.0+ (StateGraph, ToolNode, SqliteSaver)
 - **API**: FastAPI + SSE (sse-starlette)
+- **Frontend**: Angular 19 (standalone components, signals), Chart.js, marked, html-to-image — ver [Frontend](#frontend--angular-19-standalone-components)
 - **Análise**: Python / Pandas / Matplotlib — sandbox via `exec()` em namespace isolado
 - **Persistência**: SQLite (histórico de conversa + gráficos + PDFs na mesma base)
 - **Threading**: `contextvars.ContextVar` para isolamento de sessão através de thread pools

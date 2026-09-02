@@ -34,7 +34,10 @@ except ImportError:
 import json
 import threading
 from sse_starlette.sse import EventSourceResponse
-from agent_multi import init_multi_agent, invoke_multi_agent, is_multi_agent_ready, stream_multi_agent, set_chart_snapshot, ns_cleanup_loop
+from agent_multi import (
+    init_multi_agent, invoke_multi_agent, is_multi_agent_ready, stream_multi_agent,
+    set_chart_snapshot, ns_cleanup_loop, _extract_thinking, _extract_text_content, _TOOL_LABELS,
+)
 from scheduler.daemon import scheduler_loop, _execute_task
 import chart_store as cs
 
@@ -367,17 +370,39 @@ async def chat_history(session_id: str = "default"):
             return []
         from langchain_core.messages import HumanMessage, AIMessage
         result = []
+        pending_thinking: list[dict] = []
         for msg in state.get("channel_values", {}).get("messages", []):
             if isinstance(msg, HumanMessage):
                 content = msg.content
                 if isinstance(content, list):
                     content = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+                pending_thinking = []
                 result.append({"role": "user", "content": content or ""})
             elif isinstance(msg, AIMessage):
-                content = msg.content
-                if isinstance(content, list):
-                    content = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
-                result.append({"role": "assistant", "content": _embed_charts(content)})
+                thought = _extract_thinking(msg)
+                if thought:
+                    pending_thinking.append({"text": thought, "isTool": False})
+
+                tool_calls = getattr(msg, "tool_calls", None) or []
+                if tool_calls:
+                    # AIMessage intermediária (chamou tool) — vira etapa de "pensamento",
+                    # nunca um balão de resposta próprio (era a causa do bug: cada uma
+                    # dessas mensagens virava um balão separado ao recarregar o histórico).
+                    pre_text = _extract_text_content(msg)
+                    if pre_text:
+                        pending_thinking.append({"text": pre_text, "isTool": False})
+                    for tc in tool_calls:
+                        name = tc.get("name", "")
+                        label = _TOOL_LABELS.get(name, f"⚙ {name}")
+                        pending_thinking.append({"text": label, "isTool": True})
+                    continue
+
+                final_text = _extract_text_content(msg)
+                entry: dict = {"role": "assistant", "content": _embed_charts(final_text)}
+                if pending_thinking:
+                    entry["thinking"] = pending_thinking
+                    pending_thinking = []
+                result.append(entry)
         return result
     except Exception:
         return []
@@ -505,10 +530,12 @@ async def transcribe_audio(audio: UploadFile = File(...)):
 
 # ── raiz ──────────────────────────────────────────────────────────────────────
 
+FRONTEND_DIST = Path(__file__).parent / "frontend" / "dist" / "frontend" / "browser"
+
+
 @app.get("/")
 def root():
-    html = Path(__file__).parent / "dashboard.html"
-    return FileResponse(html, media_type="text/html")
+    return FileResponse(FRONTEND_DIST / "index.html", media_type="text/html")
 
 
 # ── agenda ────────────────────────────────────────────────────────────────────
@@ -867,5 +894,14 @@ def delete_alert(alert_id: str, user_id: str = Query(default=None)):
     if not ok:
         return JSONResponse(status_code=404, content={"error": True, "message": "Alerta não encontrado."})
     return {"ok": True}
+
+
+# ── assets do build Angular ─────────────────────────────────────────────────
+# Registrado por último para que nenhuma rota de API acima seja sombreada —
+# o Starlette resolve rotas explícitas antes de considerar um mount.
+if FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST), name="frontend")
+else:
+    logger.warning("Build do Angular não encontrado em %s — rode 'npm run build' em frontend/.", FRONTEND_DIST)
 
 

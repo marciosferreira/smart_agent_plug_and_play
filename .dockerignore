@@ -27,3 +27,7 @@ Thumbs.db
 # Git
 .git/
 .gitignore
+
+# Frontend — reconstruído no estágio Node do Dockerfile
+frontend/node_modules/
+frontend/dist/

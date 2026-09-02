@@ -1,3 +1,14 @@
+FROM node:20-slim AS frontend-build
+
+WORKDIR /app/frontend
+
+COPY frontend/package*.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -15,6 +26,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copia o código
 COPY . .
+
+# Build do frontend Angular, gerado no estágio anterior
+COPY --from=frontend-build /app/frontend/dist/frontend/browser ./frontend/dist/frontend/browser
 
 # Diretório para o banco SQLite e credentials — monte um volume aqui no EasyPanel
 RUN mkdir -p /data
