@@ -24,6 +24,7 @@ def _build_globals(ctx: TaskContext, from_date: str, to_date: str) -> dict:
     import matplotlib.pyplot as plt
     import matplotlib.ticker as mticker
     import matplotlib.dates as mdates
+    import seaborn as sns
     import numpy as np
     import pandas as pd
     import openpyxl
@@ -57,7 +58,7 @@ def _build_globals(ctx: TaskContext, from_date: str, to_date: str) -> dict:
         raise ImportError(
             f"Import de '{name}' não é permitido dentro do run(). "
             "Use as variáveis já disponíveis no namespace: "
-            "pd, np, plt, date, datetime, timedelta, time, math, json, re, openpyxl, ctx, etc."
+            "pd, np, plt, sns, date, datetime, timedelta, time, math, json, re, openpyxl, ctx, etc."
         )
 
     safe_builtins = {
@@ -96,6 +97,7 @@ def _build_globals(ctx: TaskContext, from_date: str, to_date: str) -> dict:
         "plt":     plt,
         "mticker": mticker,
         "mdates":  mdates,
+        "sns":     sns,
         # numpy / pandas
         "np":  np,
         "pd":  pd,
@@ -151,7 +153,7 @@ def run_task_code(code: str, from_date: str, to_date: str, session_id: str, user
             "O task_code contém imports, que são bloqueados no sandbox:\n"
             + "\n".join(f"  {ln}" for ln in _import_lines)
             + "\n\nRemova essas linhas — as seguintes variáveis já estão disponíveis:\n"
-            "  pd, np, plt, mticker, date, datetime, timedelta, time, math, json, re,\n"
+            "  pd, np, plt, sns, mticker, date, datetime, timedelta, time, math, json, re,\n"
             "  Counter, defaultdict, openpyxl, Font, PatternFill, Alignment, Border, Side,\n"
             "  get_column_letter, ctx, from_date, to_date"
         )

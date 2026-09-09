@@ -45,6 +45,7 @@ df = pd.DataFrame(rows)
 | `pd` | pandas |
 | `np` | numpy |
 | `plt` | matplotlib.pyplot |
+| `sns` | seaborn |
 | `mticker` | matplotlib.ticker |
 | `mdates` | matplotlib.dates — use `mdates.DateFormatter('%d/%m')` para formatar eixo de datas |
 | `openpyxl` | openpyxl (módulo) |

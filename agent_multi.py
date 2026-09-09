@@ -133,11 +133,12 @@ def _tlog(tool: str, event: str, **kwargs) -> None:
 import matplotlib
 matplotlib.use("Agg")  # backend sem display — obrigatório em servidor
 import matplotlib.pyplot as plt
+import seaborn as sns
 import numpy as np
 import pandas as pd
 from scipy import stats as scipy_stats
 
-_BUILTINS_SKIP = {"pd", "np", "plt", "stats", "__builtins__", "__doc__", "__name__",
+_BUILTINS_SKIP = {"pd", "np", "plt", "sns", "stats", "__builtins__", "__doc__", "__name__",
                   "__package__", "__spec__", "__loader__", "__import__", "__build_class__"}
 
 _namespaces: dict = {}       # session → namespace dict
@@ -150,7 +151,7 @@ def _ns_get() -> dict:
     session = _current_session.get()
     with _ns_lock:
         if session not in _namespaces:
-            _namespaces[session] = {"pd": pd, "np": np, "plt": plt, "stats": scipy_stats}
+            _namespaces[session] = {"pd": pd, "np": np, "plt": plt, "sns": sns, "stats": scipy_stats}
         _ns_last_access[session] = datetime.now()
         return _namespaces[session]
 
@@ -1788,7 +1789,7 @@ def _build_scheduler_agent(llm):
         "  Todos os métodos de geração/salvamento retornam tokens '[tipo:uuid]' e os\n"
         "  acumulam internamente. A função run() pode retorná-los ou deixar o ctx acumulá-los.\n\n"
         "  BIBLIOTECAS DISPONÍVEIS NO NAMESPACE (NÃO use import dentro do run()):\n"
-        "  pd, np, plt, mticker, date, datetime, timedelta,\n"
+        "  pd, np, plt, sns, mticker, date, datetime, timedelta,\n"
         "  openpyxl, Font, PatternFill, Alignment, Border, Side, get_column_letter\n"
         "  O sandbox bloqueia __import__ — qualquer `import` dentro do run() causa erro.\n\n"
         "## Salvar task_code recebido do orquestrador\n"

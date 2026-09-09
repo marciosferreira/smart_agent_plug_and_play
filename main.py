@@ -107,7 +107,7 @@ def _init_vertex():
         load_dotenv()
         project    = os.getenv("PROJECT_ID")
         location   = os.getenv("LOCATION", "us-central1")
-        model_name = os.getenv("MODEL_NAME", "gemini-2.5-flash")
+        model_name = os.getenv("MODEL_NAME", "gemini-3.8-flash")
         if not project:
             logger.warning("PROJECT_ID não definido — chat IA desabilitado")
             return
@@ -502,7 +502,7 @@ async def transcribe_audio(audio: UploadFile = File(...)):
 
     project    = os.getenv("PROJECT_ID", "")
     location   = os.getenv("LOCATION", "us-central1")
-    model_name = os.getenv("MODEL_NAME", "gemini-2.0-flash-001")
+    model_name = os.getenv("MODEL_NAME", "gemini-3.8-flash")
 
     audio_bytes = await audio.read()
     mime_type   = audio.content_type or "audio/webm"

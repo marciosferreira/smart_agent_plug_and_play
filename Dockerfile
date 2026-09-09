@@ -37,7 +37,7 @@ RUN mkdir -p /data
 ENV DB_PATH=/data/mfg.db \
     GOOGLE_APPLICATION_CREDENTIALS=/data/credentials.json \
     LOCATION=us-central1 \
-    MODEL_NAME=gemini-2.5-flash \
+    MODEL_NAME=gemini-3.8-flash \
     BACKEND_URL=http://localhost:8000 \
     MAX_INTERACOES=10 \
     DEBUG_TOOLS=0
