@@ -64,6 +64,12 @@ def _settings() -> dict:
         return {}
 
 
+def _interpolar_env(texto: str) -> str:
+    """Substitui ${VAR} pelo valor da variável de ambiente correspondente —
+    segredos nunca precisam estar escritos no arquivo do pack."""
+    return re.sub(r"\$\{(\w+)\}", lambda m: os.getenv(m.group(1), ""), texto)
+
+
 def _database_url() -> "str | None":
     env_url = os.getenv("DATABASE_URL")
     if env_url:
@@ -71,13 +77,62 @@ def _database_url() -> "str | None":
     url = (_settings().get("database") or {}).get("url")
     if not url:
         return None
-    # Interpola ${VAR} do ambiente — senhas nunca precisam estar no arquivo do pack
-    url = re.sub(r"\$\{(\w+)\}", lambda m: os.getenv(m.group(1), ""), url)
+    url = _interpolar_env(url)
     # sqlite relativo → resolvido contra a raiz do projeto
     m = re.match(r"^sqlite:///(?!/)(.+)$", url)
     if m:
         url = f"sqlite:///{(_RAIZ / m.group(1)).as_posix()}"
     return url
+
+
+_MODOS_VALIDOS = ("sql", "graphql")
+
+
+def modo_acesso() -> str:
+    """Método de acesso ao banco do domínio ativo: 'sql' ou 'graphql'.
+
+    Definido em database.modo no settings.yml. Cada domínio usa só um dos
+    dois — nunca ambos ao mesmo tempo. Default: 'sql' (mantém o comportamento
+    original para packs que não declaram o campo).
+    """
+    modo = (_settings().get("database") or {}).get("modo") or "sql"
+    return modo if modo in _MODOS_VALIDOS else "sql"
+
+
+def graphql_config() -> "dict | None":
+    """URL + credenciais do endpoint GraphQL do domínio ativo, ou None se não configurado.
+
+    Dois esquemas de autenticação suportados (cada domínio usa só um):
+      - token:   enviado como header Authorization: Bearer <token> (ex: posh)
+      - api_key: enviado como header X-API-Key: <api_key> (ex: new_age)
+    """
+    bloco = _settings().get("graphql") or {}
+    url = bloco.get("url")
+    token = bloco.get("token")
+    api_key = bloco.get("api_key")
+    if not url or not (token or api_key):
+        return None
+    cfg = {"url": url}
+    if token:
+        cfg["token"] = _interpolar_env(token)
+    if api_key:
+        cfg["api_key"] = _interpolar_env(api_key)
+    return cfg
+
+
+def mes_inicio_fiscal() -> int:
+    """Mês (1-12) em que o ano fiscal do domínio ativo começa — usado por
+    calcular_periodo para resolver 'este/próximo/último quarter'. Default: 1
+    (janeiro, ou seja trimestre civil — comportamento original para domínios que
+    não declaram o campo). Domínios com ano fiscal diferente (ex: abril) declaram
+    `app.mes_inicio_fiscal` em settings.yml.
+    """
+    mes = (_settings().get("app") or {}).get("mes_inicio_fiscal")
+    try:
+        mes = int(mes)
+    except (TypeError, ValueError):
+        return 1
+    return mes if 1 <= mes <= 12 else 1
 
 
 def app_nome() -> str:
@@ -98,7 +153,11 @@ def dominio_filename() -> str:
 
 
 def is_configured() -> bool:
-    return _database_url() is not None and (CONFIG_DIR / dominio_filename()).exists()
+    if not (CONFIG_DIR / dominio_filename()).exists():
+        return False
+    if modo_acesso() == "graphql":
+        return graphql_config() is not None
+    return _database_url() is not None
 
 
 # ── Engine SQLAlchemy (singleton lazy) ────────────────────────────────────────

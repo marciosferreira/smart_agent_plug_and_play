@@ -12,13 +12,15 @@ Arquitetura:
        ├─ get_current_datetime()     → responde data/hora direto
        └─ consultar_analista(detalhes) → delega ao sub-agente
               └─ Sub-agente analista (StateGraph)
-                    ├─ read_skill(filename)        → lê instruções do arquivo .md
-                    ├─ executar_sql(query, chave)  → SQL no banco configurado
-                    └─ analisar_dataframe(script)  → sandbox Python/Pandas
+                    ├─ read_skill(filename)          → lê instruções do arquivo .md
+                    ├─ executar_sql/executar_graphql  → busca dados (uma das duas,
+                    │                                   conforme database.modo em
+                    │                                   config/settings.yml)
+                    └─ analisar_dataframe(script)     → sandbox Python/Pandas
 
 Fluxo do sub-agente por análise:
   1. read_skill('dominio.md') → descobre o schema do banco configurado
-  2. executar_sql(query, chave) → busca dados e injeta DataFrame no ambiente
+  2. executar_sql ou executar_graphql → busca dados e injeta DataFrame no ambiente
   3. analisar_dataframe(script) → processa com pandas, retorna resultado formatado
 """
 
@@ -66,6 +68,7 @@ logger = logging.getLogger(__name__)
 
 from db import DB_PATH, tag_session_dominio
 import db_config
+import graphql_config
 
 SKILLS_FOLDER = Path(__file__).parent / "skills"
 SKILL_HEADER_LINES = 4
@@ -278,7 +281,9 @@ _eq_lock = threading.Lock()
 _TOOL_LABELS: dict[str, str] = {
     "read_skill":              "📖 Lendo instruções da skill",
     "calcular_periodo":        "📅 Calculando período",
-    "executar_sql":            "🗄️ Consultando banco de dados",
+    "executar_sql":            "🗄️ Consultando banco de dados (SQL)",
+    "executar_graphql":        "🗄️ Consultando banco de dados (GraphQL)",
+    "executar_graphql_agregado": "🗄️ Consultando banco de dados (GraphQL, agregado)",
     "analisar_dataframe":      "🔢 Processando e analisando dados",
     "consultar_analista":      "🔍 Delegando ao sub-agente analista",
     "rag_dominio":             "📚 Consultando base de conhecimento (domínio)",
@@ -811,8 +816,8 @@ def read_skill(filename: str) -> str:
     """Lê as instruções completas de uma skill antes de executar qualquer análise.
 
     OBRIGATÓRIO: chame esta tool SEMPRE como primeiro passo de qualquer análise,
-    antes de executar_sql ou analisar_dataframe. A skill define quais
-    tabelas usar, quais colunas existem e como processar os dados.
+    antes de executar_sql/executar_graphql ou analisar_dataframe. A skill define
+    quais tabelas usar, quais colunas existem e como processar os dados.
 
     Args:
         filename: Nome do arquivo .md da skill (ex: 'dominio.md').
@@ -884,10 +889,145 @@ def executar_sql(query: str, chave: str) -> str:
 
 
 @tool
+def executar_graphql(
+    table: str,
+    chave: str,
+    where: "list[dict] | None" = None,
+    order_by: "dict | None" = None,
+    limit: "int | None" = None,
+    offset: "int | None" = None,
+    expand: "list[dict] | None" = None,
+) -> str:
+    """Busca linhas de uma tabela via GraphQL (reportTable) e injeta o resultado como
+    DataFrame no ambiente.
+
+    O schema real (tabelas, colunas e regras) está na skill 'dominio.md' — leia-a ANTES
+    de chamar esta tool. Retorna linhas cruas de UMA tabela por vez. `expand` permite
+    juntar colunas de UMA tabela relacionada (join de um salto só) na mesma chamada —
+    para combinar mais de duas tabelas, ou tabelas sem FK direta entre si, chame esta
+    tool mais de uma vez e junte os DataFrames em analisar_dataframe.
+
+    Args:
+        table: nome da tabela a consultar.
+        chave: nome da variável no ambiente onde o DataFrame será armazenado.
+        where: lista de condições combinadas com AND, ex:
+            [{"field": "status", "op": "EQ", "value": "open"},
+             {"field": "created_at", "op": "GTE", "value": "2026-01-01"}]
+            Operadores válidos: EQ, NEQ, GT, GTE, LT, LTE, IN, NOT_IN, LIKE, ILIKE,
+            IS_NULL, IS_NOT_NULL.
+        order_by: ex: {"field": "created_at", "direction": "DESC"}.
+        limit: máximo de linhas a retornar.
+        offset: quantas linhas pular (paginação, junto com limit).
+        expand: lista de joins de um salto, ex:
+            [{"viaColumn": "customer_id", "columns": ["name", "channel"]}]
+            `viaColumn` tem que ser uma foreign key de `table` (ver Grafo de relações
+            na skill). As colunas pedidas vêm em cada linha prefixadas
+            "viaColumn__coluna" (ex: "customer_id__name") — não precisa de merge
+            em pandas depois para esse caso.
+    """
+    _tlog("executar_graphql", "CHAMADA", table=table, chave=chave, where=where, order_by=order_by, limit=limit, offset=offset, expand=expand)
+
+    if not db_config.is_configured():
+        msg = db_config.MSG_NAO_CONFIGURADO
+        _tlog("executar_graphql", "RETORNO", status="ERRO", erro=msg)
+        return msg
+
+    try:
+        rows = graphql_config.run_query_table(table, where=where, order_by=order_by, limit=limit, offset=offset, expand=expand)
+        df = pd.DataFrame(rows)
+        ns = _ns_get()
+        ns[chave] = df
+        msg = (
+            f"DataFrame '{chave}' injetado no ambiente: {len(df)} linhas, "
+            f"colunas: {list(df.columns)}."
+        )
+        _tlog("executar_graphql", "RETORNO", status="OK", linhas=len(df), colunas=list(df.columns))
+    except Exception as e:
+        msg = f"Erro ao executar GraphQL: {e}"
+        _tlog("executar_graphql", "RETORNO", status="ERRO", erro=msg)
+        return msg
+
+    return msg + _ns_summary(ns)
+
+
+@tool
+def executar_graphql_agregado(
+    table: str,
+    chave: str,
+    group_by: str,
+    metric_field: str,
+    metric_op: str,
+    where: "list[dict] | None" = None,
+    expand: "list[str] | None" = None,
+    order_by: "str | None" = None,
+    limit: "int | None" = None,
+) -> str:
+    """Agrega uma tabela via GraphQL (reportAggregate — GROUP BY + SUM/COUNT/AVG/MIN/MAX
+    calculados no banco) e injeta o resultado como DataFrame no ambiente.
+
+    Use esta tool em vez de executar_graphql + pandas quando o pedido é uma contagem,
+    soma, média, mínimo ou máximo agrupado por uma coluna — evita trazer a tabela
+    inteira (que pode ser grande) só para agregar depois em Python.
+
+    O schema real (tabelas, colunas e regras) está na skill 'dominio.md' — leia-a ANTES
+    de chamar esta tool.
+
+    Args:
+        table: nome da tabela a agregar.
+        chave: nome da variável no ambiente onde o DataFrame será armazenado.
+        group_by: coluna de `table` para agrupar (GROUP BY).
+        metric_field: coluna de `table` a agregar.
+        metric_op: SUM, COUNT, AVG, MIN ou MAX.
+        where: mesmo formato de executar_graphql — filtra ANTES de agregar.
+        expand: lista de nomes de coluna de OUTRA tabela a trazer junto — só funciona
+            se `group_by` for uma foreign key (ex: group_by="customer_id",
+            expand=["name", "channel"] traz customer.name e customer.channel prontos
+            em cada linha, sem precisar de merge em pandas depois). Não confundir com
+            join de múltiplos saltos — só alcança a tabela referenciada diretamente
+            por `group_by`.
+        order_by: "ASC" ou "DESC" — ordena pelo valor agregado. Default do servidor: DESC.
+        limit: máximo de grupos a retornar. Default do servidor: 20, teto: 500.
+
+    O DataFrame resultante tem as colunas "groupKey" (valor de group_by), "metricValue"
+    (resultado da agregação) e uma por coluna pedida em `expand`.
+    """
+    _tlog(
+        "executar_graphql_agregado", "CHAMADA",
+        table=table, chave=chave, group_by=group_by, metric_field=metric_field,
+        metric_op=metric_op, where=where, expand=expand, order_by=order_by, limit=limit,
+    )
+
+    if not db_config.is_configured():
+        msg = db_config.MSG_NAO_CONFIGURADO
+        _tlog("executar_graphql_agregado", "RETORNO", status="ERRO", erro=msg)
+        return msg
+
+    try:
+        rows = graphql_config.run_aggregate(
+            table, group_by=group_by, metric_field=metric_field, metric_op=metric_op,
+            where=where, expand=expand, order_by=order_by, limit=limit,
+        )
+        df = pd.DataFrame(rows)
+        ns = _ns_get()
+        ns[chave] = df
+        msg = (
+            f"DataFrame '{chave}' injetado no ambiente: {len(df)} linhas, "
+            f"colunas: {list(df.columns)}."
+        )
+        _tlog("executar_graphql_agregado", "RETORNO", status="OK", linhas=len(df), colunas=list(df.columns))
+    except Exception as e:
+        msg = f"Erro ao executar GraphQL (agregado): {e}"
+        _tlog("executar_graphql_agregado", "RETORNO", status="ERRO", erro=msg)
+        return msg
+
+    return msg + _ns_summary(ns)
+
+
+@tool
 def analisar_dataframe(script: str) -> str:
     """Processa e analisa os dados disponíveis no ambiente, retornando o resultado formatado.
 
-    Variáveis carregadas por executar_sql estão disponíveis pelo nome da chave.
+    Variáveis carregadas por executar_sql/executar_graphql estão disponíveis pelo nome da chave.
     Variáveis criadas em chamadas anteriores desta tool também estão disponíveis.
     Atribua à variável `result` o que deve ser exibido — DataFrames são automaticamente
     convertidos para tabela markdown. Use print() para textos adicionais.
@@ -1006,7 +1146,9 @@ def calcular_periodo(periodo: str) -> str:
             'hoje', 'ontem', 'esta semana', 'semana passada',
             'ultimos 7 dias', 'ultimos 14 dias', 'ultimos 30 dias',
             'ultimos 3 meses', 'ultimas 2 semanas',
-            'este mes', 'mes passado', 'este quarter', 'proximo quarter',
+            'este mes', 'mes passado', 'este quarter', 'proximo quarter', 'ultimo quarter',
+            'quarter passado', 'trimestre anterior', 'este ano', 'ano passado', 'ultimo ano',
+            'proximo ano', 'todo o periodo', 'historico completo', 'desde o inicio',
             rótulos de período definidos pelo domínio configurado (ex: 'FQ1'),
             'maio de 2026', 'maio/2026', '05/2026' (mês/ano específico),
             '01/05/2026 a 31/05/2026', '2026-05-01 to 2026-05-31' (range explícito).
@@ -1022,6 +1164,19 @@ def calcular_periodo(periodo: str) -> str:
     if snap:
         result = f"from={snap[0]}&to={snap[1]}"
         _tlog("calcular_periodo", "RETORNO", status="OK", result=result, origem="config")
+        return result
+
+    # 2º passo: "todo o período" e sinônimos — o orquestrador é instruído por vários
+    # dominio_*.md (inclusive o template) a usar essa frase como padrão quando o usuário
+    # não menciona período nenhum. Em domínios com modo: sql e '## Períodos' preenchido,
+    # o passo acima já resolveu isso com o range real dos dados. Aqui é o fallback para
+    # quando isso não existe (ex: modo: graphql sem database.url) — sem este bloco, a
+    # frase caía no "não reconhecido" abaixo e forçava o agente a tentar de novo com um
+    # range arbitrário (ex: 'ultimos 12 meses'), o que pode SUBESTIMAR silenciosamente
+    # totais de "todo o período" em vez de simplesmente errar de forma visível.
+    if re.search(r"todo o per[ií]odo|hist[oó]rico completo|desde o in[ií]cio", p):
+        result = f"from=2000-01-01&to={hoje.isoformat()}"
+        _tlog("calcular_periodo", "RETORNO", status="OK", result=result, origem="fallback_todo_periodo")
         return result
 
     if p in ("hoje", "today"):
@@ -1043,19 +1198,56 @@ def calcular_periodo(periodo: str) -> str:
         to = primeiro_deste - timedelta(days=1)
         frm = to.replace(day=1)
     elif re.search(r"quarter|trimestre", p):
-        # Fallback: quarter de calendário (pack sem entrada de períodos ou banco indisponível)
+        # Fallback: quarter fiscal do domínio (pack sem entrada de períodos ou banco
+        # indisponível). Mês de início do ano fiscal vem de db_config.mes_inicio_fiscal()
+        # (default 1 = janeiro, ou seja trimestre civil) — configurável por domínio em
+        # settings.yml (app.mes_inicio_fiscal), sem precisar mexer neste código.
         is_next = bool(re.search(r"pr[oó]xim|seguinte|que vem|vindouro|next", p))
-        q_start_month = ((hoje.month - 1) // 3) * 3 + 1
-        q_year = hoje.year
-        if is_next:
-            q_start_month += 3
-            if q_start_month > 12:
-                q_start_month, q_year = q_start_month - 12, q_year + 1
-        frm = date(q_year, q_start_month, 1)
-        end_month, end_year = q_start_month + 3, q_year
+        is_prev = bool(re.search(r"passad|anterior|[uú]ltim|last|previous", p))
+        fm = db_config.mes_inicio_fiscal()
+
+        # Quarter fiscal corrente: acha em que ano civil o ano fiscal atual começou,
+        # depois quantos meses (0-11) se passaram desde esse início — isso dá o índice
+        # do quarter (0-3) e seu mês de início, já no ano civil certo.
+        fiscal_start_year = hoje.year if hoje.month >= fm else hoje.year - 1
+        pos = (hoje.month - fm) % 12
+        q_start_month = fm + (pos // 3) * 3
+        q_start_year = fiscal_start_year
+        if q_start_month > 12:
+            q_start_month -= 12
+            q_start_year += 1
+
+        # Desloca para o quarter anterior/próximo, se pedido (aritmética em meses
+        # absolutos evita bugs de virada de ano nos dois sentidos).
+        shift = 1 if is_next else (-1 if is_prev else 0)
+        total_months = (q_start_month - 1) + shift * 3
+        q_start_year += total_months // 12
+        q_start_month = total_months % 12 + 1
+
+        frm = date(q_start_year, q_start_month, 1)
+        end_month, end_year = q_start_month + 3, q_start_year
         if end_month > 12:
             end_month, end_year = end_month - 12, end_year + 1
         to = date(end_year, end_month, 1) - timedelta(days=1)
+    elif re.search(r"\bano\b|\byear\b", p):
+        # Fallback: ano fiscal do domínio (mesma fonte de mes_inicio_fiscal do quarter
+        # acima) — cobre 'este ano', 'ano passado'/'ultimo ano', 'proximo ano'. Sem esta
+        # entrada, essas frases caíam no fallback genérico abaixo e retornavam erro
+        # ("não reconhecido"), obrigando o agente a tentar de novo com 'ultimos N meses'.
+        is_next = bool(re.search(r"pr[oó]xim|seguinte|que vem|vindouro|next", p))
+        is_prev = bool(re.search(r"passad|anterior|[uú]ltim|last|previous", p))
+        fm = db_config.mes_inicio_fiscal()
+        fiscal_start_year = hoje.year if hoje.month >= fm else hoje.year - 1
+
+        if is_prev:
+            frm = date(fiscal_start_year - 1, fm, 1)
+            to = date(fiscal_start_year, fm, 1) - timedelta(days=1)
+        elif is_next:
+            frm = date(fiscal_start_year + 1, fm, 1)
+            to = date(fiscal_start_year + 2, fm, 1) - timedelta(days=1)
+        else:
+            frm = date(fiscal_start_year, fm, 1)
+            to = hoje
     else:
         import calendar
 
@@ -1175,6 +1367,11 @@ def _montar_catalogo_skills() -> str:
 def _build_sub_agent(llm):
     catalogo = _montar_catalogo_skills()
 
+    modo = db_config.modo_acesso()
+    tool_dados = executar_sql if modo == "sql" else executar_graphql
+    nome_tool_dados = tool_dados.name
+    tools_extras = [executar_graphql_agregado] if modo == "graphql" else []
+
     hoje = datetime.now().strftime("%d/%m/%Y")
     ident = db_config.identidade()
     regras_dominio = db_config.get_secao("Regras do agente")
@@ -1189,11 +1386,11 @@ def _build_sub_agent(llm):
         f"{ident['nome']} — {ident['descricao']}\n\n"
         "## Fluxo OBRIGATÓRIO — sem exceção\n"
         "Para QUALQUER pedido de análise, siga exatamente estes passos:\n\n"
-        "  1. ⛔ PRIMEIRO E OBRIGATÓRIO: chame read_skill('dominio.md').\n"
-        "     NUNCA chame executar_sql ou analisar_dataframe antes de ler a skill.\n"
+        f"  1. ⛔ PRIMEIRO E OBRIGATÓRIO: chame read_skill('dominio.md').\n"
+        f"     NUNCA chame {nome_tool_dados} ou analisar_dataframe antes de ler a skill.\n"
         "     Motivo: a skill é a única fonte dos nomes reais de tabelas e colunas do banco.\n"
-        "     Sem lê-la, você inventará nomes que não existem e o SQL vai falhar.\n\n"
-        "  2. Após ler a skill, siga o fluxo que ela define (executar_sql).\n\n"
+        f"     Sem lê-la, você inventará nomes que não existem e a consulta vai falhar.\n\n"
+        f"  2. Após ler a skill, siga o fluxo que ela define ({nome_tool_dados}).\n\n"
         "  3. Chame analisar_dataframe() para processar os dados e obter o resultado.\n"
         "     - Você pode chamar analisar_dataframe() várias vezes para análises em etapas.\n"
         "     - Variáveis criadas em chamadas anteriores continuam disponíveis.\n\n"
@@ -1212,6 +1409,16 @@ def _build_sub_agent(llm):
         "mais, agregue num nível acima ou mostre o top-N e informe o total restante.\n\n"
         "## Regras\n"
         "- NUNCA invente dados — use apenas resultados de analisar_dataframe.\n"
+        "  Isso vale mesmo DENTRO do script passado para analisar_dataframe: nunca escreva um "
+        "  script que declare valores fabricados/simulados (ex: `custos = [98.5, 101.2, ...]` "
+        "  digitados por você) para preencher um gráfico ou tabela — todo valor exibido tem que "
+        "  vir de uma variável populada por executar_sql/executar_graphql. Isso vale MESMO que o "
+        "  tipo de saída obrigatório seja GRAFICO e o filtro pedido não tenha retornado nenhuma "
+        "  linha real: nesse caso, ignore a obrigatoriedade do gráfico, NÃO simule uma série para "
+        "  cumprir o formato, e responda em texto/tabela dizendo que não há dado real para esse "
+        "  filtro — mostre o que existe de mais próximo (outro site/produto/período com dado real), "
+        "  se ajudar o usuário, mas deixe claro que é um dado diferente do pedido, nunca uma projeção "
+        "  ou simulação do que o pedido teria dado.\n"
         "- Se analisar_dataframe retornar erro, corrija e chame novamente.\n"
         "- Formate SEMPRE a resposta final em markdown: tabelas para dados tabulares, "
         "**negrito** para valores relevantes.\n"
@@ -1224,6 +1431,9 @@ def _build_sub_agent(llm):
         "`plt.setp(ax.get_xticklabels(), rotation=45, ha='right')`. "
         "NUNCA passe `ha=` dentro de `ax.tick_params()` — esse parâmetro não existe lá e causa TypeError.\n"
         "- TIPO DE SAÍDA: a mensagem pode começar com um prefixo `[TIPO DE SAÍDA OBRIGATÓRIO: X]`.\n"
+        "  ⚠️ Essa obrigatoriedade de formato NUNCA justifica inventar/simular dados — se a consulta "
+        "  não trouxe nenhuma linha real para o filtro pedido, essa regra de formato deixa de valer: "
+        "  responda em texto explicando a ausência de dado, não force um gráfico ou tabela fictícia.\n"
         "  - GRAFICO → `result = fig` (figura matplotlib). NUNCA retorne tabela quando tipo=GRAFICO.\n"
         "  - TABELA  → `result = df`. Mencione na resposta final o nome da variável DataFrame\n"
         "    ex: 'DataFrame `producao` disponível no namespace com 30 linhas.'\n"
@@ -1288,7 +1498,7 @@ def _build_sub_agent(llm):
         "NUNCA emita uma tool call sem texto explicativo."
     )
 
-    sub_tools = [read_skill, executar_sql, analisar_dataframe, gerar_pdf, gerar_excel]
+    sub_tools = [read_skill, tool_dados, *tools_extras, analisar_dataframe, gerar_pdf, gerar_excel]
     llm_sub = llm.bind_tools(sub_tools)
     no_sub_tools = ToolNode(sub_tools)
 
@@ -1302,7 +1512,7 @@ def _build_sub_agent(llm):
                 "Os scripts abaixo foram executados em análises anteriores desta conversa.",
                 "Se o pedido atual for uma modificação de um desses gráficos/análises, use o "
                 "script correspondente como base — chame apenas analisar_dataframe() com o "
-                "script modificado, sem refazer read_skill nem executar_sql.\n",
+                f"script modificado, sem refazer read_skill nem {nome_tool_dados}.\n",
             ]
             for i, entry in enumerate(history, 1):
                 lines.append(f"### Script {i} — pedido: \"{entry['query']}\"")
@@ -1327,7 +1537,7 @@ def _build_sub_agent(llm):
             response = _AI(content=(
                 "Erro interno: o modelo tentou computar datas em código Python em vez de "
                 "chamar a tool `calcular_periodo`. Use calcular_periodo() para obter as "
-                f"datas before/after e depois chame executar_sql normalmente.\n\n"
+                f"datas before/after e depois chame {nome_tool_dados} normalmente.\n\n"
                 f"Tentativa inválida capturada:\n```\n{bad}\n```"
             ))
 
@@ -1772,6 +1982,7 @@ def _build_scheduling_graph(llm):
         _push({"type": "tool", "name": "consultar_analista", "label": "🔍 Consultando dados reais"})
 
         hoje = datetime.now().date().isoformat()
+        nome_tool_dados = "executar_sql" if db_config.modo_acesso() == "sql" else "executar_graphql"
 
         msg_content = (
             f"[PARA_AGENDAMENTO — FASE 1: COLETA DE CONTEXTO]\n"
@@ -1779,11 +1990,11 @@ def _build_scheduling_graph(llm):
             f"Pedido do usuário: {state['user_request']}\n\n"
             f"Sua tarefa nesta fase:\n"
             f"1. Chame read_skill() para identificar a skill correta para este pedido.\n"
-            f"2. Chame executar_sql() para buscar dados reais do período acima.\n"
+            f"2. Chame {nome_tool_dados}() para buscar dados reais do período acima.\n"
             f"3. Chame analisar_dataframe() para observar colunas e valores.\n"
             f"4. Retorne um relatório de contexto com EXATAMENTE este formato:\n\n"
             f"SKILL: <nome do arquivo .md usado>\n"
-            f"QUERY: <SQL SELECT completa usada na chamada executar_sql>\n"
+            f"QUERY: <consulta completa usada na chamada {nome_tool_dados}>\n"
             f"COLUNAS: <lista das colunas relevantes do dataframe>\n"
             f"AMOSTRA: <3-5 linhas representativas do dataframe em formato texto>\n"
             f"TIPO_SAIDA: <PDF_COM_GRAFICO | GRAFICO | EXCEL | MONITOR>\n\n"

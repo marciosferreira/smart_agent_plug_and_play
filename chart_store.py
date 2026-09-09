@@ -36,7 +36,8 @@ def init_chart_store(db_path: Path) -> None:
             session_id TEXT NOT NULL,
             png_blob   BLOB NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            user_id    TEXT
+            user_id    TEXT,
+            dominio    TEXT
         )
     """)
     _conn.execute("""
@@ -46,7 +47,8 @@ def init_chart_store(db_path: Path) -> None:
             pdf_blob   BLOB NOT NULL,
             filename   TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            user_id    TEXT
+            user_id    TEXT,
+            dominio    TEXT
         )
     """)
     _conn.execute("""
@@ -56,7 +58,8 @@ def init_chart_store(db_path: Path) -> None:
             excel_blob BLOB NOT NULL,
             filename   TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            user_id    TEXT
+            user_id    TEXT,
+            dominio    TEXT
         )
     """)
     # Migração best-effort para bancos existentes (colunas já criadas são ignoradas)
@@ -64,6 +67,9 @@ def init_chart_store(db_path: Path) -> None:
         "ALTER TABLE charts ADD COLUMN user_id TEXT",
         "ALTER TABLE pdfs ADD COLUMN user_id TEXT",
         "ALTER TABLE excels ADD COLUMN user_id TEXT",
+        "ALTER TABLE charts ADD COLUMN dominio TEXT",
+        "ALTER TABLE pdfs ADD COLUMN dominio TEXT",
+        "ALTER TABLE excels ADD COLUMN dominio TEXT",
     ):
         try:
             _conn.execute(stmt)
@@ -95,8 +101,8 @@ def save_chart(session_id: str, png_bytes: bytes, user_id: str | None = None) ->
     chart_id = str(uuid.uuid4())
     with _lock:
         _conn.execute(
-            "INSERT INTO charts (chart_id, session_id, png_blob, created_at, user_id) VALUES (?, ?, ?, ?, ?)",
-            (chart_id, session_id, png_bytes, _now(), user_id or None),
+            "INSERT INTO charts (chart_id, session_id, png_blob, created_at, user_id, dominio) VALUES (?, ?, ?, ?, ?, ?)",
+            (chart_id, session_id, png_bytes, _now(), user_id or None, db_config.dominio_filename()),
         )
         _conn.commit()
     return chart_id
@@ -108,8 +114,8 @@ def save_pdf(session_id: str, pdf_bytes: bytes, filename: str, user_id: str | No
     pdf_id = str(uuid.uuid4())
     with _lock:
         _conn.execute(
-            "INSERT INTO pdfs (pdf_id, session_id, pdf_blob, filename, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?)",
-            (pdf_id, session_id, pdf_bytes, filename, _now(), user_id or None),
+            "INSERT INTO pdfs (pdf_id, session_id, pdf_blob, filename, created_at, user_id, dominio) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (pdf_id, session_id, pdf_bytes, filename, _now(), user_id or None, db_config.dominio_filename()),
         )
         _conn.commit()
     return pdf_id
@@ -160,8 +166,8 @@ def save_excel(session_id: str, excel_bytes: bytes, filename: str, user_id: str 
     excel_id = str(uuid.uuid4())
     with _lock:
         _conn.execute(
-            "INSERT INTO excels (excel_id, session_id, excel_blob, filename, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?)",
-            (excel_id, session_id, excel_bytes, filename, _now(), user_id or None),
+            "INSERT INTO excels (excel_id, session_id, excel_blob, filename, created_at, user_id, dominio) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (excel_id, session_id, excel_bytes, filename, _now(), user_id or None, db_config.dominio_filename()),
         )
         _conn.commit()
     return excel_id
@@ -180,36 +186,34 @@ def get_excel(excel_id: str) -> tuple[bytes, str] | None:
 
 
 def list_artifacts(user_id: str | None = None) -> list[dict]:
-    """Retorna artefatos ordenados por data desc.
+    """Retorna artefatos do domínio ativo, ordenados por data desc.
 
     Gráficos de sessões que também produziram um PDF são omitidos — eles já
     estão embutidos no PDF e não precisam aparecer como item separado.
 
-    Filtra por user_id quando informado (aceita também registros antigos com
-    user_id NULL, gerados antes da separação por usuário).
+    Sempre filtra pelo domínio ativo (aceita também registros antigos com
+    dominio NULL, gerados antes dessa separação). Filtra por user_id também
+    quando informado (mesma regra: aceita registros antigos com user_id NULL).
     """
     if _conn is None:
         return []
-    user_clause = " WHERE (user_id = ? OR user_id IS NULL)"
-    params = (user_id,)
+    dominio = db_config.dominio_filename()
+    dominio_clause = "(dominio = ? OR dominio IS NULL)"
+    user_clause = " AND (user_id = ? OR user_id IS NULL)"
+    where = " WHERE " + dominio_clause + (user_clause if user_id else "")
+    params = (dominio, user_id) if user_id else (dominio,)
     with _lock:
         charts = _conn.execute(
-            "SELECT chart_id, session_id, created_at FROM charts"
-            + (user_clause if user_id else "")
-            + " ORDER BY created_at DESC",
-            params if user_id else (),
+            "SELECT chart_id, session_id, created_at FROM charts" + where + " ORDER BY created_at DESC",
+            params,
         ).fetchall()
         pdfs = _conn.execute(
-            "SELECT pdf_id, session_id, filename, created_at FROM pdfs"
-            + (user_clause if user_id else "")
-            + " ORDER BY created_at DESC",
-            params if user_id else (),
+            "SELECT pdf_id, session_id, filename, created_at FROM pdfs" + where + " ORDER BY created_at DESC",
+            params,
         ).fetchall()
         excels = _conn.execute(
-            "SELECT excel_id, session_id, filename, created_at FROM excels"
-            + (user_clause if user_id else "")
-            + " ORDER BY created_at DESC",
-            params if user_id else (),
+            "SELECT excel_id, session_id, filename, created_at FROM excels" + where + " ORDER BY created_at DESC",
+            params,
         ).fetchall()
 
     result = []
@@ -335,10 +339,14 @@ def mark_alert_read(alert_id: str, user_id: str | None = None) -> bool:
 def mark_all_alerts_read(user_id: str | None = None) -> int:
     if _conn is None:
         return 0
+    dominio_clause = "(dominio = ? OR dominio IS NULL)"
+    dominio = db_config.dominio_filename()
     if user_id:
-        sql, params = "UPDATE threshold_alerts SET read=1 WHERE read=0 AND user_id=?", (user_id,)
+        sql = f"UPDATE threshold_alerts SET read=1 WHERE read=0 AND user_id=? AND {dominio_clause}"
+        params = (user_id, dominio)
     else:
-        sql, params = "UPDATE threshold_alerts SET read=1 WHERE read=0", ()
+        sql = f"UPDATE threshold_alerts SET read=1 WHERE read=0 AND {dominio_clause}"
+        params = (dominio,)
     with _lock:
         cur = _conn.execute(sql, params)
         _conn.commit()
@@ -348,10 +356,14 @@ def mark_all_alerts_read(user_id: str | None = None) -> int:
 def delete_all_alerts(user_id: str | None = None) -> int:
     if _conn is None:
         return 0
+    dominio_clause = "(dominio = ? OR dominio IS NULL)"
+    dominio = db_config.dominio_filename()
     if user_id:
-        sql, params = "DELETE FROM threshold_alerts WHERE user_id=?", (user_id,)
+        sql = f"DELETE FROM threshold_alerts WHERE user_id=? AND {dominio_clause}"
+        params = (user_id, dominio)
     else:
-        sql, params = "DELETE FROM threshold_alerts", ()
+        sql = f"DELETE FROM threshold_alerts WHERE {dominio_clause}"
+        params = (dominio,)
     with _lock:
         cur = _conn.execute(sql, params)
         _conn.commit()

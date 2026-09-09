@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import db_config
+
 DB_PATH = Path(os.getenv("DB_PATH", str(Path(__file__).parent / "mfg.db")))
 
 DAY_NAMES = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
@@ -144,8 +146,10 @@ def migrate_db():
                 phase       TEXT    NOT NULL,
                 error       TEXT    NOT NULL,
                 code        TEXT,
-                created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+                dominio     TEXT
             )""",
+            "ALTER TABLE task_code_audit ADD COLUMN dominio TEXT",
             "CREATE INDEX IF NOT EXISTS idx_tca_task_id ON task_code_audit(task_id)",
             # marca cada sessão de chat com o domínio ativo no primeiro turno
             """CREATE TABLE IF NOT EXISTS session_dominio (
@@ -180,8 +184,8 @@ def log_task_code_error(task_id: str, attempt: int, phase: str, error: str, code
     """Registra um erro de geração/correção de task_code para auditoria."""
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO task_code_audit (task_id, attempt, phase, error, code) VALUES (?,?,?,?,?)",
-            (task_id, attempt, phase, error, code),
+            "INSERT INTO task_code_audit (task_id, attempt, phase, error, code, dominio) VALUES (?,?,?,?,?,?)",
+            (task_id, attempt, phase, error, code, db_config.dominio_filename()),
         )
         conn.commit()
 

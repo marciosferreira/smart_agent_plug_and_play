@@ -2,22 +2,48 @@
 # Trocar o conteúdo desta pasta (settings.yml + dominio.md) re-aponta o sistema
 # para outro banco. Requer restart do app.
 app:
-  nome: "Posh"
+  #nome: "Posh"
   #nome: "Alocation"
+  nome: "New Age"
 
-  descricao: "Plataforma de gestão de pedidos de compra (Brazil Purchase Orders)"
+  #descricao: "Plataforma de gestão de pedidos de compra (Brazil Purchase Orders)"
   #descricao: "Plataforma de gestão de alocação de pedidos (MDSC)"
+  descricao: "Análise de custo de mão de obra direta (DL cost) pago a fábricas contratadas (CMs)"
 
   # Arquivo de domínio ativo dentro desta pasta — troque para alternar de domínio
   # (ex: dominio_alocacao.md volta ao pack de alocação KA + url sqlite:///allocation.db)
-  dominio: "dominio_posh.md"
+  #dominio: "dominio_posh.md"
   #dominio: "dominio_alocacao.md"
+  dominio: "dominio_new_age.md"
+
+  # Mês (1-12) em que o ano fiscal deste domínio começa — usado por calcular_periodo
+  # para resolver "este/próximo/último quarter" no calendário certo. Default (campo
+  # ausente): 1 = janeiro, trimestre civil. New Age usa ano fiscal Motorola/Lenovo
+  # (Abr-Jun=Q1 ... Jan-Mar=Q4) — ver "Calendário fiscal" em dominio_new_age.md.
+  mes_inicio_fiscal: 4
 database:
+  # modo: sql | graphql — qual método de acesso este domínio usa. Cada domínio
+  # usa só um dos dois (nunca os dois ao mesmo tempo) — troca com o próprio
+  # domínio, junto do dominio_*.md correspondente. Default: sql.
+  # sql: consulta direta via database.url (SQLAlchemy).
+  # graphql: via o bloco graphql abaixo.
+  modo: graphql
+
   # Qualquer URL SQLAlchemy. Caminho sqlite relativo é resolvido contra a raiz do projeto.
   # Segredos: use ${VAR} para interpolar variáveis de ambiente
   # (ex: "postgresql://user:${DB_PASS}@host:5432/db"). A env DATABASE_URL, se
   # definida, tem precedência total sobre esta URL.
-  url: "postgresql://postgres:Moto%231234@127.0.0.1:5432/postgres"
+  # Não usada com modo: graphql — mantida comentada como referência.
+  #url: "postgresql://postgres:Moto%231234@127.0.0.1:5432/postgres"
   #url: "sqlite:///allocation.db"
+
+# Necessário porque database.modo é graphql. Cada domínio usa um esquema de
+# autenticação (token → header Authorization: Bearer, ou api_key → header
+# X-API-Key) — nunca os dois ao mesmo tempo. Troque junto com app.dominio acima.
+graphql:
+  #url: "https://uat-dot-posh-back-dot-dataservices-non-prod.appspot.com/graphql"
+  #token: "${GRAPHQL_TOKEN}"
+  url: "https://dev-dot-newage-back-dot-dataservices-non-prod.appspot.com/api/graphql"
+  api_key: "${NEW_AGE_API_KEY}"
 
 

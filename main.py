@@ -604,9 +604,16 @@ def get_task_runs(task_id: str, user_id: str = Query(default=None)):
 
 
 @app.get("/tasks/{task_id}/code-audit")
-def get_task_code_audit(task_id: str):
+def get_task_code_audit(task_id: str, user_id: str = Query(default=None)):
     """Retorna histórico de erros de geração/correção de task_code para auditoria."""
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
+        exists = conn.execute(
+            f"SELECT id FROM scheduled_tasks WHERE id=? AND {_USER_CLAUSE} AND {_DOMINIO_CLAUSE}",
+            (task_id, user_id, dominio),
+        ).fetchone()
+        if not exists:
+            return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
         rows = conn.execute(
             "SELECT id, task_id, attempt, phase, error, code, created_at "
             "FROM task_code_audit WHERE task_id=? ORDER BY created_at DESC",
@@ -617,19 +624,25 @@ def get_task_code_audit(task_id: str):
 
 @app.get("/tasks/code-audit/summary")
 def get_code_audit_summary():
-    """Resumo de erros de geração de código: padrões, módulos bloqueados, frequência."""
+    """Resumo de erros de geração de código do domínio ativo: padrões, módulos bloqueados, frequência."""
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
         rows = conn.execute(
             "SELECT id, task_id, attempt, phase, error, code, created_at "
-            "FROM task_code_audit ORDER BY created_at DESC LIMIT 200"
+            f"FROM task_code_audit WHERE {_DOMINIO_CLAUSE} ORDER BY created_at DESC LIMIT 200",
+            (dominio,),
         ).fetchall()
     return [dict(r) for r in rows]
 
 
 @app.delete("/tasks/code-audit/{audit_id}")
 def delete_code_audit_entry(audit_id: int):
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
-        cur = conn.execute("DELETE FROM task_code_audit WHERE id = ?", (audit_id,))
+        cur = conn.execute(
+            f"DELETE FROM task_code_audit WHERE id = ? AND {_DOMINIO_CLAUSE}",
+            (audit_id, dominio),
+        )
         conn.commit()
     if cur.rowcount == 0:
         return JSONResponse(status_code=404, content={"error": "Entrada não encontrada."})
@@ -638,8 +651,9 @@ def delete_code_audit_entry(audit_id: int):
 
 @app.delete("/tasks/code-audit")
 def delete_all_code_audit():
+    dominio = db_config.dominio_filename()
     with get_db() as conn:
-        conn.execute("DELETE FROM task_code_audit")
+        conn.execute(f"DELETE FROM task_code_audit WHERE {_DOMINIO_CLAUSE}", (dominio,))
         conn.commit()
     return {"ok": True}
 

@@ -44,8 +44,18 @@
   Injetada verbatim no prompt do orquestrador (quem decide se pergunta é deste domínio,
   calcula período e roteia para o analista). Diga em 1-2 frases o que este sistema É
   (para o orquestrador negar assuntos de outros domínios) e confirme que, sem período
-  explícito na pergunta, ele deve assumir "todo o período" e seguir direto — nunca
-  perguntar de volta ao usuário.
+  explícito na pergunta, ele deve assumir um padrão e seguir direto — nunca perguntar
+  de volta ao usuário.
+
+  "todo o período" (abaixo) é o padrão seguro para a maioria dos domínios — calcular_periodo
+  tem um fallback genérico para essa frase (2000-01-01 até hoje) que funciona em QUALQUER
+  domínio, com ou sem '## Períodos'/database.url preenchidos. Se este domínio tem uma noção
+  própria de período "fechado" mais específica (ex: ano fiscal com trimestres, onde o quarter
+  em andamento não deve entrar em totais), troque por algo como calcular_periodo('ultimo
+  quarter') — só funciona bem se o domínio também documentar seu mes_inicio_fiscal em
+  settings.yml (ver comentário lá). Teste com uma pergunta SEM período explícito antes de
+  considerar esta seção pronta — é fácil essa regra nunca disparar durante o desenvolvimento
+  e o bug só aparecer depois, em produção.
 -->
 
 Este é um sistema de <o que é este sistema, em 1 frase> — não é <domínios que NÃO são este,
