@@ -349,6 +349,15 @@ Cada combinação **SITE + PRODUTO + ÁREA** tem sua própria linha do tempo de 
 comece por aqui antes de tentar recompor o cálculo a partir de `fact_hourly_rate` +
 `fact_standard_time` + `fact_dl_discount`.
 
+💡 Por ser pequena, para perguntas de "existe custo de [produto] em [site]?" busque a tabela
+INTEIRA sem filtro logo na primeira chamada (`executar_graphql(table="fact_final_dl_cost",
+expand=[...site, produto...])`, sem `where`) e confirme visualmente se a combinação existe —
+é mais rápido e gasta menos passos da análise do que tentar primeiro filtros específicos por
+ID de produto/site e só recorrer à tabela inteira depois de vários filtros não confirmarem
+nada. Essa ordem (filtro específico → filtro mais amplo → tabela inteira por último) já
+consumiu o orçamento de passos da análise inteira em pelo menos um caso observado, sem sobrar
+passo pra escrever a conclusão.
+
 ### Grafo de relações (para juntar em pandas, não há JOIN no GraphQL)
 
 ```

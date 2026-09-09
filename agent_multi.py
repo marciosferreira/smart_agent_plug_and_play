@@ -42,6 +42,7 @@ import requests as http_requests
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -1419,6 +1420,14 @@ def _build_sub_agent(llm):
         "  filtro — mostre o que existe de mais próximo (outro site/produto/período com dado real), "
         "  se ajudar o usuário, mas deixe claro que é um dado diferente do pedido, nunca uma projeção "
         "  ou simulação do que o pedido teria dado.\n"
+        "- QUANDO PARAR DE INVESTIGAR UM 'NÃO ENCONTRADO': depois de confirmar por ID (não só por "
+        "  nome aproximado) que a combinação pedida (produto/site/período) não existe em NENHUMA "
+        "  tabela relevante, isso já é uma conclusão final e completa — pare de investigar. NÃO amplie "
+        "  o período 'só para garantir', não repita a mesma busca de outra forma, não busque por nome "
+        "  parecido de novo depois de já ter feito isso uma vez. Responda com o que foi encontrado "
+        "  (incluindo o dado real mais próximo, se ajudar) e ENCERRE — continuar investigando um "
+        "  resultado negativo já bem verificado só consome o orçamento de passos da análise sem "
+        "  agregar informação nova, e pode fazer a análise inteira falhar por limite de passos.\n"
         "- Se analisar_dataframe retornar erro, corrija e chame novamente.\n"
         "- Formate SEMPRE a resposta final em markdown: tabelas para dados tabulares, "
         "**negrito** para valores relevantes.\n"
@@ -1632,7 +1641,23 @@ def consultar_analista(detalhes: str, from_date: str, to_date: str, tipo: str = 
     try:
         resultado = _sub_agent_graph.invoke(
             {"messages": [HumanMessage(content=msg_content)]},
-            config={"configurable": {"thread_id": _current_session.get()}, "recursion_limit": 30},
+            # 40, não 30: perguntas que legitimamente precisam checar várias tabelas antes de
+            # confirmar uma ausência (ver regra "QUANDO PARAR DE INVESTIGAR...") podem consumir
+            # ~30 passos só coletando dado, sem sobrar orçamento pra escrever a conclusão.
+            config={"configurable": {"thread_id": _current_session.get()}, "recursion_limit": 40},
+        )
+    except GraphRecursionError:
+        # O sub-agente ficou reverificando/ampliando escopo sem concluir e estourou o limite
+        # de passos — sintoma típico de investigar demais um resultado já negativo (ver regra
+        # "QUANDO PARAR DE INVESTIGAR..." no prompt). Reformular e chamar de novo tende a cair
+        # no mesmo padrão — instrua o orquestrador a NÃO retentar automaticamente.
+        return (
+            "O sub-agente analista excedeu o limite de passos investigando esta análise sem "
+            "concluir (provavelmente por confirmar demais um resultado já negativo). "
+            "NÃO chame consultar_analista de novo para a mesma pergunta — isso tende a repetir "
+            "o mesmo padrão. Informe ao usuário que a consulta era ampla demais ou que os dados "
+            "para esse filtro específico parecem não existir, e pergunte se ele quer restringir "
+            "o pedido (produto/site/período mais específico)."
         )
     except Exception as e:
         return (
@@ -2448,7 +2473,12 @@ def _build_orchestrator(llm, checkpointer=None):
         "     'gráfico de', 'análise de', 'compare', 'relatório de',\n"
         f"     e termos do domínio: {ident['palavras_chave']}.\n"
         "     → Chame calcular_periodo() + consultar_analista(). NÃO envolva gerenciar_agenda.\n"
-        "     REGRA: qualquer pergunta sobre volumes, contagens ou dados do sistema é categoria A.\n\n"
+        "     REGRA: qualquer pergunta sobre volumes, contagens ou dados do sistema é categoria A.\n"
+        "     ⚠️ Se consultar_analista voltar com uma mensagem de erro interno/limite excedido, NÃO "
+        "     chame consultar_analista de novo para a mesma pergunta mais de UMA vez — se a segunda "
+        "     tentativa também falhar ou vier vaga, repasse a limitação ao usuário (ex: 'não consegui "
+        "     concluir essa análise, pode tentar de forma mais específica?') em vez de tentar de novo "
+        "     silenciosamente. Retentar sem mudar nada tende a repetir a mesma falha.\n\n"
         "  B) PERGUNTA CONCEITUAL — o usuário quer saber o que algo significa ou como é calculado.\n"
         "     → Chame a tool rag_* mais adequada ao tema da pergunta. Responda diretamente sem buscar dados.\n"
         "       rag_dominio()      → regras de negócio, glossário e conceitos do domínio\n"
@@ -2656,12 +2686,26 @@ def init_multi_agent(project: str, location: str, model_name: str, credentials=N
         from langchain_google_vertexai import ChatVertexAI
         from langgraph.checkpoint.sqlite import SqliteSaver
 
-        llm = ChatVertexAI(
+        # Temperatura separada por papel — analista/scheduler fazem trabalho mecânico
+        # (ler schema, montar filtro/query, gerar código, decidir quando parar de investigar)
+        # onde determinismo importa mais que variedade. Temperatura alta nesses papéis já
+        # causou, observado em calibração: fabricação de dado/gráfico simulado quando não
+        # achava resultado, chamadas GraphQL com JSON malformado, e variação de 13 a 68
+        # passos pra responder a MESMA pergunta. O orquestrador lida com tom de conversa,
+        # então mantém uma temperatura um pouco maior.
+        llm_analitico = ChatVertexAI(
             model_name=model_name,
             project=project,
             location=location,
             credentials=credentials,
-            temperature=0.7,
+            temperature=0.15,
+        )
+        llm_orquestrador = ChatVertexAI(
+            model_name=model_name,
+            project=project,
+            location=location,
+            credentials=credentials,
+            temperature=0.4,
         )
 
         # Conexão persistente para o checkpointer (check_same_thread=False pois
@@ -2670,10 +2714,10 @@ def init_multi_agent(project: str, location: str, model_name: str, credentials=N
         _checkpointer = SqliteSaver(conn)
 
         chart_store.init_chart_store(DB_PATH)
-        _sub_agent_graph = _build_sub_agent(llm)
-        _scheduler_agent_graph = _build_scheduler_agent(llm)
-        _scheduling_graph = _build_scheduling_graph(llm)
-        _orchestrator_graph = _build_orchestrator(llm, _checkpointer)
+        _sub_agent_graph = _build_sub_agent(llm_analitico)
+        _scheduler_agent_graph = _build_scheduler_agent(llm_analitico)
+        _scheduling_graph = _build_scheduling_graph(llm_analitico)
+        _orchestrator_graph = _build_orchestrator(llm_orquestrador, _checkpointer)
         logger.info("Multi-agente inicializado: orquestrador + analista + scheduler + scheduling_graph")
     except Exception:
         import traceback
