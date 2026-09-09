@@ -2620,7 +2620,7 @@ def _build_orchestrator(llm, checkpointer=None):
         "   → range_unit='months', range_value=3). Se o usuário não especificar período,\n"
         "   use o padrão range_unit='days', range_value=7.\n\n"
         "6. Responda: 'Painel **[título]** adicionado ao dashboard. "
-        "Ele aparece na seção Painéis Customizados ao final da página.'\n\n"
+        "Ele aparece em primeiro na seção de painéis, e a tela atualiza sozinha.'\n\n"
         "## Painéis customizados — listar, editar e remover\n"
         "- Para LISTAR painéis: chame list_dashboard_widgets().\n"
         "- Para LER o código de um painel: chame get_widget_code(widget_id=ID).\n"

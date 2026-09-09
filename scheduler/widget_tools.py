@@ -6,6 +6,7 @@ pedir EXPLICITAMENTE para ADICIONAR/INSERIR/FIXAR um gráfico no dashboard.
 NÃO usar para gerar gráficos normais no chat.
 """
 
+import logging
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -13,10 +14,16 @@ from typing import Optional
 from langchain_core.tools import tool
 
 import db_config
-from db import get_db
+from db import get_db, prepend_dashboard_widget_order
 from .widget_runner import run_widget_code, default_test_range, compute_widget_range, RANGE_UNITS, WidgetCodeError
 
+logger = logging.getLogger(__name__)
+
 _DOMINIO_CLAUSE = "(dominio = ? OR dominio IS NULL)"
+# painel visível: dono, legado sem dono, ou compartilhado com todos
+_VISIBLE_CLAUSE = "(user_id = ? OR user_id IS NULL OR shared = 1)"
+# só dono (ou legado sem dono) pode editar/apagar — "shared" só dá visibilidade, não permissão de escrita
+_OWNER_CLAUSE = "(user_id = ? OR user_id IS NULL)"
 
 
 def _current_user_id() -> str | None:
@@ -38,13 +45,13 @@ def _all_widgets(user_id: str | None = None) -> list[dict]:
     with get_db() as conn:
         if user_id:
             rows = conn.execute(
-                "SELECT id, title, description, created_at FROM dashboard_widgets "
-                f"WHERE (user_id=? OR user_id IS NULL) AND {_DOMINIO_CLAUSE} ORDER BY created_at DESC",
+                "SELECT id, title, description, created_at, shared, user_id FROM dashboard_widgets "
+                f"WHERE {_VISIBLE_CLAUSE} AND {_DOMINIO_CLAUSE} ORDER BY created_at DESC",
                 (user_id, dominio),
             ).fetchall()
         else:
             rows = conn.execute(
-                f"SELECT id, title, description, created_at FROM dashboard_widgets "
+                f"SELECT id, title, description, created_at, shared, user_id FROM dashboard_widgets "
                 f"WHERE {_DOMINIO_CLAUSE} ORDER BY created_at DESC",
                 (dominio,),
             ).fetchall()
@@ -56,7 +63,8 @@ def _format_widgets(widgets: list[dict]) -> str:
         return "Nenhum painel customizado no dashboard."
     lines = [f"**{len(widgets)} painel(is) customizado(s) no dashboard:**\n"]
     for w in widgets:
-        lines.append(f"  **[{w['id'][:8]}...]** {w['title']}")
+        tag = " *(compartilhado)*" if w.get("shared") else ""
+        lines.append(f"  **[{w['id'][:8]}...]**{tag} {w['title']}")
         if w.get("description"):
             lines.append(f"    {w['description']}")
         lines.append(f"    Criado em: {w['created_at']}")
@@ -169,18 +177,18 @@ def add_chart_to_dashboard(
         )
         conn.commit()
 
+    # Painel novo sempre entra na primeira posição do dashboard do usuário,
+    # empurrando os demais — preserva o resto da ordem que ele já tinha.
+    prepend_dashboard_widget_order(user_id, widget_id)
+
     # Notifica o frontend via SSE para atualizar a seção de painéis automaticamente
-    try:
-        from agent_multi import _push_event, _current_session
-        _push_event(_current_session.get(), {"type": "widget_added", "widget_id": widget_id})
-    except Exception:
-        pass
+    _notify({"type": "widget_added", "widget_id": widget_id})
 
     widgets = _all_widgets(user_id)
     return (
         f"✅ **Painel '{title}' adicionado ao dashboard.**\n"
         f"ID: `{widget_id[:8]}...`\n\n"
-        "O painel aparecerá na seção **Painéis Customizados** ao final do dashboard "
+        "O painel aparecerá em **primeiro** na seção de painéis do dashboard "
         "e será atualizado automaticamente a cada refresh.\n\n"
         + _format_widgets(widgets)
         + "\nPara remover: **remover painel [ID]**"
@@ -193,19 +201,44 @@ def list_dashboard_widgets() -> str:
     return _format_widgets(_all_widgets(_current_user_id()))
 
 
-def _resolve_widget(conn, widget_id: str):
-    """Retorna a row do widget aceitando ID completo ou prefixo de 8 chars."""
+def _resolve_widget(conn, widget_id: str, user_id: str | None):
+    """Retorna a row do widget (visível ao usuário — dono, legado ou compartilhado),
+    aceitando ID completo ou prefixo de 8 chars. `user_id=None` não filtra por
+    visibilidade (uso interno, ex: delete_dashboard_widget já checa dono à parte)."""
     dominio = db_config.dominio_filename()
-    cols = "id, title, description, code, range_unit, range_value"
+    cols = "id, title, description, code, range_unit, range_value, user_id, shared"
+    visible = f" AND {_VISIBLE_CLAUSE}" if user_id else ""
+    params_tail = (user_id,) if user_id else ()
     if len(widget_id) <= 8:
         return conn.execute(
-            f"SELECT {cols} FROM dashboard_widgets WHERE id LIKE ? AND {_DOMINIO_CLAUSE}",
-            (widget_id + "%", dominio),
+            f"SELECT {cols} FROM dashboard_widgets WHERE id LIKE ? AND {_DOMINIO_CLAUSE}{visible}",
+            (widget_id + "%", dominio) + params_tail,
         ).fetchone()
     return conn.execute(
-        f"SELECT {cols} FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}",
-        (widget_id, dominio),
+        f"SELECT {cols} FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}{visible}",
+        (widget_id, dominio) + params_tail,
     ).fetchone()
+
+
+def _is_owner(row, user_id: str | None) -> bool:
+    return row["user_id"] is None or row["user_id"] == user_id
+
+
+def _notify(event: dict) -> None:
+    """Notifica o frontend via SSE (widget_added/updated/deleted) pra atualizar
+    a seção de painéis sem precisar de refresh manual.
+
+    Best-effort: se a sessão de chat não tiver uma queue SSE ativa no momento
+    (conexão caiu, sessão sem stream aberto), o evento é descartado silenciosamente
+    — o widget já foi salvo no banco, só a atualização automática da tela que não
+    ocorre (usuário precisa dar refresh). Logado como warning para diagnosticar
+    se isso passar a acontecer com frequência incomum.
+    """
+    try:
+        from agent_multi import _push_event, _current_session
+        _push_event(_current_session.get(), event)
+    except Exception:
+        logger.warning("Falha ao notificar frontend via SSE: %s", event, exc_info=True)
 
 
 @tool
@@ -219,7 +252,7 @@ def get_widget_code(widget_id: str) -> str:
         widget_id: ID completo ou primeiros 8 caracteres do ID do painel.
     """
     with get_db() as conn:
-        row = _resolve_widget(conn, widget_id)
+        row = _resolve_widget(conn, widget_id, _current_user_id())
     if not row:
         return f"Painel '{widget_id}' não encontrado."
     return (
@@ -264,10 +297,13 @@ def update_widget(
     if range_unit and range_unit not in RANGE_UNITS:
         return f"❌ range_unit inválido: '{range_unit}'. Use um de: {sorted(RANGE_UNITS)}"
 
+    user_id = _current_user_id()
     with get_db() as conn:
-        existing = _resolve_widget(conn, widget_id)
+        existing = _resolve_widget(conn, widget_id, user_id)
     if not existing:
         return f"Painel '{widget_id}' não encontrado."
+    if not _is_owner(existing, user_id):
+        return "❌ Só o dono do painel pode editá-lo — este foi compartilhado com você, mas não é seu."
 
     final_unit  = range_unit or existing["range_unit"]
     final_value = range_value or existing["range_value"]
@@ -285,9 +321,11 @@ def update_widget(
         return f"❌ **Erro inesperado na validação:**\n```\n{e}\n```"
 
     with get_db() as conn:
-        row = _resolve_widget(conn, widget_id)
+        row = _resolve_widget(conn, widget_id, user_id)
         if not row:
             return f"Painel '{widget_id}' não encontrado."
+        if not _is_owner(row, user_id):
+            return "❌ Só o dono do painel pode editá-lo — este foi compartilhado com você, mas não é seu."
         full_id = row["id"]
         new_title = title.strip() or row["title"]
         new_desc  = description.strip() or row["description"]
@@ -297,11 +335,7 @@ def update_widget(
         )
         conn.commit()
 
-    try:
-        from agent_multi import _push_event, _current_session
-        _push_event(_current_session.get(), {"type": "widget_updated", "widget_id": full_id})
-    except Exception:
-        pass
+    _notify({"type": "widget_updated", "widget_id": full_id})
 
     return (
         f"✅ **Painel '{new_title}' atualizado com sucesso.**\n"
@@ -319,31 +353,18 @@ def delete_dashboard_widget(widget_id: str) -> str:
                    Use list_dashboard_widgets para ver os IDs.
     """
     user_id = _current_user_id()
-    dominio = db_config.dominio_filename()
     with get_db() as conn:
-        # Aceita ID completo ou prefixo de 8 chars
-        if len(widget_id) == 8:
-            row = conn.execute(
-                f"SELECT id, title FROM dashboard_widgets WHERE id LIKE ? AND {_DOMINIO_CLAUSE}",
-                (widget_id + "%", dominio),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                f"SELECT id, title FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}",
-                (widget_id, dominio),
-            ).fetchone()
+        row = _resolve_widget(conn, widget_id, user_id)
         if not row:
             return f"Painel '{widget_id}' não encontrado."
+        if not _is_owner(row, user_id):
+            return "❌ Só o dono do painel pode removê-lo — este foi compartilhado com você, mas não é seu."
         full_id = row["id"]
         title = row["title"]
         conn.execute("DELETE FROM dashboard_widgets WHERE id = ?", (full_id,))
         conn.commit()
 
-    try:
-        from agent_multi import _push_event, _current_session
-        _push_event(_current_session.get(), {"type": "widget_deleted", "widget_id": full_id})
-    except Exception:
-        pass
+    _notify({"type": "widget_deleted", "widget_id": full_id})
 
     widgets = _all_widgets(user_id)
     return (

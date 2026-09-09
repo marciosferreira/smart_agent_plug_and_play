@@ -39,4 +39,8 @@ export class WidgetCardComponent implements AfterViewInit, OnDestroy {
   removeWidget(): void {
     this.widgets.removeWidget(this.widget.id);
   }
+
+  toggleShare(): void {
+    this.widgets.toggleShare(this.widget.id, !this.widget.shared);
+  }
 }

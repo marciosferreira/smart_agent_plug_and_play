@@ -29,6 +29,9 @@ class TaskContext:
     def sql(self, query: str) -> "list[dict]":
         """Executa uma query SELECT no banco configurado (config/) e retorna lista de dicts.
 
+        Só funciona em domínios com database.modo: sql (ver config/settings.yml) — em
+        modo graphql, use graphql_table()/graphql_aggregate() em vez desta.
+
         O schema real (tabelas, colunas) está descrito em config/dominio.md.
         Apenas SELECT é permitido.
 
@@ -36,7 +39,69 @@ class TaskContext:
             rows = ctx.sql("SELECT categoria, COUNT(*) AS total FROM tabela GROUP BY categoria")
             df = pd.DataFrame(rows)
         """
+        if db_config.modo_acesso() == "graphql":
+            raise ValueError(
+                "ctx.sql() não está disponível neste domínio (database.modo: graphql). "
+                "Use ctx.graphql_table(table, ...) ou ctx.graphql_aggregate(table, ...) "
+                "— ver seção 'Exemplos task_code' da skill de domínio."
+            )
         return db_config.run_select(query)
+
+    def graphql_table(
+        self,
+        table: str,
+        where: "list[dict] | None" = None,
+        order_by: "dict | None" = None,
+        limit: "int | None" = None,
+        offset: "int | None" = None,
+        expand: "list[dict] | None" = None,
+    ) -> "list[dict]":
+        """Busca linhas cruas de uma tabela via GraphQL (reportTable). Equivalente,
+        para domínios em database.modo: graphql, à tool executar_graphql do chat —
+        mesmos argumentos, mesmo schema (ver config/dominio.md).
+
+        Exemplo:
+            rows = ctx.graphql_table(
+                "fact_hourly_rate",
+                where=[{"field": "status_approval", "op": "EQ", "value": "APPROVED"}],
+                expand=[{"viaColumn": "site_id", "columns": ["name", "company"]}],
+                limit=500,
+            )
+            df = pd.DataFrame(rows)
+        """
+        import graphql_config
+        return graphql_config.run_query_table(table, where=where, order_by=order_by, limit=limit, offset=offset, expand=expand)
+
+    def graphql_aggregate(
+        self,
+        table: str,
+        group_by: str,
+        metric_field: str,
+        metric_op: str,
+        where: "list[dict] | None" = None,
+        expand: "list[str] | None" = None,
+        order_by: "str | None" = None,
+        limit: "int | None" = None,
+    ) -> "list[dict]":
+        """Agrega uma tabela via GraphQL (reportAggregate — GROUP BY + SUM/COUNT/AVG/MIN/MAX
+        calculados no servidor). Equivalente, para domínios em database.modo: graphql, à
+        tool executar_graphql_agregado do chat — mesmos argumentos, mesmo schema.
+
+        Retorna list[dict] com chaves "groupKey", "metricValue" e uma por coluna de `expand`.
+
+        Exemplo:
+            rows = ctx.graphql_aggregate(
+                "fact_final_dl_cost", group_by="site_id",
+                metric_field="dl_cost_by_cm_usd", metric_op="SUM",
+                expand=["name", "country"], order_by="DESC", limit=20,
+            )
+            df = pd.DataFrame(rows)
+        """
+        import graphql_config
+        return graphql_config.run_aggregate(
+            table, group_by=group_by, metric_field=metric_field, metric_op=metric_op,
+            where=where, expand=expand, order_by=order_by, limit=limit,
+        )
 
     def api(self, path: str) -> any:
         """GET na API local. path deve começar com '/'.

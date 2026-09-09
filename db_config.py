@@ -152,6 +152,52 @@ def dominio_filename() -> str:
     return (_settings().get("app") or {}).get("dominio") or _DOMINIO_FILE_PADRAO
 
 
+def dashboard_default_filename() -> str:
+    """Nome do arquivo de painéis padrão do domínio ativo: dominio_alocacao.md →
+    dashboard_default_alocacao.py (mesmo sufixo de dominio_filename(), trocando o
+    prefixo e a extensão). Arquivo opcional — domínio sem ele fica sem defaults."""
+    base = re.sub(r"\.md$", "", dominio_filename())
+    base = re.sub(r"^dominio", "dashboard_default", base)
+    return base + ".py"
+
+
+_default_widgets_cache: dict = {}  # path → (mtime, widgets)
+
+
+def dashboard_default_widgets() -> "list[dict]":
+    """Painéis padrão do domínio ativo — a baseline que aparece no dashboard antes
+    de qualquer painel criado via chat. Definidos em config/dashboard_default_<dominio>.py,
+    um arquivo Python com uma lista `WIDGETS` de dicts (mesmo formato usado por
+    add_chart_to_dashboard): {id, title, description, code, range_unit, range_value}.
+
+    Ao contrário dos painéis do chat (tabela dashboard_widgets), estes nunca tocam o
+    banco — não são apagados pelo reset noturno de demo e são versionados no git junto
+    com o resto do pack de domínio. Recarregado automaticamente quando o arquivo muda
+    (cache por mtime, igual dominio.md). Arquivo ausente ou `WIDGETS` ausente → [].
+    """
+    path = CONFIG_DIR / dashboard_default_filename()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return []
+    with _cache_lock:
+        hit = _default_widgets_cache.get(str(path))
+        if hit and hit[0] == mtime:
+            return hit[1]
+    namespace: dict = {}
+    try:
+        codigo = path.read_text(encoding="utf-8")
+        exec(compile(codigo, str(path), "exec"), namespace)
+    except Exception as e:
+        print(f"[config] erro ao carregar {path}: {e}")
+        return []
+    widgets = namespace.get("WIDGETS") or []
+    with _cache_lock:
+        _default_widgets_cache[str(path)] = (mtime, widgets)
+    print(f"[config] dashboard defaults recarregado: {path} ({len(widgets)} painéis)")
+    return widgets
+
+
 def is_configured() -> bool:
     if not (CONFIG_DIR / dominio_filename()).exists():
         return False

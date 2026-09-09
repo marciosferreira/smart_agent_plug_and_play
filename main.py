@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from db import get_db, init_db, migrate_db, shift_dates_to_today
+from db import get_db, init_db, migrate_db, shift_dates_to_today, save_dashboard_widget_order
 import db_config
 
 try:
@@ -774,17 +774,140 @@ def get_artifacts(user_id: str = Query(default=None)):
 
 # ── painéis customizados do dashboard ────────────────────────────────────────
 
+_DEFAULT_WIDGET_PREFIX = "default:"
+
+
+def _default_widget_by_id(widget_id: str) -> "dict | None":
+    if not widget_id.startswith(_DEFAULT_WIDGET_PREFIX):
+        return None
+    raw_id = widget_id[len(_DEFAULT_WIDGET_PREFIX):]
+    for w in db_config.dashboard_default_widgets():
+        if w.get("id") == raw_id:
+            return w
+    return None
+
+
+def _reconcile_widget_order(widgets: list, saved_ids: list[str]) -> list:
+    """Aplica a ordem salva sobre a lista atual de widgets, tolerando divergência.
+
+    IDs salvos que não existem mais (painel removido do arquivo default ou
+    apagado do banco) são descartados; widgets atuais que não estavam na ordem
+    salva (painel novo — inserido no arquivo default, ou criado via chat depois
+    do último reorder) entram no final, na ordem natural (defaults primeiro,
+    depois customizados por created_at). Assim o drag-and-drop nunca quebra
+    quando o conjunto de widgets muda.
+    """
+    by_id = {w["id"]: w for w in widgets}
+    ordered = [by_id[i] for i in saved_ids if i in by_id]
+    seen = {w["id"] for w in ordered}
+    rest = [w for w in widgets if w["id"] not in seen]
+    return ordered + rest
+
+
+# painel visível se: dono, legado sem dono (user_id NULL), ou explicitamente compartilhado —
+# diferente de _USER_CLAUSE (que também governa scheduled_tasks e não conhece "shared")
+_WIDGET_VISIBLE_CLAUSE = "(user_id = ? OR user_id IS NULL OR shared = 1)"
+
+
+class WidgetOrderRequest(BaseModel):
+    user_id: str
+    widget_ids: list[str]
+
+
+class WidgetShareRequest(BaseModel):
+    user_id: str
+    shared: bool
+
+
 @app.get("/dashboard-widgets")
 def get_dashboard_widgets(user_id: str = Query(default=None)):
-    """Lista os painéis customizados do dashboard para um usuário."""
+    """Lista os painéis do dashboard, na ordem salva do usuário: defaults do
+    domínio (arquivo de config, sempre presentes) e customizados visíveis —
+    do próprio usuário ou compartilhados por outros — criados via chat (banco),
+    reconciliados contra dashboard_widget_order."""
+    defaults = [
+        {
+            "id": f"{_DEFAULT_WIDGET_PREFIX}{w['id']}",
+            "title": w["title"],
+            "description": w.get("description"),
+            "created_at": None,
+            "range_unit": w.get("range_unit", "days"),
+            "range_value": w.get("range_value", 7),
+            "is_default": True,
+            "shared": False,
+            "is_owner": False,
+        }
+        for w in db_config.dashboard_default_widgets()
+    ]
+
     dominio = db_config.dominio_filename()
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id, title, description, created_at, range_unit, range_value FROM dashboard_widgets "
-            f"WHERE {_USER_CLAUSE} AND {_DOMINIO_CLAUSE} ORDER BY created_at ASC",
+            "SELECT id, title, description, created_at, range_unit, range_value, user_id, shared "
+            f"FROM dashboard_widgets WHERE {_WIDGET_VISIBLE_CLAUSE} AND {_DOMINIO_CLAUSE} ORDER BY created_at ASC",
             (user_id, dominio),
         ).fetchall()
-    return [dict(r) for r in rows]
+        customs = [
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "description": r["description"],
+                "created_at": r["created_at"],
+                "range_unit": r["range_unit"],
+                "range_value": r["range_value"],
+                "is_default": False,
+                "shared": bool(r["shared"]),
+                "is_owner": r["user_id"] is None or r["user_id"] == user_id,
+            }
+            for r in rows
+        ]
+
+        all_widgets = defaults + customs
+        if not user_id:
+            return all_widgets
+
+        order_row = conn.execute(
+            "SELECT widget_order FROM dashboard_widget_order WHERE user_id = ? AND dominio = ?",
+            (user_id, dominio),
+        ).fetchone()
+
+    if not order_row:
+        return all_widgets
+    try:
+        saved_ids = json.loads(order_row["widget_order"])
+    except (TypeError, ValueError):
+        return all_widgets
+    return _reconcile_widget_order(all_widgets, saved_ids)
+
+
+@app.put("/dashboard-widgets/order")
+def save_dashboard_widgets_order(req: WidgetOrderRequest):
+    """Salva a ordem de exibição dos painéis do dashboard para um usuário."""
+    save_dashboard_widget_order(req.user_id, db_config.dominio_filename(), req.widget_ids)
+    return {"ok": True}
+
+
+@app.patch("/dashboard-widgets/{widget_id}/share")
+def share_dashboard_widget(widget_id: str, req: WidgetShareRequest):
+    """Compartilha (ou revoga o compartilhamento) de um painel customizado com
+    todos os usuários do domínio. Só o dono pode alternar — painéis padrão não
+    passam por aqui (não têm essa noção, já são visíveis a todos)."""
+    dominio = db_config.dominio_filename()
+    with get_db() as conn:
+        row = conn.execute(
+            f"SELECT id, user_id FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}",
+            (widget_id, dominio),
+        ).fetchone()
+        if not row:
+            return JSONResponse(status_code=404, content={"error": True, "message": "Painel não encontrado."})
+        if row["user_id"] is not None and row["user_id"] != req.user_id:
+            return JSONResponse(
+                status_code=403,
+                content={"error": True, "message": "Só o dono do painel pode alterar o compartilhamento."},
+            )
+        conn.execute("UPDATE dashboard_widgets SET shared = ? WHERE id = ?", (1 if req.shared else 0, widget_id))
+        conn.commit()
+    return {"ok": True, "shared": req.shared}
 
 
 @app.get("/dashboard-widgets/{widget_id}/data")
@@ -793,18 +916,23 @@ def get_dashboard_widget_data(widget_id: str):
     from scheduler.widget_runner import run_widget_code, compute_widget_range, WidgetCodeError
     from datetime import datetime as _dt
 
-    with get_db() as conn:
-        row = conn.execute(
-            f"SELECT code, range_unit, range_value FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}",
-            (widget_id, db_config.dominio_filename()),
-        ).fetchone()
-    if not row:
-        return JSONResponse(status_code=404, content={"error": True, "message": "Painel não encontrado."})
+    default = _default_widget_by_id(widget_id)
+    if default is not None:
+        code, range_unit, range_value = default["code"], default.get("range_unit", "days"), default.get("range_value", 7)
+    else:
+        with get_db() as conn:
+            row = conn.execute(
+                f"SELECT code, range_unit, range_value FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE}",
+                (widget_id, db_config.dominio_filename()),
+            ).fetchone()
+        if not row:
+            return JSONResponse(status_code=404, content={"error": True, "message": "Painel não encontrado."})
+        code, range_unit, range_value = row["code"], row["range_unit"], row["range_value"]
 
-    from_date, to_date = compute_widget_range(row["range_unit"], row["range_value"])
+    from_date, to_date = compute_widget_range(range_unit, range_value)
     session_id = f"widget_{widget_id[:8]}_{_dt.now().strftime('%Y%m%d%H%M%S')}"
     try:
-        config = run_widget_code(row["code"], from_date, to_date, session_id)
+        config = run_widget_code(code, from_date, to_date, session_id)
     except WidgetCodeError as e:
         return JSONResponse(status_code=422, content={"error": True, "message": str(e)})
     except Exception as e:
@@ -817,6 +945,11 @@ def get_dashboard_widget_data(widget_id: str):
 @app.delete("/dashboard-widgets/{widget_id}")
 def delete_dashboard_widget_endpoint(widget_id: str, user_id: str = Query(default=None)):
     """Remove um painel customizado do dashboard."""
+    if widget_id.startswith(_DEFAULT_WIDGET_PREFIX):
+        return JSONResponse(
+            status_code=400,
+            content={"error": True, "message": "Painéis padrão do domínio não podem ser removidos."},
+        )
     with get_db() as conn:
         row = conn.execute(
             f"SELECT id FROM dashboard_widgets WHERE id = ? AND {_DOMINIO_CLAUSE} AND {_USER_CLAUSE}",

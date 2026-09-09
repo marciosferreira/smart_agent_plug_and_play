@@ -495,12 +495,49 @@ manufatura de celulares) — mesmas quatro áreas em `fact_hourly_rate`, `fact_s
 
 ## Exemplos task_code
 
-> ⚠️ Tarefas agendadas e monitores (`ctx.sql()`) exigem acesso SQL direto e não funcionam
-> enquanto o domínio estiver em `modo: graphql` sem `database.url` configurada — `ctx` ainda
-> não tem um equivalente GraphQL. Os exemplos abaixo só se aplicam se este domínio voltar a
-> `modo: sql`.
+> Neste domínio (`database.modo: graphql`), `ctx.sql()` NÃO funciona — use
+> `ctx.graphql_table(...)` (equivalente a `executar_graphql`) ou `ctx.graphql_aggregate(...)`
+> (equivalente a `executar_graphql_agregado`), mesmos argumentos e schema documentados em
+> "Regras do agente" acima. Os exemplos com `ctx.sql()` abaixo só se aplicam se este domínio
+> voltar a `modo: sql`.
 
-### Relatório PDF com gráfico
+### Painel/relatório com ctx.graphql_aggregate — custo final de DL por site
+
+⚠️ `start_month`/`end_month` são a janela do TRIMESTRE FISCAL inteiro (ver "Modelo de
+dados" acima), não uma data pontual — filtrar com `start_month GTE from_date AND
+end_month LTE to_date` exige que o trimestre INTEIRO caiba dentro do período pedido e
+descarta o trimestre em andamento (cujo `end_month` é sempre no futuro). Use
+sobreposição de intervalo (`start_month LTE to_date AND end_month GTE from_date`), que
+é a comparação certa para "existe uma linha cujo trimestre toca este período".
+
+```python
+def run(from_date, to_date, ctx):
+    rows = ctx.graphql_aggregate(
+        "fact_final_dl_cost", group_by="site_id",
+        metric_field="dl_cost_by_cm_usd", metric_op="SUM",
+        where=[{"field": "status_approval", "op": "EQ", "value": "APPROVED"},
+               {"field": "start_month", "op": "LTE", "value": to_date},
+               {"field": "end_month", "op": "GTE", "value": from_date}],
+        expand=["name", "country"], order_by="DESC", limit=20,
+    )
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return ctx.generate_pdf('Custo DL por Site', '## Sem dados no período.')
+    df['metricValue'] = pd.to_numeric(df['metricValue'])
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.bar(df['name'], df['metricValue'], color='#60a5fa')
+    ax.set_title(f'Custo DL por Site (USD) — {from_date} a {to_date}')
+    plt.tight_layout()
+    chart = ctx.save_chart(fig)
+    conteudo = (
+        f"## Custo DL por Site\n\n{chart}\n\n"
+        f"- Período: {from_date} a {to_date}\n"
+        f"- Custo total (USD): {df['metricValue'].sum():,.2f}\n"
+    )
+    return ctx.generate_pdf('Custo DL por Site', conteudo)
+```
+
+### Relatório PDF com gráfico (referência — só em modo: sql)
 
 ```python
 def run(from_date, to_date, ctx):
@@ -528,7 +565,7 @@ def run(from_date, to_date, ctx):
     return ctx.generate_pdf('Custo DL por Site', conteudo)
 ```
 
-### Planilha Excel
+### Planilha Excel (referência — só em modo: sql)
 
 ```python
 def run(from_date, to_date, ctx):
@@ -546,7 +583,10 @@ def run(from_date, to_date, ctx):
 
 ## Dica para condition_sql
 
-> ⚠️ Ver aviso em "Exemplos task_code" acima — não disponível em `modo: graphql`.
+> ⚠️ Diferente de task_code (que já tem `ctx.graphql_table`/`ctx.graphql_aggregate`),
+> `condition_sql` é sempre SQL bruto executado direto no banco (`db_config.run_select`) —
+> não tem equivalente GraphQL. Monitores com `condition_sql` não funcionam em
+> `modo: graphql` até este domínio voltar a `modo: sql`.
 
 Tabelas disponíveis: `dim_site`, `dim_product`, `fact_hourly_rate`, `fact_dl_discount`,
 `fact_final_dl_cost`. Datas de vigência ficam em `month_id`/`effective_date`/`start_date`,

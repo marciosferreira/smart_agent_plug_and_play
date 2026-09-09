@@ -16,7 +16,7 @@ from datetime import date, timedelta
 from .context import TaskContext
 
 
-_CHARTJS_TYPES = {"bar", "line", "pie", "doughnut", "radar", "polarArea", "scatter", "bubble"}
+_CHARTJS_TYPES = {"bar", "line", "pie", "doughnut", "radar", "polarArea", "scatter", "bubble", "matrix"}
 
 
 def _build_globals(ctx: TaskContext, from_date: str, to_date: str) -> dict:
