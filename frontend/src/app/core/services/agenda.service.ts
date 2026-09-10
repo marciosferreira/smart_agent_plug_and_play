@@ -27,7 +27,12 @@ export class AgendaService {
   readonly loading = signal(false);
   private readonly _seenIds = signal<Set<string>>(new Set(readSeenIds()));
 
-  readonly activeTasks = computed(() => this._tasks().filter((t) => t.status !== 'cancelled'));
+  // 'draft' = registro criado mas ainda sem task_code salvo (o agente ainda está
+  // gerando/testando o código) — fica oculto até virar 'active', pra não mostrar
+  // uma tarefa "fantasma" que ainda não pode ser executada.
+  readonly activeTasks = computed(() =>
+    this._tasks().filter((t) => t.status !== 'cancelled' && t.status !== 'draft'),
+  );
   readonly newCount = computed(() => {
     const seen = this._seenIds();
     return this._tasks().filter((t) => t.status === 'active' && !seen.has(String(t.id))).length;

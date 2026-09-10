@@ -1,0 +1,16 @@
+{
+  "task_id": "014",
+  "task_name": "Produtos por Família — Top 15",
+  "run_at": "2026-09-10T15:34:49.858604",
+  "status": "pending_send",
+  "pdf_urls": [
+    "http://localhost:8000/pdf/c96c5ff7-4925-49ce-b2a9-203f260b0ee9"
+  ],
+  "email": null,
+  "schedule": {
+    "frequency": "daily",
+    "weekday": null,
+    "day": null,
+    "time": "09:00"
+  }
+}

@@ -143,14 +143,14 @@ def _evaluate_condition(task: dict) -> tuple[bool, str]:
 
     Retorna (should_run, detail) onde detail é incluído na notificação automática.
     """
-    import db_config
+    from .condition import run_condition_query
 
     sql      = (task.get("condition_sql") or "").strip()
     operator = (task.get("condition_operator") or "is_not_empty").strip()
     threshold = task.get("condition_threshold")
 
     try:
-        rows = db_config.run_select(sql)
+        rows = run_condition_query(sql)
     except Exception as exc:
         logger.warning("[daemon] Erro ao avaliar condition_sql da task %s: %s", task.get("id"), exc)
         return False, f"erro na condição: {exc}"
@@ -190,10 +190,16 @@ def _execute_task(task: dict, manual: bool = False) -> None:
     task_id  = task['id']
     now_str  = now.strftime('%Y-%m-%d %H:%M:%S')
 
-    # ── 0. Avalia condição (se definida) — sem criar run record se não atingida
+    # ── 0. Avalia condição (se definida) — sem criar run record se não atingida,
+    # exceto em execução manual (▶ na UI): esta sempre roda o task_code de verdade,
+    # para o usuário ver o resultado real em vez de um clique que não faz nada
+    # visível — mas sem disparar notificação de alerta quando a condição não foi
+    # realmente atingida (ver notify_enabled mais abaixo).
     condition_detail = ""
+    condition_met = True
     if task.get("condition_sql"):
         should_run, condition_detail = _evaluate_condition(task)
+        condition_met = should_run
         next_run = calculate_next_run(task.get('frequency', 'daily'), task.get('time'), task.get('weekday'), task.get('day'))
 
         if not should_run:
@@ -204,18 +210,21 @@ def _execute_task(task: dict, manual: bool = False) -> None:
                     (next_run, task_id),
                 )
                 conn.commit()
-            return
+            if not manual:
+                return
+            logger.info("[daemon] Task %s — execução manual força o teste mesmo com condição não atingida", task_id)
+        else:
+            last_state = int(task.get("condition_state") or 0)
+            if last_state == 1 and not manual:
+                # Daemon: condição ainda ativa, já notificou — aguarda reset
+                logger.info("[daemon] Task %s '%s' — condição ativa, aguardando reset", task_id, task.get('name'))
+                with get_db() as conn:
+                    conn.execute("UPDATE scheduled_tasks SET next_run=? WHERE id=?", (next_run, task_id))
+                    conn.commit()
+                return
 
-        last_state = int(task.get("condition_state") or 0)
-        if last_state == 1 and not manual:
-            # Daemon: condição ainda ativa, já notificou — aguarda reset
-            logger.info("[daemon] Task %s '%s' — condição ativa, aguardando reset", task_id, task.get('name'))
-            with get_db() as conn:
-                conn.execute("UPDATE scheduled_tasks SET next_run=? WHERE id=?", (next_run, task_id))
-                conn.commit()
-            return
-
-        # Condição atingida — executa (manual ignora condition_state, daemon só se 0→1)
+        # Condição atingida, ou execução manual forçada — executa
+        # (manual ignora condition_state, daemon só executa em transição 0→1)
 
     # ── 1. Marca como running (impede execução dupla) ────────────────────────
     with get_db() as conn:
@@ -254,10 +263,15 @@ def _execute_task(task: dict, manual: bool = False) -> None:
         if condition_detail:
             task_name = f"{task_name}: {condition_detail}"
 
+        # Em teste manual forçado (condição não atingida), não dispara a notificação
+        # automática de alerta — ela sinalizaria um threshold ultrapassado que não
+        # aconteceu de verdade.
+        notify_enabled = bool(task.get("notify", 0)) and condition_met
+
         def _run_code():
             tokens = run_task_code(
                 task["task_code"], from_date, to_date, session_id,
-                user_id=user_id, notify_enabled=bool(task.get("notify", 0)),
+                user_id=user_id, notify_enabled=notify_enabled,
                 task_name=task_name,
             )
             return " ".join(tokens)
@@ -272,6 +286,9 @@ def _execute_task(task: dict, manual: bool = False) -> None:
             ex.shutdown(wait=False, cancel_futures=True)
 
         logger.info("[daemon] Task %s concluída (run #%d)", task_id, run_id)
+
+        if task.get("condition_sql") and not condition_met:
+            result = f"[Teste manual — condição NÃO atingida: {condition_detail}]\n\n{result}"
 
         folder = _save_report(task, result, now)
         logger.info("[daemon] Relatório salvo em %s", folder)
@@ -294,8 +311,13 @@ def _execute_task(task: dict, manual: bool = False) -> None:
                 task.get('weekday'),
                 task.get('day'),
             )
-            # Se havia condição, marca estado como ativo (1) para evitar re-notificação
-            new_cond_state = 1 if task.get("condition_sql") else int(task.get("condition_state") or 0)
+            # Se havia condição REALMENTE atingida, marca estado como ativo (1) para
+            # evitar re-notificação — um teste manual forçado (condition_met=False)
+            # mantém o estado em 0, senão suprimiria a notificação real seguinte.
+            if task.get("condition_sql"):
+                new_cond_state = 1 if condition_met else 0
+            else:
+                new_cond_state = int(task.get("condition_state") or 0)
             with get_db() as conn:
                 conn.execute(
                     "UPDATE scheduled_tasks SET last_run=?, next_run=?, status='active', retry_count=0, condition_state=? WHERE id=?",

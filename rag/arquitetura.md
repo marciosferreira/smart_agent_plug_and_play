@@ -42,11 +42,10 @@ O ambiente persiste entre chamadas na mesma sessão (estilo Jupyter) — DataFra
 Ativado pelo orquestrador via `gerenciar_agenda()`. Responsável exclusivamente por
 operações em tarefas agendadas: criar, listar, editar, pausar, deletar, salvar e testar código.
 
-Cada tarefa pode executar em dois modos:
-
-- **Modo LLM**: o daemon usa as `instructions` da tarefa para montar um prompt e chama o agente normalmente
-- **Modo determinístico** (com `task_code`): executa `def run(from_date, to_date, ctx)` diretamente,
-  sem LLM — mais rápido e sem custo de inferência
+O daemon executa `task_code` diretamente (`def run(from_date, to_date, ctx)`) — sem LLM em tempo
+de agendamento. Uma tarefa fica em `draft`, sem execução, até que `save_task_code` salve um
+`task_code` válido (teste antes com `test_task_code`). `instructions` é só o passo a passo de
+referência usado para escrever esse código — sozinho não ativa a tarefa.
 
 O objeto `ctx` injetado no `run()` oferece:
 

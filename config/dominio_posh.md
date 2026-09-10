@@ -396,7 +396,9 @@ condition_operator = "is_empty"
 
 ## Dica para condition_sql
 
-> ⚠️ Ver aviso em "Exemplos task_code" acima — não disponível em `modo: graphql`.
+> Este domínio usa `modo: sql` — condition_sql é uma query SELECT normal. Se este
+> domínio for alternado para `modo: graphql`, condition_sql passa a ser uma string
+> JSON — ver seção "Formato de condition_sql" do prompt de sistema do scheduler.
 
 Tabelas disponíveis (prefixo `brazil.` obrigatório em SQL): `brazil.purchase_order`,
 `brazil.order_item`, `brazil.customer`, `brazil.product`. Enums com cast `::text`;

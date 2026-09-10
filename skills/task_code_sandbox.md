@@ -25,13 +25,39 @@ Todas as bibliotecas já estão no namespace — qualquer `import` causa erro im
 
 ## Como buscar dados
 
-Tasks agendadas buscam dados **exclusivamente via `ctx.sql()`** — query SELECT direta no
-banco configurado (o schema real — tabelas, colunas, regras — está na skill `dominio.md`).
-O retorno é sempre `list[dict]`; converta com `pd.DataFrame(rows)`.
+O método de acesso depende de `database.modo` do domínio ativo (**sql** ou **graphql** —
+ver aviso injetado no fim desta skill dizendo qual está ativo agora). Em domínios `sql`,
+use **exclusivamente `ctx.sql()`**; em domínios `graphql`, `ctx.sql()` NÃO EXISTE — use
+`ctx.graphql_table()`/`ctx.graphql_aggregate()`. Nunca misture os dois no mesmo código.
+
+### Modo sql
+
+Query SELECT direta no banco configurado (schema real — tabelas, colunas, regras — na
+skill `dominio.md`). Retorno sempre `list[dict]`; converta com `pd.DataFrame(rows)`.
 
 ```python
 rows = ctx.sql("SELECT categoria, COUNT(*) AS total FROM tabela GROUP BY categoria")
 df = pd.DataFrame(rows)
+```
+
+### Modo graphql
+
+`ctx.graphql_table(table, where=None, order_by=None, limit=None, offset=None, expand=None)`
+e `ctx.graphql_aggregate(table, group_by, metric_field, metric_op, where=None, expand=None,
+order_by=None, limit=None)` — **NÃO aceitam `chave`** (esse parâmetro só existe nas tools
+`executar_graphql`/`executar_graphql_agregado` usadas pelo analista durante a exploração
+interativa dos dados — usar `chave` aqui causa `TypeError`). Retorno sempre `list[dict]`.
+
+```python
+rows = ctx.graphql_table(
+    table="tabela", where=[{"field": "coluna", "op": "EQ", "value": "x"}],
+    expand=[{"viaColumn": "fk_id", "columns": ["name"]}],
+)
+df = pd.DataFrame(rows)
+
+rows_agg = ctx.graphql_aggregate(
+    table="tabela", group_by="categoria", metric_field="valor", metric_op="SUM",
+)
 ```
 
 > `ctx.api()` existe no namespace mas serve apenas para o endpoint `/alerts` (sino de notificações) — não use em tasks de dados.
@@ -61,7 +87,9 @@ df = pd.DataFrame(rows)
 
 | Chamada | Retorna |
 |---|---|
-| `ctx.sql('SELECT ...')` | list de dicts via SQL direto no banco configurado (só SELECT) |
+| `ctx.sql('SELECT ...')` | list de dicts via SQL direto no banco configurado (só SELECT) — só existe em domínios `modo: sql` |
+| `ctx.graphql_table(table, where=None, ...)` | list de dicts via GraphQL — só existe em domínios `modo: graphql`, sem `chave` |
+| `ctx.graphql_aggregate(table, group_by, metric_field, metric_op, where=None, ...)` | list de dicts agregados via GraphQL — só existe em domínios `modo: graphql`, sem `chave` |
 | `ctx.today()` | string YYYY-MM-DD com a data atual |
 | `ctx.date_range(days=N)` | `(from_date, to_date)` dos últimos N dias |
 | `ctx.save_chart(fig)` | token `[chart:uuid]` |
@@ -116,7 +144,9 @@ filtros reais de dados usam as colunas de período descritas na skill.
 > Para tarefas que só devem executar (e notificar) quando uma condição for atingida,
 > use os parâmetros `condition_sql`, `condition_operator` e `condition_threshold` ao criar a tarefa.
 > **Não escreva `ctx.notify()` no código** — a notificação é automática quando a condição é atingida.
-> `condition_sql` roda no dialeto do banco configurado (informado junto com estas regras).
+> `condition_sql` usa o formato do modo de acesso do domínio ativo — SQL direto (`modo: sql`)
+> ou spec JSON via GraphQL (`modo: graphql`), nunca `ctx.graphql_table`/`ctx.graphql_aggregate`
+> diretamente (informado junto com estas regras).
 
 A notificação automática inclui o detalhe da condição: ex. "Monitor de X: 75 > 50".
 

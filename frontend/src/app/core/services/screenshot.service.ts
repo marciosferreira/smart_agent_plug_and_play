@@ -11,6 +11,14 @@ export interface SelectionRect {
 
 const MAX_IMAGES = 3;
 
+// PNG 1x1 transparente — usado como fallback para <img> que falharem ao carregar
+// durante a captura. Sem isso, html-to-image atribui src='' à imagem quebrada,
+// o que nunca dispara onload/onerror e trava o toCanvas() para sempre.
+const BROKEN_IMAGE_PLACEHOLDER =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+const CAPTURE_TIMEOUT_MS = 15000;
+
 /**
  * Porta a IIFE de captura de tela (seleção de área) de dashboard.html:1832-2050.
  */
@@ -116,7 +124,15 @@ export class ScreenshotService {
     let frame: HTMLCanvasElement;
     try {
       const scale = Math.min(window.devicePixelRatio || 1, 1.5);
-      frame = await toCanvas(document.body, { pixelRatio: scale, skipFonts: true, cacheBust: false });
+      frame = await this.withTimeout(
+        toCanvas(document.body, {
+          pixelRatio: scale,
+          skipFonts: true,
+          cacheBust: false,
+          imagePlaceholder: BROKEN_IMAGE_PLACEHOLDER,
+        }),
+        CAPTURE_TIMEOUT_MS,
+      );
     } catch (err) {
       this._capturing.set(false);
       this.reopenChatIfNeeded();
@@ -150,6 +166,25 @@ export class ScreenshotService {
     }
     const b64 = crop.toDataURL('image/png').split(',')[1];
     this._pendingImages.update((imgs) => [...imgs, b64]);
+  }
+
+  private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Tempo esgotado ao renderizar a tela (imagem quebrada na página?)')),
+        ms,
+      );
+      promise.then(
+        (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      );
+    });
   }
 
   removeImage(i: number): void {

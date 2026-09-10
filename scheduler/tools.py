@@ -118,9 +118,9 @@ def _row_to_dict(row) -> dict:
 
 def _current_user_id() -> str | None:
     try:
-        from agent_multi import _current_session
-        sid = _current_session.get("")
-        return sid[:36] if sid else None
+        from agent_multi import _current_user_id as _uid_var
+        uid = _uid_var.get()
+        return uid or None
     except Exception:
         return None
 
@@ -165,7 +165,8 @@ def schedule_task(
                     "ytd" (ano atual) | "mtd" (mês atual) | "today" | "last_7d" | "last_30d" | "last_90d"
         notify: True para notificar no dashboard quando a tarefa executar.
         time: Hora "HH:MM". Ignorado se frequency="on_demand".
-        instructions: Código Python validado. Se fornecido, ativa imediatamente.
+        instructions: Passo a passo de referência para o task_code (não ativa a tarefa —
+                      use test_task_code + save_task_code depois de criar).
         email: Email para envio do relatório (opcional).
         weekday: Dia da semana se frequency="weekly" (ex: "monday").
         day: Dia do mês se frequency="monthly" (ex: "15").
@@ -203,6 +204,50 @@ def schedule_task(
     )
 
 
+def _default_monitor_code(name: str, condition_sql: str) -> str:
+    """task_code padrão de um monitor recém-criado — repete a leitura feita por
+    condition_sql (SQL direto ou spec JSON via GraphQL, ver scheduler/condition.py)
+    e retorna o valor apurado como texto."""
+    if db_config.modo_acesso() == "graphql":
+        import json as _json
+        spec = _json.loads(condition_sql)
+        where = spec.get("where")
+        if spec.get("type") == "aggregate":
+            call = (
+                "ctx.graphql_aggregate(\n"
+                f"        table={spec['table']!r}, group_by={spec['group_by']!r},\n"
+                f"        metric_field={spec['metric_field']!r}, metric_op={spec['metric_op']!r},\n"
+                f"        where={where!r},\n"
+                "    )"
+            )
+            extract = "val = rows[0].get('metricValue')"
+        else:
+            call = f"ctx.graphql_table(\n        table={spec['table']!r}, where={where!r},\n    )"
+            value_field = spec.get("value_field")
+            extract = (
+                f"val = rows[0].get({value_field!r})" if value_field
+                else "val = list(rows[0].values())[0]"
+            )
+        return (
+            "def run(from_date, to_date, ctx):\n"
+            f"    rows = {call}\n"
+            "    if not rows:\n"
+            "        return 'Sem dados'\n"
+            f"    {extract}\n"
+            f"    return '{name}: ' + str(val)\n"
+        )
+
+    _sql_escaped = condition_sql.replace('"""', "'''")
+    return (
+        "def run(from_date, to_date, ctx):\n"
+        f'    rows = ctx.sql("""\n        {_sql_escaped}\n    """)\n'
+        "    if not rows:\n"
+        "        return 'Sem dados'\n"
+        "    val = list(rows[0].values())[0]\n"
+        f"    return '{name}: ' + str(val)\n"
+    )
+
+
 @tool
 def schedule_monitor(
     name: str,
@@ -228,9 +273,13 @@ def schedule_monitor(
         name: Nome do monitor (ex: "Monitor de Pedidos").
         description: O que monitora e qual a condição (ex: "Alerta se total de pedidos do dia >= 160").
         frequency: Com que frequência verificar. Use "every_5m", "every_1h", "daily", etc.
-        condition_sql: Query SELECT que retorna um escalar ou linhas para avaliação (dialeto SQLite).
+        condition_sql: Em domínios com database.modo=sql (a maioria): query SELECT que retorna
+                       um escalar ou linhas para avaliação (dialeto SQLite).
                        Para escalar: "SELECT COUNT(*) FROM tabela WHERE metrica < 10"
                        Para existência: "SELECT id FROM tabela WHERE condicao LIMIT 1"
+                       Em domínios com database.modo=graphql: NÃO é SQL — é uma string JSON.
+                       Veja o formato exato (aggregate/table) na seção "Formato de condition_sql
+                       neste domínio" do seu prompt de sistema antes de chamar esta tool.
         condition_operator: Como comparar o resultado:
                             ">"  — executa se valor > threshold
                             ">=" — executa se valor >= threshold
@@ -258,15 +307,21 @@ def schedule_monitor(
     if condition_operator not in ("is_empty", "is_not_empty") and condition_threshold is None:
         return f"❌ condition_threshold obrigatório para operador '{condition_operator}'."
 
-    # Valida condition_sql executando antes de salvar
+    # Valida condition_sql executando antes de salvar (SQL direto ou spec JSON via
+    # GraphQL, dependendo de database.modo — ver scheduler/condition.py)
+    from .condition import run_condition_query, ConditionError, describe_condition_format
+
     try:
-        import db_config
-        db_config.run_select(condition_sql)
+        run_condition_query(condition_sql)
+    except ConditionError as exc:
+        return (
+            f"❌ **condition_sql inválido:** {exc}\n\n"
+            f"Formato esperado: {describe_condition_format()}"
+        )
     except Exception as exc:
-        import db_config
         dica = db_config.get_secao("Dica para condition_sql") or "consulte o schema em config/dominio.md."
         return (
-            f"❌ **condition_sql inválido:** a query falhou com o erro abaixo.\n"
+            f"❌ **condition_sql inválido:** a consulta falhou com o erro abaixo.\n"
             f"Corrija antes de criar o monitor.\n\n"
             f"Erro: `{exc}`\n\n"
             f"Dica: {dica}"
@@ -274,17 +329,10 @@ def schedule_monitor(
 
     effective_date_range = date_range or "today"
 
-    # task_code padrão: executa condition_sql e retorna o valor atual como string.
-    # Suficiente para qualquer monitor simples — pode ser substituído depois via save_task_code.
-    _sql_escaped = condition_sql.replace('"""', "'''")
-    default_code = (
-        "def run(from_date, to_date, ctx):\n"
-        f'    rows = ctx.sql("""\n        {_sql_escaped}\n    """)\n'
-        "    if not rows:\n"
-        "        return 'Sem dados'\n"
-        "    val = list(rows[0].values())[0]\n"
-        f"    return '{name}: ' + str(val)\n"
-    )
+    # task_code padrão: repete a leitura de condition_sql e retorna o valor atual como
+    # string. Suficiente para qualquer monitor simples — pode ser substituído depois
+    # via save_task_code.
+    default_code = _default_monitor_code(name, condition_sql)
 
     try:
         task_id = _next_id()
@@ -323,10 +371,11 @@ def schedule_monitor(
 
 @tool
 def set_task_instructions(task_id: str, instructions: str) -> str:
-    """Define ou substitui as instruções de execução de uma tarefa.
+    """Define ou substitui as instruções de execução de uma tarefa (documentação — não ativa a tarefa).
 
-    As instruções devem conter o passo a passo e os trechos de código Python
-    validados. Ao definir as instruções, a tarefa é ativada automaticamente.
+    O daemon só executa tarefas com task_code definido — instructions é apenas o
+    passo a passo de referência usado para escrever esse código. Após chamar esta
+    tool, use test_task_code e save_task_code para de fato ativar a tarefa.
 
     Args:
         task_id: ID da tarefa (ex: "001").
@@ -340,7 +389,7 @@ def set_task_instructions(task_id: str, instructions: str) -> str:
         if not row:
             return f"Tarefa '{task_id}' não encontrada."
         conn.execute(
-            "UPDATE scheduled_tasks SET instructions = ?, status = 'active' WHERE id = ?",
+            "UPDATE scheduled_tasks SET instructions = ? WHERE id = ?",
             (instructions, task_id),
         )
         conn.commit()
@@ -348,7 +397,8 @@ def set_task_instructions(task_id: str, instructions: str) -> str:
     uid = _current_user_id()
     tasks = _all_tasks(uid)
     return (
-        f"Instruções da tarefa **[{task_id}]** definidas. Status: ✅ ativa.\n\n"
+        f"Instruções da tarefa **[{task_id}]** definidas. "
+        "Use test_task_code + save_task_code para ativá-la.\n\n"
         + _format_list(tasks)
     )
 
@@ -567,7 +617,7 @@ def get_task_code(task_id: str) -> str:
     if not row:
         return f"Tarefa '{task_id}' não encontrada."
     if not row['task_code']:
-        return f"Tarefa [{task_id}] não possui task_code. Usa instruções LLM."
+        return f"Tarefa [{task_id}] não possui task_code — está em 'draft' e o daemon a ignora."
     return f"**Tarefa [{task_id}] — {row['name']}**\n\nCódigo atual:\n```python\n{row['task_code']}\n```"
 
 

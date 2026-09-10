@@ -44,8 +44,13 @@ import { ScreenshotService } from '../../core/services/screenshot.service';
 export class ScreenshotOverlayComponent {
   readonly screenshot = inject(ScreenshotService);
 
+  private isConfirmBtn(e: MouseEvent): boolean {
+    return !!(e.target as HTMLElement | null)?.closest?.('#selectionConfirmBtn');
+  }
+
   @HostListener('document:mousedown', ['$event'])
   onMouseDown(e: MouseEvent): void {
+    if (this.isConfirmBtn(e)) return;
     if (!this.screenshot.overlayActive()) return;
     e.preventDefault();
     this.screenshot.selStart(e.clientX, e.clientY);
@@ -58,6 +63,7 @@ export class ScreenshotOverlayComponent {
 
   @HostListener('document:mouseup', ['$event'])
   onMouseUp(e: MouseEvent): void {
+    if (this.isConfirmBtn(e)) return;
     this.screenshot.selEnd(e.clientX, e.clientY);
   }
 

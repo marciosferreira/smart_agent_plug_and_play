@@ -583,10 +583,20 @@ def run(from_date, to_date, ctx):
 
 ## Dica para condition_sql
 
-> ⚠️ Diferente de task_code (que já tem `ctx.graphql_table`/`ctx.graphql_aggregate`),
-> `condition_sql` é sempre SQL bruto executado direto no banco (`db_config.run_select`) —
-> não tem equivalente GraphQL. Monitores com `condition_sql` não funcionam em
-> `modo: graphql` até este domínio voltar a `modo: sql`.
+> ⚠️ Este domínio usa `modo: graphql` — `condition_sql` NÃO é uma query SQL aqui, é uma
+> string JSON (ver formato completo na seção "Formato de condition_sql" do prompt de
+> sistema do scheduler). Exemplo pronto para monitorar `dl_cost_by_cm_usd` de um site
+> específico (resolva o `id` do site via `dim_site` antes — filtre por `id`, não por
+> `name` — ver padrão "Custo de [site]" acima):
+>
+> ```json
+> {"type": "aggregate", "table": "fact_final_dl_cost", "group_by": "site_id",
+>  "metric_field": "dl_cost_by_cm_usd", "metric_op": "SUM",
+>  "where": [{"field": "site_id", "op": "EQ", "value": "<uuid do site>"},
+>            {"field": "status_approval", "op": "EQ", "value": "APPROVED"}]}
+> ```
+>
+> O valor comparado ao `condition_threshold` é sempre `metricValue`.
 
 Tabelas disponíveis: `dim_site`, `dim_product`, `fact_hourly_rate`, `fact_dl_discount`,
 `fact_final_dl_cost`. Datas de vigência ficam em `month_id`/`effective_date`/`start_date`,

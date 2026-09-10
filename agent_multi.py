@@ -341,6 +341,8 @@ class SchedulingState(TypedDict):
     task_name: str     # task name (for create)
     task_code: str     # code being built or corrected
     analista_context: str  # skill + endpoint + colunas + amostra de dados (create only)
+    is_monitor: bool   # True se task_type=monitor (set by node_criar_tarefa)
+    condition_sql_fix: str  # condition_sql corrigida com IDs reais (monitor GraphQL, opcional)
     error: str         # last test error; empty on success
     retries: int       # correction attempts so far
     result: str        # final output message
@@ -354,8 +356,22 @@ import base64 as _b64
 _CHART_TOKEN_RE = _re.compile(r'\[chart:([a-f0-9\-]{36})\]')
 
 
+_PDF_CHAR_SUBS = {
+    "—": "-", "–": "-",           # em dash, en dash
+    "‘": "'", "’": "'",           # aspas simples curvas
+    "“": '"', "”": '"',           # aspas duplas curvas
+    "•": "-", "…": "...",         # bullet, reticências
+}
+
+
 def _safe(text: str) -> str:
-    """Converte para latin-1 para compatibilidade com fontes core do fpdf2."""
+    """Converte para latin-1 para compatibilidade com fontes core do fpdf2.
+
+    Troca antes os símbolos tipográficos comuns em texto gerado por LLM (—, •, "…")
+    por equivalentes ASCII — sem isso viram "?" pelo errors="replace" abaixo.
+    """
+    for ch, repl in _PDF_CHAR_SUBS.items():
+        text = text.replace(ch, repl)
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
@@ -393,6 +409,12 @@ def _pdf_render_table(pdf, rows: list[list[str]]) -> None:
 def _pdf_safe_multicell(pdf, h: float, text: str) -> None:
     """Chama multi_cell garantindo que x está no l_margin e quebrando palavras longas."""
     pdf.set_x(pdf.l_margin)
+    # Sanitiza ANTES de medir — pdf.get_string_width() faz encode estrito (fpdf2
+    # levanta FPDFUnicodeEncodingException para caracteres fora do latin-1, como
+    # "—" ou "•", diferente de _safe() que faz errors="replace"). Sem isso, um
+    # único caractere assim aborta TODO o conteúdo do PDF (inclusive charts
+    # embutidos depois no fluxo), mesmo a página tendo sido gerada com sucesso.
+    text = _safe(text)
     # Quebra palavras sem espaço que ultrapassem a largura disponível
     available = pdf.w - pdf.l_margin - pdf.r_margin
     words = text.split(" ")
@@ -504,6 +526,7 @@ def _build_pdf(titulo: str, conteudo: str, session_id: str, user_id: str | None 
                     pdf.image(io.BytesIO(img_bytes), x=10, w=190)
                     pdf.ln(3)
     except Exception:
+        logger.exception("[_build_pdf] Erro ao renderizar conteúdo do PDF '%s'", titulo)
         # Fallback: página limpa com mensagem de erro de layout
         pdf.add_page()
         pdf.set_font("Helvetica", "", 10)
@@ -543,9 +566,11 @@ def rag_capacidades() -> str:
     como criar relatórios periódicos agendados, como configurar monitores com alertas,
     frequências suportadas e como gerenciar tarefas agendadas (listar, pausar, deletar, editar).
 
-    Use quando o usuário perguntar: o que você pode fazer, que tipo de análise é possível,
-    como agendar um relatório, como criar um alerta, quais frequências existem, como editar
-    uma tarefa, como funciona o agendamento, etc.
+    Use SOMENTE quando o usuário PERGUNTAR sobre isso (ex: "o que você pode fazer",
+    "como funciona o agendamento", "quais frequências existem") — nunca como pesquisa
+    prévia antes de executar um pedido de AÇÃO ("crie um alerta...", "agende..."). Para
+    ações de agendamento, vá direto a criar_tarefa_agendada/gerenciar_agenda — elas já
+    sabem o formato certo, não é preciso consultar esta tool antes.
     """
     _tlog("rag_capacidades", "CHAMADA", arquivo=str(_RAG_DIR / "capacidades.md"))
     return (_RAG_DIR / "capacidades.md").read_text(encoding="utf-8")
@@ -556,11 +581,12 @@ def rag_arquitetura() -> str:
     """Retorna a arquitetura técnica do sistema de agentes: como o orquestrador roteia
     pedidos, como o sub-agente analista executa análises (read_skill → executar_sql →
     analisar_dataframe), o catálogo de skills disponíveis, como o sub-agente de scheduling
-    gerencia tarefas, os dois modos de execução (LLM vs determinístico) e os métodos do ctx.
+    gerencia tarefas e ativa a execução determinística via task_code, e os métodos do ctx.
 
-    Use quando o usuário perguntar: como o sistema funciona internamente, quais skills
-    existem, como funciona o agendamento por baixo, o que é o modo determinístico,
-    o que é o sub-agente analista, como o orquestrador decide o que fazer, etc.
+    Use SOMENTE quando o usuário PERGUNTAR sobre isso (ex: "como o sistema funciona
+    internamente", "o que é o modo determinístico") — nunca como pesquisa prévia antes
+    de executar um pedido de AÇÃO. Para criar/editar tarefas, vá direto a
+    criar_tarefa_agendada/editar_tarefa_agendada — não é preciso consultar esta tool antes.
     """
     _tlog("rag_arquitetura", "CHAMADA", arquivo=str(_RAG_DIR / "arquitetura.md"))
     return (_RAG_DIR / "arquitetura.md").read_text(encoding="utf-8")
@@ -1746,16 +1772,30 @@ def _describe_task_context() -> str:
 
 
 def _sandbox_skill_texto() -> str:
-    """Regras do sandbox de task_code + dialeto do banco + exemplos do pack de configuração."""
+    """Regras do sandbox de task_code + modo de acesso a dados + exemplos do pack de configuração."""
     texto = (SKILLS_FOLDER / "task_code_sandbox.md").read_text(encoding="utf-8")
-    texto += (
-        f"\n\n> Dialeto SQL do banco configurado: **{db_config.dialect_name()}** — "
-        f"{db_config.dialect_hint()}.\n"
-    )
+    if db_config.modo_acesso() == "graphql":
+        texto += (
+            "\n\n> ⚠️ Este domínio está em **modo: graphql** — `ctx.sql()` NÃO existe aqui.\n"
+            "> Use `ctx.graphql_table()`/`ctx.graphql_aggregate()` (seção \"Modo graphql\" acima),\n"
+            "> SEM o parâmetro `chave` (isso é só das tools do analista, não do ctx).\n"
+        )
+    else:
+        texto += (
+            f"\n\n> Dialeto SQL do banco configurado: **{db_config.dialect_name()}** — "
+            f"{db_config.dialect_hint()}.\n"
+        )
     exemplos = db_config.get_secao("Exemplos task_code")
     if exemplos:
         texto += f"\n## Exemplos do domínio configurado\n\n{exemplos}\n"
     return texto
+
+
+def _condition_format_texto() -> str:
+    """Formato de condition_sql (schedule_monitor) para o modo de acesso a dados do
+    domínio ativo — SQL direto ou spec JSON via GraphQL. Ver scheduler/condition.py."""
+    from scheduler.condition import describe_condition_format
+    return describe_condition_format()
 
 
 def _build_scheduler_agent(llm):
@@ -1769,20 +1809,21 @@ def _build_scheduler_agent(llm):
         + _describe_scheduler_tools(sch_tools) + "\n\n"
         + "## Sandbox do task_code — leia antes de escrever qualquer código\n"
         + _sandbox_skill + "\n\n"
-        "## Modos de execução da tarefa\n"
-        "Cada tarefa pode executar em dois modos:\n"
-        "  A) **Modo LLM** (sem task_code): o daemon monta um prompt com as `instructions` e chama o agente.\n"
-        "  B) **Modo determinístico** (com task_code): o daemon executa o código Python diretamente,\n"
-        "     sem LLM. Mais rápido, previsível e sem custo de inferência.\n"
-        "O modo B é ativado automaticamente quando task_code estiver definido. Para converter uma\n"
-        "tarefa para modo B, use test_task_code para validar o código e save_task_code para salvar.\n\n"
+        "## Execução da tarefa\n"
+        "O daemon SEMPRE executa o `task_code` Python diretamente — não há execução via LLM em\n"
+        "tempo de agendamento. Uma tarefa só fica ativa e executável depois que task_code é salvo\n"
+        "com save_task_code (teste antes com test_task_code). Enquanto não houver task_code, a\n"
+        "tarefa fica em 'draft' e o daemon a ignora.\n\n"
         "## Campos importantes\n"
         "- description: texto curto e legível que descreve o que a tarefa faz. "
         "Aparece na listagem para o usuário. Ex: 'Relatório semanal de <métrica> por <dimensão> toda segunda às 8h.'\n"
-        "- instructions: passo a passo detalhado com o código Python validado. "
-        "Não aparece na listagem. Usado no modo LLM.\n"
+        "- instructions: passo a passo de referência (não é executado pelo daemon) usado para\n"
+        "escrever o task_code. Defina com set_task_instructions se útil, mas isso sozinho não\n"
+        "ativa a tarefa.\n"
         "- task_code: código Python com `def run(from_date, to_date, ctx)`. "
-        "Quando presente, execução é determinística. Versões anteriores ficam disponíveis para rollback.\n\n"
+        "Obrigatório para a tarefa ficar ativa. Versões anteriores ficam disponíveis para rollback.\n\n"
+        "## Formato de condition_sql neste domínio\n"
+        + _condition_format_texto() + "\n\n"
         "## O objeto ctx — use SEMPRE estas funções, não reimplemente\n"
         "O código recebe `ctx` com os seguintes métodos. Use-os diretamente:\n\n"
         + _describe_task_context() + "\n\n"
@@ -1915,6 +1956,16 @@ def _build_scheduling_graph(llm):
             return m.group(1).strip()
         return ""
 
+    def _extract_json_block(text: str, marker: str) -> dict | None:
+        """Extrai e faz parse de um bloco ```<marker>\\n{...}\\n``` do texto, ou None."""
+        m = _re_sg.search(rf'```{marker}\n(.*?)```', text, _re_sg.DOTALL)
+        if not m:
+            return None
+        try:
+            return _json.loads(m.group(1).strip())
+        except Exception:
+            return None
+
     def _push(event: dict) -> None:
         _push_event(_current_session.get(), event)
 
@@ -1922,6 +1973,9 @@ def _build_scheduling_graph(llm):
 
     def node_criar_tarefa(state: SchedulingState) -> dict:
         _push({"type": "tool", "name": "schedule_task", "label": "🗓️ Criando registro da tarefa"})
+
+        from scheduler.condition import describe_condition_format
+        condition_format_hint = describe_condition_format()
 
         param_prompt = (
             "Extraia os parâmetros de agendamento da instrução abaixo. "
@@ -1936,7 +1990,7 @@ def _build_scheduling_graph(llm):
             '  "day": "número 1-31 para monthly ou null",\n'
             '  "time": "HH:MM ou null",\n'
             '  "date_range": "ytd|mtd|today|last_7d|last_30d|last_90d ou null",\n'
-            '  "condition_sql": "query SELECT para monitors (no dialeto do banco configurado) ou null",\n'
+            '  "condition_sql": "condição do monitor — formato depende do domínio, ver regra abaixo — ou null",\n'
             '  "condition_operator": ">= | > | <= | < | == | != | is_empty | is_not_empty ou null",\n'
             '  "condition_threshold": "número ou null"\n'
             '}\n\n'
@@ -1944,7 +1998,7 @@ def _build_scheduling_graph(llm):
             "- task_type=monitor se o pedido menciona: alerte/avise/notifique/monitore/caso X>N/threshold\n"
             "- task_type=report para relatórios, gráficos, planilhas recorrentes\n"
             "- monitor: frequency=every_5m por padrão, time=null; preencha condition_sql/operator/threshold\n"
-            f"- condition_sql deve usar dialeto {db_config.dialect_name()}: {db_config.dialect_hint()}\n"
+            f"- {condition_format_hint}\n"
             f"- {db_config.get_secao('Dica para condition_sql') or 'consulte o schema em config/dominio.md'}\n"
             "- date_range: preencha quando o pedido especifica período (ano atual→ytd, mês→mtd)\n"
             "- weekly → weekday obrigatório. monthly → day obrigatório.\n"
@@ -1994,6 +2048,18 @@ def _build_scheduling_graph(llm):
         if not task_id:
             return {"error": f"Erro ao criar tarefa: {result}", "task_id": "", "task_name": ""}
 
+        # Mantém a tarefa em 'draft' (invisível no painel, não executável) até o
+        # pipeline terminar de gerar/testar/salvar o código real em node_salvar_codigo.
+        # schedule_monitor cria monitores já 'active' com um task_code padrão (contrato
+        # dela quando chamada direto via gerenciar_agenda) — aqui rebaixamos de volta
+        # para 'draft' porque o código final ainda vai ser (re)gerado pelos próximos
+        # nós. node_responder também depende de status='draft' para poder limpar o
+        # registro se o pipeline falhar antes de salvar_codigo.
+        from db import get_db as _get_db
+        with _get_db() as _conn:
+            _conn.execute("UPDATE scheduled_tasks SET status='draft' WHERE id=?", (task_id,))
+            _conn.commit()
+
         return {"task_id": task_id, "task_name": params.get("name", ""), "error": "", "is_monitor": is_monitor}
 
     # ── Node: consultar_dados ────────────────────────────────────────────────
@@ -2010,10 +2076,21 @@ def _build_scheduling_graph(llm):
         hoje = datetime.now().date().isoformat()
         nome_tool_dados = "executar_sql" if db_config.modo_acesso() == "sql" else "executar_graphql"
 
+        resolucao_entidade = ""
+        if state.get("is_monitor") and db_config.modo_acesso() == "graphql":
+            resolucao_entidade = (
+                f"⚠️ IMPORTANTE — este é um MONITOR em domínio GraphQL: se o pedido do usuário\n"
+                f"referencia uma entidade pelo NOME (ex: nome de site, produto, cliente), você DEVE\n"
+                f"resolver o ID real dela consultando a tabela de dimensão correspondente ANTES de\n"
+                f"montar o filtro final — nunca use o nome digitado como valor de um campo de ID/FK\n"
+                f"(ex: `site_id`). Inclua o resultado no campo FILTROS abaixo.\n\n"
+            )
+
         msg_content = (
             f"[PARA_AGENDAMENTO — FASE 1: COLETA DE CONTEXTO]\n"
             f"[PERÍODO: from={hoje}&to={hoje}]\n\n"
             f"Pedido do usuário: {state['user_request']}\n\n"
+            f"{resolucao_entidade}"
             f"Sua tarefa nesta fase:\n"
             f"1. Chame read_skill() para identificar a skill correta para este pedido.\n"
             f"2. Chame {nome_tool_dados}() para buscar dados reais do período acima.\n"
@@ -2023,6 +2100,9 @@ def _build_scheduling_graph(llm):
             f"QUERY: <consulta completa usada na chamada {nome_tool_dados}>\n"
             f"COLUNAS: <lista das colunas relevantes do dataframe>\n"
             f"AMOSTRA: <3-5 linhas representativas do dataframe em formato texto>\n"
+            f"FILTROS: <lista JSON de filtros com valores REAIS já resolvidos (IDs, não nomes), "
+            f"formato [{{\"field\": \"...\", \"op\": \"EQ\", \"value\": \"...\"}}], ou 'nenhum' se o "
+            f"pedido não filtra por entidade nomeada>\n"
             f"TIPO_SAIDA: <PDF_COM_GRAFICO | GRAFICO | EXCEL | MONITOR>\n\n"
             f"⛔ NÃO gere task_code nesta fase.\n"
             f"⛔ NÃO chame gerar_pdf nem gerar_excel.\n"
@@ -2056,6 +2136,35 @@ def _build_scheduling_graph(llm):
 
         context = state.get("analista_context", "")
 
+        is_graphql_monitor = state.get("is_monitor") and db_config.modo_acesso() == "graphql"
+
+        if db_config.modo_acesso() == "graphql":
+            query_instrucao = (
+                "- QUERY acima é a chamada `executar_graphql(...)`/`executar_graphql_agregado(...)` "
+                "usada pelo analista — ela tem um parâmetro `chave` que NÃO existe no ctx. Use os "
+                "valores REAIS já resolvidos em FILTROS (não nomes digitados pelo usuário) no `where`.\n"
+                "- Reescreva a MESMA consulta (mesma `table`, `where`, `group_by`, `metric_field`, "
+                "`metric_op`, `expand`) como `ctx.graphql_table(...)` ou `ctx.graphql_aggregate(...)` "
+                "— NUNCA use `ctx.sql()` (não existe neste domínio) e NUNCA passe `chave` para o ctx.\n"
+            )
+        else:
+            query_instrucao = (
+                "- Use EXATAMENTE a query SQL informada em QUERY, adaptada para `ctx.sql(f'''...''')` "
+                "(com from_date e to_date interpolados como parâmetros de data).\n"
+            )
+
+        condition_fix_instrucao = ""
+        if is_graphql_monitor:
+            condition_fix_instrucao = (
+                "\n- Esta tarefa é um MONITOR: além do bloco de código, responda também com um "
+                "segundo bloco ```conditionjson\\n{...}\\n``` contendo a condition_sql CORRIGIDA "
+                "(mesmo `where` que você usou no código, com os valores REAIS de FILTROS — nunca "
+                "nomes) no formato: "
+                '{"type": "aggregate"|"table", "table": "...", "group_by": "...", '
+                '"metric_field": "...", "metric_op": "...", "where": [...]} (campos de "aggregate") '
+                'ou {"type": "table", "table": "...", "where": [...], "value_field": "..."}.\n'
+            )
+
         gen_prompt = (
             f"Você é um gerador de task_code Python para tarefas agendadas.\n\n"
             f"## Pedido do usuário\n"
@@ -2066,21 +2175,27 @@ def _build_scheduling_graph(llm):
             f"{_sandbox_skill}\n\n"
             f"## Instruções\n"
             f"- Escreva a função `def run(from_date, to_date, ctx)` usando a query e colunas acima.\n"
-            f"- Use EXATAMENTE a query SQL informada em QUERY, adaptada para `ctx.sql(f'''...''')` "
-            f"(com from_date e to_date interpolados como parâmetros de data).\n"
+            f"{query_instrucao}"
             f"- Use EXATAMENTE os nomes de colunas informados em COLUNAS.\n"
             f"- Siga o template canônico correspondente ao TIPO_SAIDA:\n"
             f"    PDF_COM_GRAFICO → salve gráfico com ctx.save_chart(fig) e gere PDF com ctx.generate_pdf()\n"
             f"    GRAFICO         → retorne apenas ctx.save_chart(fig)\n"
             f"    EXCEL           → retorne ctx.generate_excel(df, 'nome')\n"
-            f"    MONITOR         → use ctx.notify() e retorne string com valor atual\n"
+            f"    MONITOR         → NÃO use ctx.notify() (a notificação já é automática pela "
+            f"condition_sql da tarefa) — apenas retorne uma string com o valor atual\n"
             f"- NUNCA use import. pd, np, plt, date, datetime, timedelta etc já estão no namespace.\n"
-            f"- Retorne APENAS o bloco Python completo, sem texto explicativo.\n"
-            f"- Responda com ```python\\n...\\n```"
+            f"{condition_fix_instrucao}"
+            f"- Retorne o bloco Python completo, sem texto explicativo, como ```python\\n...\\n```"
+            f"{' seguido do bloco ```conditionjson```, se aplicável.' if is_graphql_monitor else '.'}"
         )
 
         response = llm.invoke([HumanMessage(content=gen_prompt)])
         code = _extract_code_block(response.content)
+        condition_sql_fix = ""
+        if is_graphql_monitor:
+            fix_obj = _extract_json_block(response.content, "conditionjson")
+            if fix_obj:
+                condition_sql_fix = _json.dumps(fix_obj)
 
         if not code:
             return {
@@ -2091,7 +2206,7 @@ def _build_scheduling_graph(llm):
                 "task_code": "",
             }
 
-        return {"task_code": code, "error": ""}
+        return {"task_code": code, "error": "", "condition_sql_fix": condition_sql_fix}
 
     # ── Node: editar_codigo ──────────────────────────────────────────────────
 
@@ -2227,6 +2342,20 @@ def _build_scheduling_graph(llm):
     # ── Node: salvar_codigo ──────────────────────────────────────────────────
 
     def node_salvar_codigo(state: SchedulingState) -> dict:
+        # Se node_gerar_codigo corrigiu a condition_sql (monitor GraphQL cujo filtro
+        # inicial, montado às cegas em node_criar_tarefa, usava o nome digitado pelo
+        # usuário em vez do ID real resolvido pelo analista), aplica a correção antes
+        # de salvar — senão o monitor fica ativo mas com uma condição que nunca bate.
+        condition_sql_fix = state.get("condition_sql_fix") or ""
+        if condition_sql_fix:
+            from db import get_db as _get_db
+            with _get_db() as _conn:
+                _conn.execute(
+                    "UPDATE scheduled_tasks SET condition_sql=? WHERE id=?",
+                    (condition_sql_fix, state["task_id"]),
+                )
+                _conn.commit()
+
         _push({"type": "tool", "name": "save_task_code", "label": "💾 Salvando código validado"})
 
         result = save_task_code.invoke({
@@ -2399,8 +2528,31 @@ def criar_tarefa_agendada(instrucao: str, config: RunnableConfig = None) -> str:
         "result": "",
     }
 
-    resultado = _scheduling_graph.invoke(initial_state)  # type: ignore[arg-type]
-    return resultado.get("result", "Tarefa criada.")
+    # Usa stream() em vez de invoke() para conseguir capturar o task_id assim que
+    # node_criar_tarefa o gera — se algum nó seguinte (consultar_dados, gerar_codigo,
+    # etc.) lançar uma exceção não tratada, invoke() perderia TODO o estado e deixaria
+    # a tarefa 'draft' órfã no banco, invisível pra sempre (é isso que estava
+    # acontecendo). Com stream(), guardamos o último estado conhecido e limpamos o
+    # draft mesmo quando o pipeline quebra de forma inesperada.
+    last_state: dict = {}
+    try:
+        for step_state in _scheduling_graph.stream(initial_state, stream_mode="values"):  # type: ignore[arg-type]
+            last_state = step_state
+        return last_state.get("result", "Tarefa criada.")
+    except Exception as exc:
+        logger.exception("[criar_tarefa_agendada] Falha inesperada no pipeline de agendamento")
+        task_id = last_state.get("task_id") or ""
+        if task_id:
+            try:
+                from db import get_db as _get_db
+                with _get_db() as _conn:
+                    _conn.execute("DELETE FROM scheduled_tasks WHERE id = ? AND status = 'draft'", (task_id,))
+                    _conn.execute("DELETE FROM task_runs WHERE task_id = ?", (task_id,))
+                    _conn.execute("DELETE FROM task_code_versions WHERE task_id = ?", (task_id,))
+                    _conn.commit()
+            except Exception:
+                pass
+        return f"Não foi possível criar a tarefa — erro inesperado no pipeline de agendamento: {exc}"
 
 
 @tool
@@ -2555,6 +2707,13 @@ def _build_orchestrator(llm, checkpointer=None):
         "Após criar_tarefa_agendada retornar, repasse o resultado ao usuário.\n"
         "NÃO inclua tokens [chart:uuid], [pdf:uuid] ou [excel:uuid] na sua resposta —\n"
         "os artefatos já foram enviados ao chat automaticamente.\n\n"
+        "⚠️ Se criar_tarefa_agendada retornar erro ou limitação, NÃO tente contornar chamando\n"
+        "rag_capacidades/rag_arquitetura/rag_dados, gerenciar_agenda, schedule_monitor,\n"
+        "schedule_task, update_scheduled_task, test_task_code ou save_task_code manualmente —\n"
+        "esse fluxo manual é só para LISTAR/PAUSAR/RETOMAR/DELETAR (ver seção abaixo), nunca\n"
+        "para criar. Se o usuário pedir para tentar de novo (inclusive após você corrigir algo\n"
+        "no sistema), chame criar_tarefa_agendada de novo com a mesma instrução — o pipeline já\n"
+        "tenta se corrigir sozinho (até 3 tentativas). Só repasse a limitação ao usuário como veio.\n\n"
         "## Agendamento de tarefas — EDITAR tarefa existente\n"
         "Quando o usuário pedir para editar/ajustar qualquer aspecto de uma tarefa\n"
         "(cor, escala, colunas, threshold, período, lógica), chame APENAS:\n\n"
