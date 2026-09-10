@@ -5,7 +5,7 @@ import { ApiStatusService } from '../../core/services/api-status.service';
 import { PanelStateService } from '../../core/services/panel-state.service';
 import { AlertsService } from '../../core/services/alerts.service';
 import { AgendaService } from '../../core/services/agenda.service';
-import { UserSessionService } from '../../core/services/user-session.service';
+import { DEMO_USER_IDS, UserSessionService } from '../../core/services/user-session.service';
 
 /**
  * Porta dashboard.html:767-801 (header + nav de auditoria).
@@ -23,6 +23,9 @@ export class HeaderComponent implements OnInit, OnDestroy {
   readonly agenda = inject(AgendaService);
   readonly userSession = inject(UserSessionService);
 
+  readonly demoUserIds = DEMO_USER_IDS.includes(this.userSession.userId)
+    ? DEMO_USER_IDS
+    : [...DEMO_USER_IDS, this.userSession.userId];
   readonly clock = signal(new Date().toLocaleTimeString('pt-BR', { hour12: false }));
   readonly userIdCopied = signal(false);
   private clockTimer?: ReturnType<typeof setInterval>;
@@ -34,6 +37,11 @@ export class HeaderComponent implements OnInit, OnDestroy {
       clearTimeout(this.copiedTimer);
       this.copiedTimer = setTimeout(() => this.userIdCopied.set(false), 1500);
     });
+  }
+
+  onUserChange(event: Event): void {
+    const userId = (event.target as HTMLSelectElement).value;
+    this.userSession.switchUser(userId);
   }
 
   ngOnInit(): void {

@@ -13,6 +13,16 @@
     <div class="api-status" style="cursor:pointer;" [title]="userIdCopied() ? 'Copiado!' : 'user_id: ' + userSession.userId + ' (clique para copiar)'" (click)="copyUserId()">
       {{ userIdCopied() ? 'copiado!' : 'uid: ' + userSession.userId.slice(0, 8) }}
     </div>
+    <select
+      class="api-status"
+      style="cursor:pointer;background:transparent;color:inherit;font-family:inherit;"
+      title="Trocar de usuário (demo)"
+      (change)="onUserChange($event)"
+    >
+      @for (uid of demoUserIds; track uid) {
+        <option [value]="uid" [selected]="uid === userSession.userId">user {{ uid }}</option>
+      }
+    </select>
     <div class="api-status" [ngClass]="{ ok: apiStatus.status() === 'online', err: apiStatus.status() === 'offline' }">
       {{ apiStatus.status() === 'online' ? 'API ONLINE' : apiStatus.status() === 'offline' ? 'API OFFLINE' : 'API —' }}
     </div>
