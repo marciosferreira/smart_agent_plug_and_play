@@ -175,10 +175,10 @@ dados de hoje (pode ser uma limitação só deste ambiente dev/non-prod).
 Este é um sistema de custo de mão de obra direta (DL cost) pago a fábricas contratadas (CMs)
 que fabricam os produtos — não é um sistema de pedidos de compra (isso é o domínio posh) nem
 de alocação de supply. Se o usuário NÃO mencionar período nenhum, use
-calcular_periodo('ultimo quarter') como padrão (o quarter fiscal fechado mais recente — este
-domínio não tem `database.url`/SQL, então `calcular_periodo('todo o período')` NÃO funciona
-aqui, ao contrário de domínios com modo: sql) e siga direto para consultar_analista — NUNCA
-pergunte o período ao usuário.
+calcular_periodo('ultimo quarter') como padrão (o quarter fiscal fechado mais recente — escolha
+deliberada de granularidade, não workaround: `calcular_periodo('todo o período')` também
+funciona aqui via fallback genérico de calendário, cobrindo 2000-01-01 até hoje) e siga direto
+para consultar_analista — NUNCA pergunte o período ao usuário.
 
 Ao delegar a consultar_analista, avise de antemão sobre as duas limitações de dado mais
 comuns deste domínio (evita ida e volta desnecessária): (1) "Sales Model" não é filtrável —
@@ -189,12 +189,13 @@ já na primeira chamada a consultar_analista, em vez de aguardar a resposta dele
 
 ## Períodos
 
-> ⚠️ Esta seção depende de acesso SQL direto (`db_config.run_select`, caminho interno que
-> não passa pela tool ativa nem depende de `database.modo`). Com o domínio em `modo: graphql`
-> e sem `database.url` configurada, a resolução abaixo falha silenciosamente e o sistema cai
-> no fallback de calendário — "todo o período" usará a data de hoje, não o range real dos
-> dados. Sem impacto para períodos comuns (hoje, esta semana, mês corrente etc.), que são
-> resolvidos por calendário de qualquer forma.
+> ⚠️ A consulta SQL abaixo não executa neste domínio: depende de `db_config.run_select`,
+> que exige `database.url`, ausente em `modo: graphql`. Com o domínio em `modo: graphql`,
+> a resolução do range real dos dados fica a cargo do fallback genérico de
+> `calcular_periodo` em `agent_multi.py` — "todo o período"/"histórico completo"/"desde o
+> início" resolve para `2000-01-01` até hoje (cobre qualquer domínio sem SQL), não para
+> "hoje". O bloco SQL ficou apenas como referência para o caso deste domínio um dia rodar
+> em `modo: sql`.
 
 ### re:todo o per[ií]odo|hist[oó]rico completo|desde o in[ií]cio
 

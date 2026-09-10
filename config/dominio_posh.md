@@ -129,12 +129,14 @@ e siga direto para consultar_analista — NUNCA pergunte o período ao usuário.
 
 ## Períodos
 
-> ⚠️ Esta seção depende de acesso SQL direto (`db_config.run_select`, caminho interno que
-> não passa pela tool ativa nem depende de `database.modo`). Com o domínio em `modo: graphql`
-> e sem `database.url` configurada, a resolução abaixo falha silenciosamente e o sistema cai
-> no fallback de calendário — "todo o período" usará a data de hoje, não o range real dos
-> dados. Sem impacto para períodos comuns (hoje, esta semana, mês corrente etc.), que são
-> resolvidos por calendário de qualquer forma.
+> ⚠️ A consulta SQL abaixo não executa neste domínio: depende de `db_config.run_select`,
+> que exige `database.url`, ausente em `modo: graphql`. Com o domínio em `modo: graphql`,
+> a resolução do range real dos dados fica a cargo do fallback genérico de
+> `calcular_periodo` em `agent_multi.py` — "todo o período"/"histórico completo"/"desde o
+> início" resolve para `2000-01-01` até hoje (cobre qualquer domínio sem SQL), não para
+> "hoje". A regra do orquestrador abaixo (usar `calcular_periodo('todo o período')` como
+> padrão) já reflete isso corretamente. O bloco SQL ficou apenas como referência para o
+> caso deste domínio um dia rodar em `modo: sql`.
 
 ### re:todo o per[ií]odo|hist[oó]rico completo|desde o in[ií]cio
 

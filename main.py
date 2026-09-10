@@ -13,7 +13,6 @@ import logging
 import os
 import re
 import traceback
-from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, File, Query, Request, UploadFile
@@ -22,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from db import get_db, init_db, migrate_db, shift_dates_to_today, save_dashboard_widget_order
+from db import get_db, init_db, migrate_db, save_dashboard_widget_order
 import db_config
 
 try:
@@ -171,56 +170,6 @@ async def handler_422(request: Request, exc: Exception):
     )
 
 
-def _demo_reset():
-    """Apaga todos os dados gerados por usuários (tarefas, runs, alertas, artefatos, histórico de chat).
-    Os dados operacionais (produção, defeitos, métricas) são preservados.
-    Chamado automaticamente à meia-noite para manter o banco enxuto em ambiente de demo.
-    """
-    try:
-        with get_db() as conn:
-            conn.execute("DELETE FROM scheduled_tasks")
-            conn.execute("DELETE FROM task_runs")
-            conn.execute("DELETE FROM task_code_versions")
-            conn.execute("DELETE FROM dashboard_widgets")
-            conn.execute("UPDATE task_id_sequence SET next_id = 1 WHERE id = 1")
-            # Limpa tabelas do checkpointer LangGraph (histórico de conversa)
-            for tbl in ("checkpoints", "writes"):
-                try:
-                    conn.execute(f"DELETE FROM {tbl}")
-                except Exception:
-                    pass
-            conn.execute("DELETE FROM session_dominio")
-            conn.commit()
-
-        # Alertas e artefatos ficam em uma conexão separada (chart_store)
-        cs.delete_all_alerts()
-        cs.delete_all_charts()
-
-        # Limpa namespaces Python em memória
-        try:
-            from agent_multi import _namespaces
-            _namespaces.clear()
-        except Exception:
-            pass
-
-        logger.info("Demo reset executado à meia-noite — dados de usuário removidos.")
-    except Exception:
-        logger.exception("Falha no demo reset")
-
-
-async def _daily_date_shifter():
-    """Background task: waits until next midnight, then shifts DB dates forward by 1 day. Repeats forever."""
-    while True:
-        now = datetime.now()
-        next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        await asyncio.sleep((next_midnight - now).total_seconds())
-        if os.getenv("DEMO_RESET", "false").lower() == "true":
-            _demo_reset()
-        delta = shift_dates_to_today()
-        if delta:
-            logger.info("Date shift automático aplicado: +%d dia(s)", delta)
-
-
 @app.on_event("startup")
 async def startup():
     init_db()
@@ -233,10 +182,6 @@ async def startup():
     else:
         logger.warning(db_config.MSG_NAO_CONFIGURADO)
     _init_vertex()
-    delta = shift_dates_to_today()
-    if delta:
-        logger.info("Date shift inicial: +%d dia(s)", delta)
-    asyncio.create_task(_daily_date_shifter())
     asyncio.create_task(scheduler_loop())
     asyncio.create_task(ns_cleanup_loop())
 

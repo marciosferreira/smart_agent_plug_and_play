@@ -482,7 +482,6 @@ Ver [Plug-and-play](#plug-and-play--trocar-de-banco-e-domínio-sem-mexer-em-cód
 | `MODEL_NAME` | Modelo Gemini usado pelo agente | `gemini-2.5-flash` |
 | `GOOGLE_CREDENTIALS_JSON` | Credenciais de service account em base64 (alternativa a `credentials.json` na raiz) | — |
 | `BACKEND_URL` | URL pública do backend, usada para montar links de artefatos | `http://localhost:8000` |
-| `DEMO_RESET` | `true` reseta os dados de demo (`mfg.db`) a cada início | `false` |
 | `DEBUG_TOOLS` | `1` loga o payload completo de cada tool call do agente | `0` |
 | `MAX_INTERACOES` | Janela de mensagens recentes enviada ao modelo pelo checkpointer | `10` |
 
