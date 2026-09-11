@@ -36,6 +36,8 @@ export class WidgetsService {
   readonly widgets = signal<DashboardWidget[]>([]);
   readonly loaded = signal(false);
   readonly errors = signal<Record<string, string>>({});
+  /** Tipo Chart.js (bar/pie/line/...) de cada painel, descoberto ao carregar seus dados — usado pelo card para exibir o tipo (ver widget-card.component.ts). */
+  readonly chartTypes = signal<Record<string, string>>({});
 
   private readonly charts = new Map<string, Chart>();
   private readonly canvases = new Map<string, HTMLCanvasElement>();
@@ -101,6 +103,7 @@ export class WidgetsService {
       this.destroyChart(id);
       const chart = config.type === 'matrix' ? this.buildMatrixChart(canvas, config) : this.buildStandardChart(canvas, config);
       this.charts.set(id, chart);
+      this.chartTypes.update((cur) => ({ ...cur, [id]: config.type }));
       this.setError(id, null);
     } catch (e) {
       const msg = e instanceof HttpErrorResponse ? e.error?.message : null;
@@ -259,5 +262,10 @@ export class WidgetsService {
     this.destroyChart(id);
     this.canvases.delete(id);
     this.widgets.update((list) => list.filter((w) => w.id !== id));
+    this.chartTypes.update((cur) => {
+      const next = { ...cur };
+      delete next[id];
+      return next;
+    });
   }
 }
