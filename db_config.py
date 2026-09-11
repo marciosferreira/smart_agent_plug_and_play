@@ -1,12 +1,18 @@
 """Porta única de acesso ao banco de domínio e ao pack de configuração (config/).
 
-O pack tem 2 arquivos:
-  config/settings.yml — nome/descrição do app + URL SQLAlchemy do banco
-  config/dominio.md   — todo o conhecimento de domínio, em seções canônicas '## '
+O pack tem:
+  config/settings.yml            — nome/descrição do app, dominio/idioma_default ativos,
+                                    URL SQLAlchemy (ou config graphql) do banco
+  config/<dominio>/<lang>/dominio.md — conhecimento de domínio daquele idioma, em
+                                    seções canônicas '## ' (ver dominio_path())
+  config/<dominio>/<lang>/dashboard_default.py — painéis padrão daquele idioma
+                                    (ver dashboard_default_path())
 
 Trocar o conteúdo de config/ re-aponta o sistema inteiro para outro banco.
-A troca exige restart do app (os prompts são montados uma vez no init).
+A troca de dominio exige restart do app (os prompts são montados uma vez no init).
+A troca de idioma NÃO exige restart — é resolvida por requisição (ver get_lang()/set_lang()).
 """
+import contextvars
 import os
 import re
 import threading
@@ -148,34 +154,117 @@ def dominio_filename() -> str:
 
     Permite manter vários domínios na pasta (dominio_posh.md, dominio_alocacao.md, ...)
     e trocar o ativo mudando uma linha no settings.yml. Default: dominio.md.
+
+    IMPORTANTE: este valor é gravado como chave de identidade (`dominio`) em várias
+    tabelas do banco local (scheduled_tasks, dashboard_widgets, threshold_alerts,
+    charts/pdfs/excels, task_code_audit, session_dominio — ver ARQUITETURA.md). NUNCA
+    mude o formato do que esta função retorna: linhas já gravadas em produção ficariam
+    órfãs (filtro `WHERE dominio=?` deixaria de encontrá-las). Para resolver caminhos de
+    arquivo por idioma, use `dominio_path()`/`dashboard_default_path()` abaixo — elas
+    derivam o slug internamente sem tocar neste valor.
     """
     return (_settings().get("app") or {}).get("dominio") or _DOMINIO_FILE_PADRAO
 
 
-def dashboard_default_filename() -> str:
-    """Nome do arquivo de painéis padrão do domínio ativo: dominio_alocacao.md →
-    dashboard_default_alocacao.py (mesmo sufixo de dominio_filename(), trocando o
-    prefixo e a extensão). Arquivo opcional — domínio sem ele fica sem defaults."""
+# ── Idioma ────────────────────────────────────────────────────────────────────
+# Idioma é uma dimensão independente de dominio (ver dominio_filename() acima):
+# dominio decide QUAL banco/negócio; idioma decide EM QUE LÍNGUA o conteúdo servido
+# ao usuário (dominio.md, painéis default, docs de auto-descrição) é lido. Nenhuma
+# tabela grava idioma como parte de uma chave de identidade — é só resolução de
+# arquivo, por isso pode ser 100% dinâmico por requisição (ao contrário de dominio,
+# que é fixo por processo).
+
+IDIOMAS_SUPORTADOS = ("pt-BR", "en", "zh")
+
+# Idioma padrão da INSTALAÇÃO (fallback de conteúdo quando o idioma pedido não tem
+# arquivo traduzido ainda). Hoje pt-BR porque é o único idioma com conteúdo de
+# domínio completo — vira "en" no settings.yml assim que a tradução em inglês
+# estiver pronta de verdade. Independente do idioma default da UI (esse é decidido
+# no front-end, ver LocaleService).
+_IDIOMA_PADRAO_FALLBACK = "pt-BR"
+
+
+def idioma_default() -> str:
+    """Idioma de fallback desta instalação — settings.yml app.idioma_default."""
+    idioma = (_settings().get("app") or {}).get("idioma_default") or _IDIOMA_PADRAO_FALLBACK
+    return idioma if idioma in IDIOMAS_SUPORTADOS else _IDIOMA_PADRAO_FALLBACK
+
+
+_lang_ctx: "contextvars.ContextVar[str]" = contextvars.ContextVar("db_config_lang", default="")
+
+
+def set_lang(lang: "str | None") -> None:
+    """Registra o idioma da requisição atual (propagado via contextvars — mesmo
+    mecanismo de _current_user_id em agent_multi.py). Idioma inválido/vazio é ignorado
+    silenciosamente; get_lang() cai no fallback da instalação nesse caso."""
+    if lang and lang in IDIOMAS_SUPORTADOS:
+        _lang_ctx.set(lang)
+
+
+def get_lang() -> str:
+    """Idioma efetivo: o da requisição atual, ou o default da instalação."""
+    return _lang_ctx.get() or idioma_default()
+
+
+def _dominio_slug() -> str:
+    """dominio_new_age.md → new_age — nome da pasta em config/<slug>/<lang>/."""
     base = re.sub(r"\.md$", "", dominio_filename())
-    base = re.sub(r"^dominio", "dashboard_default", base)
-    return base + ".py"
+    base = re.sub(r"^dominio_?", "", base)
+    return base or "default"
+
+
+def _resolver_com_fallback(caminho_por_idioma) -> "Path | None":
+    """Tenta o idioma pedido; se o arquivo não existir, cai no idioma default da
+    instalação (com aviso); se nem esse existir, retorna None."""
+    lang = get_lang()
+    candidato = caminho_por_idioma(lang)
+    if candidato.exists():
+        return candidato
+    fallback = idioma_default()
+    if fallback != lang:
+        candidato_fallback = caminho_por_idioma(fallback)
+        if candidato_fallback.exists():
+            print(f"[config] '{lang}' sem tradução em {candidato.name} — usando fallback '{fallback}'")
+            return candidato_fallback
+    return None
+
+
+def dominio_path(lang: "str | None" = None) -> "Path | None":
+    """Caminho do dominio.md no idioma efetivo (pedido, ou fallback da instalação).
+    None se não existir em nenhum dos dois — quem chamar trata como 'sem conteúdo'."""
+    if lang:
+        set_lang(lang)
+    slug = _dominio_slug()
+    return _resolver_com_fallback(lambda l: CONFIG_DIR / slug / l / "dominio.md")
+
+
+def dashboard_default_path(lang: "str | None" = None) -> "Path | None":
+    """Caminho do dashboard_default.py no idioma efetivo. None se ausente — domínio
+    sem arquivo (em nenhum idioma) fica sem painéis default, como antes."""
+    if lang:
+        set_lang(lang)
+    slug = _dominio_slug()
+    return _resolver_com_fallback(lambda l: CONFIG_DIR / slug / l / "dashboard_default.py")
 
 
 _default_widgets_cache: dict = {}  # path → (mtime, widgets)
 
 
-def dashboard_default_widgets() -> "list[dict]":
-    """Painéis padrão do domínio ativo — a baseline que aparece no dashboard antes
-    de qualquer painel criado via chat. Definidos em config/dashboard_default_<dominio>.py,
-    um arquivo Python com uma lista `WIDGETS` de dicts (mesmo formato usado por
-    add_chart_to_dashboard): {id, title, description, code, range_unit, range_value}.
+def dashboard_default_widgets(lang: "str | None" = None) -> "list[dict]":
+    """Painéis padrão do domínio ativo, no idioma efetivo — a baseline que aparece no
+    dashboard antes de qualquer painel criado via chat. Definidos em
+    config/<dominio>/<lang>/dashboard_default.py, um arquivo Python com uma lista
+    `WIDGETS` de dicts (mesmo formato usado por add_chart_to_dashboard): {id, title,
+    description, code, range_unit, range_value}.
 
     Ao contrário dos painéis do chat (tabela dashboard_widgets), estes nunca tocam o
     banco — não são apagados pelo reset noturno de demo e são versionados no git junto
     com o resto do pack de domínio. Recarregado automaticamente quando o arquivo muda
     (cache por mtime, igual dominio.md). Arquivo ausente ou `WIDGETS` ausente → [].
     """
-    path = CONFIG_DIR / dashboard_default_filename()
+    path = dashboard_default_path(lang)
+    if path is None:
+        return []
     try:
         mtime = path.stat().st_mtime
     except OSError:
@@ -199,7 +288,7 @@ def dashboard_default_widgets() -> "list[dict]":
 
 
 def is_configured() -> bool:
-    if not (CONFIG_DIR / dominio_filename()).exists():
+    if dominio_path() is None:
         return False
     if modo_acesso() == "graphql":
         return graphql_config() is not None
@@ -282,7 +371,10 @@ _SECOES_NAO_SKILL = ("Períodos", "Regras do agente", "Regras do orquestrador")
 
 
 def _dominio_texto() -> str:
-    return _read_cached(CONFIG_DIR / dominio_filename()) or ""
+    path = dominio_path()
+    if path is None:
+        return ""
+    return _read_cached(path) or ""
 
 
 def _split_secoes(texto: str) -> "list[tuple[str, str]]":

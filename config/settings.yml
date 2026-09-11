@@ -21,6 +21,13 @@ app:
   # ausente): 1 = janeiro, trimestre civil. New Age usa ano fiscal Motorola/Lenovo
   # (Abr-Jun=Q1 ... Jan-Mar=Q4) — ver "Calendário fiscal" em dominio_new_age.md.
   mes_inicio_fiscal: 4
+
+  # Idioma de fallback desta instalação (pt-BR | en | zh). Usado quando o idioma
+  # pedido pelo front-end (?lang=) não tem arquivo traduzido ainda em
+  # config/<dominio>/<lang>/ — ver db_config.idioma_default(). Hoje pt-BR porque é
+  # o único idioma com conteúdo de domínio completo; troque para "en" quando a
+  # tradução em inglês estiver pronta de verdade (não só o placeholder copiado).
+  idioma_default: "pt-BR"
 database:
   # modo: sql | graphql — qual método de acesso este domínio usa. Cada domínio
   # usa só um dos dois (nunca os dois ao mesmo tempo) — troca com o próprio

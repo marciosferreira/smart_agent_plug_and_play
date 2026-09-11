@@ -192,6 +192,7 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
     user_id: str = ""
+    lang: str = ""
 
 
 class ChartSnapshotRequest(BaseModel):
@@ -214,7 +215,7 @@ async def chat(req: ChatRequest):
             status_code=503,
             content=_error_body(503, "ServiceUnavailable", "Agente IA não configurado. Verifique PROJECT_ID, LOCATION e credentials.json.", "/chat"),
         )
-    reply = await asyncio.to_thread(lambda: invoke_multi_agent(req.message, req.session_id, req.user_id))
+    reply = await asyncio.to_thread(lambda: invoke_multi_agent(req.message, req.session_id, req.user_id, req.lang))
     return {"reply": _embed_charts(reply)}
 
 
@@ -258,7 +259,7 @@ def download_excel(excel_id: str):
 
 
 @app.get("/chat/stream")
-async def chat_stream(request: Request, message: str, session_id: str = "default", user_id: str = ""):
+async def chat_stream(request: Request, message: str, session_id: str = "default", user_id: str = "", lang: str = ""):
     """Endpoint SSE — transmite thinking, tool calls e resposta final em tempo real."""
     if not is_multi_agent_ready():
         async def _err():
@@ -271,7 +272,7 @@ async def chat_stream(request: Request, message: str, session_id: str = "default
 
         def _run():
             try:
-                for event in stream_multi_agent(message, session_id, user_id):
+                for event in stream_multi_agent(message, session_id, user_id, lang):
                     if event.get("type") == "reply":
                         event["text"] = _embed_charts(event["text"])
                     asyncio.run_coroutine_threadsafe(queue.put(event), loop)
@@ -722,11 +723,11 @@ def get_artifacts(user_id: str = Query(default=None)):
 _DEFAULT_WIDGET_PREFIX = "default:"
 
 
-def _default_widget_by_id(widget_id: str) -> "dict | None":
+def _default_widget_by_id(widget_id: str, lang: str = "") -> "dict | None":
     if not widget_id.startswith(_DEFAULT_WIDGET_PREFIX):
         return None
     raw_id = widget_id[len(_DEFAULT_WIDGET_PREFIX):]
-    for w in db_config.dashboard_default_widgets():
+    for w in db_config.dashboard_default_widgets(lang):
         if w.get("id") == raw_id:
             return w
     return None
@@ -765,7 +766,7 @@ class WidgetShareRequest(BaseModel):
 
 
 @app.get("/dashboard-widgets")
-def get_dashboard_widgets(user_id: str = Query(default=None)):
+def get_dashboard_widgets(user_id: str = Query(default=None), lang: str = Query(default="")):
     """Lista os painéis do dashboard, na ordem salva do usuário: defaults do
     domínio (arquivo de config, sempre presentes) e customizados visíveis —
     do próprio usuário ou compartilhados por outros — criados via chat (banco),
@@ -782,7 +783,7 @@ def get_dashboard_widgets(user_id: str = Query(default=None)):
             "shared": False,
             "is_owner": False,
         }
-        for w in db_config.dashboard_default_widgets()
+        for w in db_config.dashboard_default_widgets(lang)
     ]
 
     dominio = db_config.dominio_filename()
@@ -856,12 +857,12 @@ def share_dashboard_widget(widget_id: str, req: WidgetShareRequest):
 
 
 @app.get("/dashboard-widgets/{widget_id}/data")
-def get_dashboard_widget_data(widget_id: str):
+def get_dashboard_widget_data(widget_id: str, lang: str = Query(default="")):
     """Re-executa o widget_code e retorna a configuração Chart.js atualizada."""
     from scheduler.widget_runner import run_widget_code, compute_widget_range, WidgetCodeError
     from datetime import datetime as _dt
 
-    default = _default_widget_by_id(widget_id)
+    default = _default_widget_by_id(widget_id, lang)
     if default is not None:
         code, range_unit, range_value = default["code"], default.get("range_unit", "days"), default.get("range_value", 7)
     else:

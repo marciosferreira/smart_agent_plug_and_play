@@ -28,6 +28,19 @@ _RETRY_BACKOFF_MINUTES  = [5, 15, 60]  # espera entre tentativas (1ª, 2ª, 3ª)
 
 _PDF_TOKEN = re.compile(r'\[pdf:([a-f0-9\-]{36})\]')
 
+# Texto fixo do e-mail de relatório automático, por idioma. Curto e sem termos de
+# negócio — não passa pelo mecanismo de tradução de config/ (ver ARQUITETURA.md).
+_EMAIL_TEXT = {
+    "pt-BR": {"body": "Segue em anexo o relatório: {name}."},
+    "en": {"body": "Attached is the report: {name}."},
+    "zh": {"body": "附件为报告：{name}。"},
+}
+
+
+def _email_text(task: dict) -> dict:
+    lang = task.get("lang") or db_config.idioma_default()
+    return _EMAIL_TEXT.get(lang, _EMAIL_TEXT[db_config.idioma_default()])
+
 
 def _resolve_pdf_links(content: str) -> str:
     return _PDF_TOKEN.sub(
@@ -56,7 +69,7 @@ def _save_report(task: dict, content: str, now: datetime) -> Path:
         'email': {
             'to': task.get('email'),
             'subject': f"{task.get('name')} — {now.strftime('%Y-%m-%d %H:%M')}",
-            'body': f"Segue em anexo o relatório: {task.get('name')}.",
+            'body': _email_text(task)['body'].format(name=task.get('name')),
             'attachments': pdf_urls,
         } if task.get('email') else None,
         'schedule': {

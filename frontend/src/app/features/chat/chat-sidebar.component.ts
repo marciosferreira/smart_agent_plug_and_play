@@ -5,6 +5,8 @@ import { ChatPanelStateService } from '../../core/services/chat-panel-state.serv
 import { ScreenshotService } from '../../core/services/screenshot.service';
 import { VoiceRecorderService } from '../../core/services/voice-recorder.service';
 import { ChartModalService } from '../../core/services/chart-modal.service';
+import { TranslateService } from '../../core/services/translate.service';
+import { TranslatePipe } from '../../core/pipes/translate.pipe';
 import { ChatMessageComponent } from './chat-message.component';
 import { ChatHistoryListComponent } from './chat-history-list.component';
 
@@ -12,7 +14,7 @@ const MIN_WIDTH = 200;
 
 @Component({
   selector: 'app-chat-sidebar',
-  imports: [FormsModule, ChatMessageComponent, ChatHistoryListComponent],
+  imports: [FormsModule, ChatMessageComponent, ChatHistoryListComponent, TranslatePipe],
   templateUrl: './chat-sidebar.component.html',
 })
 export class ChatSidebarComponent {
@@ -21,6 +23,7 @@ export class ChatSidebarComponent {
   readonly screenshot = inject(ScreenshotService);
   readonly voice = inject(VoiceRecorderService);
   private readonly modal = inject(ChartModalService);
+  private readonly translate = inject(TranslateService);
 
   readonly text = signal('');
   readonly transcribing = signal(false);
@@ -82,7 +85,7 @@ export class ChatSidebarComponent {
       this.transcribing.set(false);
       this.chat.messages.update((list) => [
         ...list,
-        { kind: 'text', id: `err${Date.now()}`, role: 'error', html: 'Falha ao transcrever: ' + (e as Error).message, time: '' },
+        { kind: 'text', id: `err${Date.now()}`, role: 'error', html: this.translate.t('chat.transcribeError', { error: (e as Error).message }), time: '' },
       ]);
     }
   }
@@ -99,7 +102,7 @@ export class ChatSidebarComponent {
   }
 
   openImagePreview(b64: string): void {
-    this.modal.show('data:image/png;base64,' + b64, 'Imagem anexada');
+    this.modal.show('data:image/png;base64,' + b64, this.translate.t('chat.imageAttached'));
   }
 
   close(): void {

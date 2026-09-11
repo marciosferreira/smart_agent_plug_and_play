@@ -9,11 +9,11 @@ import { ChatStreamEvent } from '../models/chat.model';
  */
 @Injectable({ providedIn: 'root' })
 export class ChatStreamService {
-  open(message: string, sessionId: string, userId: string): Observable<ChatStreamEvent> {
+  open(message: string, sessionId: string, userId: string, lang: string): Observable<ChatStreamEvent> {
     return new Observable<ChatStreamEvent>((subscriber) => {
       const url =
         '/chat/stream?' +
-        new URLSearchParams({ message, session_id: sessionId, user_id: userId }).toString();
+        new URLSearchParams({ message, session_id: sessionId, user_id: userId, lang }).toString();
       const es = new EventSource(url);
 
       es.onmessage = (e) => {

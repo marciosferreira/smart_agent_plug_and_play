@@ -3,9 +3,11 @@ import { HttpClient } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
 import { marked } from 'marked';
 import { UserSessionService } from './user-session.service';
+import { LocaleService } from './locale.service';
 import { ChatStreamService } from './chat-stream.service';
 import { ScreenshotService } from './screenshot.service';
 import { WidgetsService } from './widgets.service';
+import { TranslateService } from './translate.service';
 import {
   ArtifactChatMessage,
   ChatHistoryEntry,
@@ -13,8 +15,6 @@ import {
   ChatSession,
   ThinkingChatMessage,
 } from '../models/chat.model';
-
-const WELCOME_MSG = 'Olá! Como posso te ajudar hoje?';
 
 marked.use({
   hooks: {
@@ -28,8 +28,8 @@ function escHtml(s: string): string {
   return s.replace(/</g, '&lt;');
 }
 
-function nowLabel(): string {
-  return new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+function nowLabel(lang: string): string {
+  return new Date().toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' });
 }
 
 let _msgSeq = 0;
@@ -45,9 +45,15 @@ function nextId(prefix: string): string {
 export class ChatService {
   private readonly http = inject(HttpClient);
   private readonly userSession = inject(UserSessionService);
+  private readonly locale = inject(LocaleService);
   private readonly stream = inject(ChatStreamService);
   private readonly screenshot = inject(ScreenshotService);
   private readonly widgets = inject(WidgetsService);
+  private readonly translate = inject(TranslateService);
+
+  private welcomeMsg(): string {
+    return this.translate.t('chat.welcome');
+  }
 
   readonly messages = signal<ChatMessage[]>([]);
   readonly sessions = signal<ChatSession[]>([]);
@@ -68,7 +74,7 @@ export class ChatService {
         this.http.get<ChatHistoryEntry[]>('/chat/history', { params: { session_id: this.sessionId } }),
       );
       if (!Array.isArray(msgs) || msgs.length === 0) {
-        this.pushText('assistant', WELCOME_MSG);
+        this.pushText('assistant', this.welcomeMsg());
         return;
       }
       for (const m of msgs) {
@@ -80,14 +86,14 @@ export class ChatService {
         }
       }
     } catch {
-      this.pushText('assistant', WELCOME_MSG);
+      this.pushText('assistant', this.welcomeMsg());
     }
   }
 
   newChat(): void {
     this.userSession.setSession(this.userSession.newSessionId());
     this.messages.set([]);
-    this.pushText('assistant', WELCOME_MSG);
+    this.pushText('assistant', this.welcomeMsg());
   }
 
   // ── Lista de conversas ──────────────────────────────────
@@ -125,13 +131,13 @@ export class ChatService {
   }
 
   async deleteSession(sessionId: string): Promise<void> {
-    if (!confirm('Deletar esta conversa? Esta ação não pode ser desfeita.')) return;
+    if (!confirm(this.translate.t('chat.deleteSessionConfirm'))) return;
     try {
       await firstValueFrom(this.http.delete(`/chat/sessions/${encodeURIComponent(sessionId)}`));
       this.sessions.update((list) => list.filter((s) => s.session_id !== sessionId));
       if (sessionId === this.sessionId) this.newChat();
     } catch {
-      alert('Erro ao deletar conversa.');
+      alert(this.translate.t('chat.deleteSessionError'));
     }
   }
 
@@ -158,7 +164,7 @@ export class ChatService {
   async deleteSelectedSessions(): Promise<void> {
     const ids = [...this.selectedSessionIds()];
     if (!ids.length) return;
-    if (!confirm(`Deletar ${ids.length} conversa${ids.length !== 1 ? 's' : ''}? Esta ação não pode ser desfeita.`))
+    if (!confirm(this.translate.t('chat.deleteSessionsConfirm', { n: ids.length, plural: ids.length !== 1 ? 's' : '' })))
       return;
     let deletedActive = false;
     for (const sessionId of ids) {
@@ -178,7 +184,7 @@ export class ChatService {
 
   private pushText(role: 'user' | 'assistant' | 'error', html: string): string {
     const id = nextId('cm');
-    this.messages.update((list) => [...list, { kind: 'text', id, role, html, time: nowLabel() }]);
+    this.messages.update((list) => [...list, { kind: 'text', id, role, html, time: nowLabel(this.locale.lang()) }]);
     return id;
   }
 
@@ -193,7 +199,7 @@ export class ChatService {
       liveIsTool: steps[steps.length - 1]?.isTool ?? false,
       open: false,
       done: true,
-      time: nowLabel(),
+      time: nowLabel(this.locale.lang()),
     };
     this.messages.update((list) => [...list, thinking]);
   }
@@ -230,7 +236,7 @@ export class ChatService {
       liveIsTool: false,
       open: false,
       done: false,
-      time: nowLabel(),
+      time: nowLabel(this.locale.lang()),
     };
     this.messages.update((list) => [...list, thinking]);
 
@@ -263,7 +269,7 @@ export class ChatService {
 
     const finishSending = () => this.sending.set(false);
 
-    const subscription = this.stream.open(text, this.sessionId, this.userSession.userId).subscribe({
+    const subscription = this.stream.open(text, this.sessionId, this.userSession.userId, this.locale.lang()).subscribe({
       next: (ev) => {
         switch (ev.type) {
           case 'thinking':
@@ -295,7 +301,7 @@ export class ChatService {
                 artifactId: match[2],
                 taskId: ev.task_id ?? null,
                 saved: false,
-                time: nowLabel(),
+                time: nowLabel(this.locale.lang()),
               };
               this.messages.update((list) => [...list, artifact]);
             }
@@ -334,7 +340,7 @@ export class ChatService {
       },
       error: () => {
         removeThinking();
-        this.pushText('error', 'Conexão com o agente foi interrompida.');
+        this.pushText('error', this.translate.t('chat.connectionLost'));
         finishSending();
       },
     });

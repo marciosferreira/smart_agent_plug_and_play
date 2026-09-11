@@ -1,4 +1,5 @@
-import { Component } from '@angular/core';
+import { Component, inject } from '@angular/core';
+import { TranslateService } from './core/services/translate.service';
 import { HeaderComponent } from './features/header/header.component';
 import { ChatSidebarComponent } from './features/chat/chat-sidebar.component';
 import { ScreenshotOverlayComponent } from './features/chat/screenshot-overlay.component';
@@ -30,4 +31,10 @@ import { WidgetsGridComponent } from './features/widgets/widgets-grid.component'
   ],
   templateUrl: './app.component.html',
 })
-export class AppComponent {}
+export class AppComponent {
+  private readonly translate = inject(TranslateService);
+
+  constructor() {
+    this.translate.load();
+  }
+}

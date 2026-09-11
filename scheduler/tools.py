@@ -125,6 +125,15 @@ def _current_user_id() -> str | None:
         return None
 
 
+def _current_lang() -> str:
+    """Idioma da requisição que está criando a tarefa — gravado na própria linha
+    porque o daemon roda depois, sem sessão/requisição ativa (ver db_config.get_lang)."""
+    try:
+        return db_config.get_lang()
+    except Exception:
+        return ""
+
+
 def _all_tasks(user_id: str | None = None) -> list[dict]:
     dominio = db_config.dominio_filename()
     with get_db() as conn:
@@ -184,11 +193,11 @@ def schedule_task(
             conn.execute(
                 """INSERT INTO scheduled_tasks
                    (id, name, description, instructions, frequency, time, weekday,
-                    day, email, notify, date_range, status, next_run, last_run, created_at, user_id, dominio)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,'draft',?,NULL,?,?,?)""",
+                    day, email, notify, date_range, status, next_run, last_run, created_at, user_id, dominio, lang)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,'draft',?,NULL,?,?,?,?)""",
                 (task_id, name, description, instructions, frequency, time,
                  weekday, day, email, int(notify), date_range, next_run, now, user_id,
-                 db_config.dominio_filename()),
+                 db_config.dominio_filename(), _current_lang()),
             )
             conn.commit()
     except Exception as exc:
@@ -344,11 +353,11 @@ def schedule_monitor(
                 """INSERT INTO scheduled_tasks
                    (id, name, description, task_code, frequency, time, weekday, day,
                     notify, date_range, condition_sql, condition_operator, condition_threshold,
-                    status, next_run, last_run, created_at, user_id, dominio)
-                   VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?,'active',?,NULL,?,?,?)""",
+                    status, next_run, last_run, created_at, user_id, dominio, lang)
+                   VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?,'active',?,NULL,?,?,?,?)""",
                 (task_id, name, description, default_code, frequency, time, weekday, day,
                  effective_date_range, condition_sql, condition_operator, condition_threshold,
-                 next_run, now, user_id, db_config.dominio_filename()),
+                 next_run, now, user_id, db_config.dominio_filename(), _current_lang()),
             )
             conn.commit()
     except Exception as exc:

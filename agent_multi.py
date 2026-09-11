@@ -268,7 +268,7 @@ def _emit_agent_events(response, push_fn) -> None:
             push_fn({"type": "thinking", "text": pre_text})
         for tc in tool_calls:
             name = tc.get("name", "")
-            label = _TOOL_LABELS.get(name, f"⚙ {name}")
+            label = _lbl(_TOOL_LABELS.get(name, f"⚙ {name}"))
             push_fn({"type": "tool", "name": name, "label": label})
 
 
@@ -318,6 +318,69 @@ _TOOL_LABELS: dict[str, str] = {
     "get_widget_code":           "🔍 Lendo código do painel",
     "update_widget":             "✏️ Atualizando painel do dashboard",
 }
+
+# Tradução dos labels de progresso (eventos SSE "tool", ver Streaming SSE em
+# ARQUITETURA.md) — tanto os de _TOOL_LABELS acima quanto os escritos inline nos
+# fluxos de agendamento/painéis abaixo. Call sites continuam em português (mais
+# fácil de manter/grep); _lbl() troca pelo equivalente no idioma ativo quando
+# db_config.get_lang() != pt-BR. Idioma/chave ausente aqui (esquecida na
+# tradução) cai no próprio texto em português — nunca quebra, só fica sem traduzir.
+_LABEL_TRANSLATIONS: dict[str, dict[str, str]] = {
+    "📖 Lendo instruções da skill": {"en": "📖 Reading skill instructions", "zh": "📖 正在读取技能说明"},
+    "📅 Calculando período": {"en": "📅 Calculating period", "zh": "📅 正在计算时间段"},
+    "🗄️ Consultando banco de dados (SQL)": {"en": "🗄️ Querying database (SQL)", "zh": "🗄️ 正在查询数据库（SQL）"},
+    "🗄️ Consultando banco de dados (GraphQL)": {"en": "🗄️ Querying database (GraphQL)", "zh": "🗄️ 正在查询数据库（GraphQL）"},
+    "🗄️ Consultando banco de dados (GraphQL, agregado)": {"en": "🗄️ Querying database (GraphQL, aggregate)", "zh": "🗄️ 正在查询数据库（GraphQL，聚合）"},
+    "🔢 Processando e analisando dados": {"en": "🔢 Processing and analyzing data", "zh": "🔢 正在处理和分析数据"},
+    "🔍 Delegando ao sub-agente analista": {"en": "🔍 Delegating to the analyst sub-agent", "zh": "🔍 正在委派给分析子代理"},
+    "📚 Consultando base de conhecimento (domínio)": {"en": "📚 Consulting knowledge base (domain)", "zh": "📚 正在查询知识库（业务领域）"},
+    "📚 Consultando base de conhecimento (capacidades)": {"en": "📚 Consulting knowledge base (capabilities)", "zh": "📚 正在查询知识库（功能）"},
+    "📚 Consultando base de conhecimento (arquitetura)": {"en": "📚 Consulting knowledge base (architecture)", "zh": "📚 正在查询知识库（架构）"},
+    "📚 Consultando base de conhecimento (dados)": {"en": "📚 Consulting knowledge base (data)", "zh": "📚 正在查询知识库（数据）"},
+    "🕐 Verificando data e hora": {"en": "🕐 Checking date and time", "zh": "🕐 正在核对日期和时间"},
+    "📄 Gerando relatório PDF": {"en": "📄 Generating PDF report", "zh": "📄 正在生成PDF报告"},
+    "📊 Gerando planilha Excel": {"en": "📊 Generating Excel spreadsheet", "zh": "📊 正在生成Excel表格"},
+    "🗓️ Gerenciando agenda de relatórios": {"en": "🗓️ Managing report schedule", "zh": "🗓️ 正在管理报告日程"},
+    "🗓️ Criando tarefa agendada": {"en": "🗓️ Creating scheduled task", "zh": "🗓️ 正在创建定时任务"},
+    "✏️ Editando tarefa agendada": {"en": "✏️ Editing scheduled task", "zh": "✏️ 正在编辑定时任务"},
+    "🗓️ Agendando tarefa": {"en": "🗓️ Scheduling task", "zh": "🗓️ 正在安排任务"},
+    "🔔 Criando monitor de threshold": {"en": "🔔 Creating threshold monitor", "zh": "🔔 正在创建阈值监控"},
+    "📝 Salvando instruções da tarefa": {"en": "📝 Saving task instructions", "zh": "📝 正在保存任务说明"},
+    "🔍 Lendo instruções da tarefa": {"en": "🔍 Reading task instructions", "zh": "🔍 正在读取任务说明"},
+    "📋 Listando tarefas agendadas": {"en": "📋 Listing scheduled tasks", "zh": "📋 正在列出定时任务"},
+    "🗑️ Removendo tarefa agendada": {"en": "🗑️ Removing scheduled task", "zh": "🗑️ 正在删除定时任务"},
+    "⏸️ Pausando/retomando tarefa": {"en": "⏸️ Pausing/resuming task", "zh": "⏸️ 正在暂停/恢复任务"},
+    "🔍 Lendo código da tarefa": {"en": "🔍 Reading task code", "zh": "🔍 正在读取任务代码"},
+    "🧪 Testando código da tarefa": {"en": "🧪 Testing task code", "zh": "🧪 正在测试任务代码"},
+    "💾 Salvando código da tarefa": {"en": "💾 Saving task code", "zh": "💾 正在保存任务代码"},
+    "📜 Listando versões do código": {"en": "📜 Listing code versions", "zh": "📜 正在列出代码版本"},
+    "↩️ Restaurando versão do código": {"en": "↩️ Restoring code version", "zh": "↩️ 正在恢复代码版本"},
+    "🧪 Testando código do painel customizado": {"en": "🧪 Testing custom panel code", "zh": "🧪 正在测试自定义面板代码"},
+    "📌 Adicionando painel ao dashboard": {"en": "📌 Adding panel to dashboard", "zh": "📌 正在将面板添加到仪表盘"},
+    "📋 Listando painéis customizados": {"en": "📋 Listing custom panels", "zh": "📋 正在列出自定义面板"},
+    "🗑️ Removendo painel do dashboard": {"en": "🗑️ Removing panel from dashboard", "zh": "🗑️ 正在从仪表盘删除面板"},
+    "🔍 Lendo código do painel": {"en": "🔍 Reading panel code", "zh": "🔍 正在读取面板代码"},
+    "✏️ Atualizando painel do dashboard": {"en": "✏️ Updating dashboard panel", "zh": "✏️ 正在更新仪表盘面板"},
+    # labels inline dos fluxos de agendamento (não passam por _TOOL_LABELS)
+    "🗓️ Criando registro da tarefa": {"en": "🗓️ Creating task record", "zh": "🗓️ 正在创建任务记录"},
+    "🔍 Consultando dados reais": {"en": "🔍 Querying real data", "zh": "🔍 正在查询真实数据"},
+    "⚙️ Gerando código da tarefa": {"en": "⚙️ Generating task code", "zh": "⚙️ 正在生成任务代码"},
+    "🔍 Lendo código atual da tarefa": {"en": "🔍 Reading current task code", "zh": "🔍 正在读取任务当前代码"},
+    "🔍 Sem código existente — gerando do zero": {"en": "🔍 No existing code — generating from scratch", "zh": "🔍 无现有代码——正在从零开始生成"},
+    "✏️ Aplicando modificação ao código": {"en": "✏️ Applying change to code", "zh": "✏️ 正在对代码应用修改"},
+    "🧪 Testando código": {"en": "🧪 Testing code", "zh": "🧪 正在测试代码"},
+    "🔧 Corrigindo erro no código": {"en": "🔧 Fixing error in code", "zh": "🔧 正在修复代码错误"},
+    "💾 Salvando código validado": {"en": "💾 Saving validated code", "zh": "💾 正在保存已验证的代码"},
+    "🗓️ Iniciando criação de tarefa agendada": {"en": "🗓️ Starting scheduled task creation", "zh": "🗓️ 正在开始创建定时任务"},
+    "✏️ Editando código da tarefa": {"en": "✏️ Editing task code", "zh": "✏️ 正在编辑任务代码"},
+}
+
+
+def _lbl(texto_pt: str) -> str:
+    lang = db_config.get_lang()
+    if lang == "pt-BR":
+        return texto_pt
+    return _LABEL_TRANSLATIONS.get(texto_pt, {}).get(lang, texto_pt)
 
 
 def _push_event(session_id: str, event: dict) -> None:
@@ -545,6 +608,38 @@ def _build_pdf(titulo: str, conteudo: str, session_id: str, user_id: str | None 
 _RAG_DIR = Path(__file__).parent / "rag"
 
 
+_DIRETIVA_IDIOMA = {
+    "pt-BR": "Responda sempre em português do Brasil, independente do idioma em que as instruções deste prompt foram escritas.",
+    "en": "Always reply in English, regardless of the language these instructions were written in.",
+    "zh": "始终用中文回复，无论本提示词是用什么语言写的。",
+}
+
+
+def _diretiva_idioma() -> str:
+    """Linha injetada no topo de cada system prompt (orquestrador/sub-agente/scheduler)
+    dizendo em que idioma responder. As instruções do prompt em si continuam só em
+    português — LLMs seguem instrução num idioma e respondem em outro sem problema —
+    só a resposta final ao usuário precisa mudar de idioma por requisição. Avaliada a
+    cada turno (não uma vez no init) porque db_config.get_lang() é por-requisição."""
+    lang = db_config.get_lang()
+    texto = _DIRETIVA_IDIOMA.get(lang, _DIRETIVA_IDIOMA[db_config.idioma_default()])
+    return f"## IDIOMA DA RESPOSTA\n{texto}\n\n"
+
+
+def _rag_path(filename: str) -> Path:
+    """Resolve rag/<lang>/<filename> no idioma efetivo, com fallback para o idioma
+    default da instalação — mesmo padrão de db_config.dominio_path()."""
+    lang = db_config.get_lang()
+    candidato = _RAG_DIR / lang / filename
+    if candidato.exists():
+        return candidato
+    fallback = db_config.idioma_default()
+    candidato_fallback = _RAG_DIR / fallback / filename
+    if fallback != lang and candidato_fallback.exists():
+        return candidato_fallback
+    return candidato
+
+
 @tool
 def rag_dominio() -> str:
     """Retorna as regras de negócio e o glossário do domínio configurado: o que é o sistema,
@@ -572,8 +667,9 @@ def rag_capacidades() -> str:
     ações de agendamento, vá direto a criar_tarefa_agendada/gerenciar_agenda — elas já
     sabem o formato certo, não é preciso consultar esta tool antes.
     """
-    _tlog("rag_capacidades", "CHAMADA", arquivo=str(_RAG_DIR / "capacidades.md"))
-    return (_RAG_DIR / "capacidades.md").read_text(encoding="utf-8")
+    caminho = _rag_path("capacidades.md")
+    _tlog("rag_capacidades", "CHAMADA", arquivo=str(caminho))
+    return caminho.read_text(encoding="utf-8")
 
 
 @tool
@@ -588,8 +684,9 @@ def rag_arquitetura() -> str:
     de executar um pedido de AÇÃO. Para criar/editar tarefas, vá direto a
     criar_tarefa_agendada/editar_tarefa_agendada — não é preciso consultar esta tool antes.
     """
-    _tlog("rag_arquitetura", "CHAMADA", arquivo=str(_RAG_DIR / "arquitetura.md"))
-    return (_RAG_DIR / "arquitetura.md").read_text(encoding="utf-8")
+    caminho = _rag_path("arquitetura.md")
+    _tlog("rag_arquitetura", "CHAMADA", arquivo=str(caminho))
+    return caminho.read_text(encoding="utf-8")
 
 
 @tool
@@ -1556,7 +1653,7 @@ def _build_sub_agent(llm):
             extra = "\n".join(lines)
         else:
             extra = ""
-        msgs = [SystemMessage(content=SUB_SYSTEM_PROMPT + extra)] + list(state["messages"])
+        msgs = [SystemMessage(content=_diretiva_idioma() + SUB_SYSTEM_PROMPT + extra)] + list(state["messages"])
         _tlog("sub_agente", "LLM INVOCADO", mensagens=len(msgs))
         response = llm_sub.invoke(msgs)
 
@@ -1908,7 +2005,7 @@ def _build_scheduler_agent(llm):
     no_sch_tools = ToolNode(sch_tools)
 
     def no_scheduler(state: State) -> dict:
-        msgs = [SystemMessage(content=SCH_SYSTEM_PROMPT)] + list(state["messages"])
+        msgs = [SystemMessage(content=_diretiva_idioma() + SCH_SYSTEM_PROMPT)] + list(state["messages"])
         response = llm_sch.invoke(msgs)
         session = _current_session.get()
         _emit_agent_events(response, lambda ev: _push_event(session, ev))
@@ -1972,7 +2069,7 @@ def _build_scheduling_graph(llm):
     # ── Node: criar_tarefa ───────────────────────────────────────────────────
 
     def node_criar_tarefa(state: SchedulingState) -> dict:
-        _push({"type": "tool", "name": "schedule_task", "label": "🗓️ Criando registro da tarefa"})
+        _push({"type": "tool", "name": "schedule_task", "label": _lbl("🗓️ Criando registro da tarefa")})
 
         from scheduler.condition import describe_condition_format
         condition_format_hint = describe_condition_format()
@@ -2071,7 +2168,7 @@ def _build_scheduling_graph(llm):
         if _sub_agent_graph is None:
             return {"error": "Sub-agente analista não inicializado.", "analista_context": ""}
 
-        _push({"type": "tool", "name": "consultar_analista", "label": "🔍 Consultando dados reais"})
+        _push({"type": "tool", "name": "consultar_analista", "label": _lbl("🔍 Consultando dados reais")})
 
         hoje = datetime.now().date().isoformat()
         nome_tool_dados = "executar_sql" if db_config.modo_acesso() == "sql" else "executar_graphql"
@@ -2132,7 +2229,7 @@ def _build_scheduling_graph(llm):
     # via LLM dedicado com as regras do sandbox como foco total do prompt.
 
     def node_gerar_codigo(state: SchedulingState) -> dict:
-        _push({"type": "tool", "name": "consultar_analista", "label": "⚙️ Gerando código da tarefa"})
+        _push({"type": "tool", "name": "consultar_analista", "label": _lbl("⚙️ Gerando código da tarefa")})
 
         context = state.get("analista_context", "")
 
@@ -2211,7 +2308,7 @@ def _build_scheduling_graph(llm):
     # ── Node: editar_codigo ──────────────────────────────────────────────────
 
     def node_editar_codigo(state: SchedulingState) -> dict:
-        _push({"type": "tool", "name": "get_task_code", "label": "🔍 Lendo código atual da tarefa"})
+        _push({"type": "tool", "name": "get_task_code", "label": _lbl("🔍 Lendo código atual da tarefa")})
 
         result = get_task_code.invoke({"task_id": state["task_id"]})
         current_code = _extract_code_block(result)
@@ -2220,13 +2317,13 @@ def _build_scheduling_graph(llm):
 
         if not current_code:
             # Sem código existente — gera do zero passando pelos dois nós de criação
-            _push({"type": "tool", "name": "consultar_analista", "label": "🔍 Sem código existente — gerando do zero"})
+            _push({"type": "tool", "name": "consultar_analista", "label": _lbl("🔍 Sem código existente — gerando do zero")})
             ctx_result = node_consultar_dados(state)
             if ctx_result.get("error"):
                 return ctx_result
             return node_gerar_codigo({**state, **ctx_result})
 
-        _push({"type": "tool", "name": "get_task_code", "label": "✏️ Aplicando modificação ao código"})
+        _push({"type": "tool", "name": "get_task_code", "label": _lbl("✏️ Aplicando modificação ao código")})
 
         edit_prompt = (
             f"Modifique o código Python abaixo conforme solicitado.\n\n"
@@ -2254,7 +2351,7 @@ def _build_scheduling_graph(llm):
         if not state.get("task_code"):
             return {"error": "Nenhum código para testar.", "retries": state.get("retries", 0)}
 
-        _push({"type": "tool", "name": "test_task_code", "label": "🧪 Testando código"})
+        _push({"type": "tool", "name": "test_task_code", "label": _lbl("🧪 Testando código")})
 
         result = test_task_code.invoke({
             "task_id": state["task_id"],
@@ -2287,7 +2384,7 @@ def _build_scheduling_graph(llm):
     # ── Node: corrigir_codigo ────────────────────────────────────────────────
 
     def node_corrigir_codigo(state: SchedulingState) -> dict:
-        _push({"type": "tool", "name": "test_task_code", "label": "🔧 Corrigindo erro no código"})
+        _push({"type": "tool", "name": "test_task_code", "label": _lbl("🔧 Corrigindo erro no código")})
 
         error = state["error"]
 
@@ -2356,7 +2453,7 @@ def _build_scheduling_graph(llm):
                 )
                 _conn.commit()
 
-        _push({"type": "tool", "name": "save_task_code", "label": "💾 Salvando código validado"})
+        _push({"type": "tool", "name": "save_task_code", "label": _lbl("💾 Salvando código validado")})
 
         result = save_task_code.invoke({
             "task_id": state["task_id"],
@@ -2514,7 +2611,7 @@ def criar_tarefa_agendada(instrucao: str, config: RunnableConfig = None) -> str:
 
     session_id = ((config or {}).get("configurable") or {}).get("thread_id") or _current_session.get()
     _current_session.set(session_id)  # garante propagação para o thread atual e sub-chamadas
-    _push_event(session_id, {"type": "tool", "name": "criar_tarefa_agendada", "label": "🗓️ Iniciando criação de tarefa agendada"})
+    _push_event(session_id, {"type": "tool", "name": "criar_tarefa_agendada", "label": _lbl("🗓️ Iniciando criação de tarefa agendada")})
 
     initial_state: SchedulingState = {
         "mode": "create",
@@ -2579,7 +2676,7 @@ def editar_tarefa_agendada(task_id: str, modificacao: str, config: RunnableConfi
 
     session_id = ((config or {}).get("configurable") or {}).get("thread_id") or _current_session.get()
     _current_session.set(session_id)  # garante propagação para o thread atual e sub-chamadas
-    _push_event(session_id, {"type": "tool", "name": "editar_tarefa_agendada", "label": "✏️ Editando código da tarefa"})
+    _push_event(session_id, {"type": "tool", "name": "editar_tarefa_agendada", "label": _lbl("✏️ Editando código da tarefa")})
 
     initial_state: SchedulingState = {
         "mode": "edit",
@@ -2818,7 +2915,7 @@ def _build_orchestrator(llm, checkpointer=None):
 
     def no_orquestrador(state: State) -> dict:
         historico_recente = state["messages"][-(MAX_INTERACOES * 2):]
-        msgs = [SystemMessage(content=ORQ_SYSTEM_PROMPT)] + historico_recente
+        msgs = [SystemMessage(content=_diretiva_idioma() + ORQ_SYSTEM_PROMPT)] + historico_recente
         return {"messages": [llm_orq.invoke(msgs)]}
 
     def orq_para_onde(state: State) -> str:
@@ -2897,18 +2994,21 @@ def _build_human_message(query: str, session_id: str) -> HumanMessage:
     return HumanMessage(content=parts)
 
 
-def invoke_multi_agent(query: str, session_id: str = "default", user_id: str = "") -> str:
+def invoke_multi_agent(query: str, session_id: str = "default", user_id: str = "", lang: str = "") -> str:
     """Executa o orquestrador com a query do usuário e retorna a resposta final.
 
     O session_id isola o histórico de conversa — cada sessão tem seu próprio contexto
     persistido no mfg.db via SqliteSaver, e seus DataFrames no store em memória.
     O user_id, quando informado pelo app host, isola painéis, tarefas e artefatos
-    (gráficos/PDF/Excel) entre usuários dentro do mesmo domínio.
+    (gráficos/PDF/Excel) entre usuários dentro do mesmo domínio. O lang, quando
+    informado, decide em que idioma o agente responde e lê conteúdo de domínio —
+    ver db_config.set_lang().
     """
     if _orchestrator_graph is None:
         raise RuntimeError("Multi-agente não inicializado.")
     _current_session.set(session_id)
     _current_user_id.set(user_id)
+    db_config.set_lang(lang)
     tag_session_dominio(session_id, db_config.dominio_filename())
     resultado = _orchestrator_graph.invoke(
         {"messages": [_build_human_message(query, session_id)]},
@@ -2918,7 +3018,7 @@ def invoke_multi_agent(query: str, session_id: str = "default", user_id: str = "
 
 
 
-def stream_multi_agent(query: str, session_id: str = "default", user_id: str = ""):
+def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "", lang: str = ""):
     """Gerador que yields dicts de eventos SSE enquanto o agente processa.
 
     Tipos de evento:
@@ -2938,6 +3038,7 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
 
     _current_session.set(session_id)
     _current_user_id.set(user_id)
+    db_config.set_lang(lang)
     tag_session_dominio(session_id, db_config.dominio_filename())
 
     event_queue: _queue_module.Queue = _queue_module.Queue()
@@ -2952,6 +3053,7 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
         # ContextVar não se propaga para threading.Thread — precisa setar explicitamente.
         _current_session.set(session_id)
         _current_user_id.set(user_id)
+        db_config.set_lang(lang)
         try:
             for chunk in _orchestrator_graph.stream(
                 {"messages": [human_message]},

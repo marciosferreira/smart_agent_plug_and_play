@@ -2,9 +2,11 @@ import { Component, Input, inject, signal } from '@angular/core';
 import { AuditService } from '../../core/services/audit.service';
 import { AuditCodeModalService } from '../../core/services/audit-code-modal.service';
 import { AuditEntry } from '../../core/models/audit.model';
+import { TranslatePipe } from '../../core/pipes/translate.pipe';
 
 @Component({
   selector: 'app-audit-entry-card',
+  imports: [TranslatePipe],
   templateUrl: './audit-entry-card.component.html',
 })
 export class AuditEntryCardComponent {

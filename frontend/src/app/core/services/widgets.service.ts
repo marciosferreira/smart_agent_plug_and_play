@@ -4,6 +4,8 @@ import { firstValueFrom } from 'rxjs';
 import Chart from 'chart.js/auto';
 import { MatrixController, MatrixElement } from 'chartjs-chart-matrix';
 import { UserSessionService } from './user-session.service';
+import { LocaleService } from './locale.service';
+import { TranslateService } from './translate.service';
 import { DashboardWidget, WidgetChartConfig, MatrixWidgetData } from '../models/widget.model';
 
 Chart.register(MatrixController, MatrixElement);
@@ -32,6 +34,8 @@ function heatColor(t: number): string {
 export class WidgetsService {
   private readonly http = inject(HttpClient);
   private readonly userSession = inject(UserSessionService);
+  private readonly locale = inject(LocaleService);
+  private readonly translate = inject(TranslateService);
 
   readonly widgets = signal<DashboardWidget[]>([]);
   readonly loaded = signal(false);
@@ -63,7 +67,9 @@ export class WidgetsService {
   async load(): Promise<void> {
     try {
       const widgets = await firstValueFrom(
-        this.http.get<DashboardWidget[]>('/dashboard-widgets', { params: { user_id: this.userSession.userId } }),
+        this.http.get<DashboardWidget[]>('/dashboard-widgets', {
+          params: { user_id: this.userSession.userId, lang: this.locale.lang() },
+        }),
       ) || [];
       const currentIds = new Set(widgets.map((w) => w.id));
       for (const [id] of this.charts) {
@@ -99,7 +105,9 @@ export class WidgetsService {
     const canvas = this.canvases.get(id);
     if (!canvas) return;
     try {
-      const config = await firstValueFrom(this.http.get<WidgetChartConfig>(`/dashboard-widgets/${id}/data`));
+      const config = await firstValueFrom(
+        this.http.get<WidgetChartConfig>(`/dashboard-widgets/${id}/data`, { params: { lang: this.locale.lang() } }),
+      );
       this.destroyChart(id);
       const chart = config.type === 'matrix' ? this.buildMatrixChart(canvas, config) : this.buildStandardChart(canvas, config);
       this.charts.set(id, chart);
@@ -197,7 +205,7 @@ export class WidgetsService {
   }
 
   async removeWidget(id: string): Promise<void> {
-    if (!confirm('Remover este painel do dashboard?')) return;
+    if (!confirm(this.translate.t('widgetCard.removeConfirm'))) return;
     try {
       await firstValueFrom(this.http.delete(`/dashboard-widgets/${id}`, { params: { user_id: this.userSession.userId } }));
       this.destroyChart(id);
@@ -205,7 +213,7 @@ export class WidgetsService {
       this.widgets.update((list) => list.filter((w) => w.id !== id));
       this.saveOrder();
     } catch {
-      alert('Erro ao remover painel.');
+      alert(this.translate.t('widgetCard.removeError'));
     }
   }
 
@@ -219,7 +227,7 @@ export class WidgetsService {
       );
     } catch {
       this.widgets.set(prev);
-      alert('Erro ao alterar compartilhamento do painel.');
+      alert(this.translate.t('widgetCard.shareError'));
     }
   }
 

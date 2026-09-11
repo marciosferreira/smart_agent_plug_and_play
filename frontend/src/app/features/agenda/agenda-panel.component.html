@@ -8,22 +8,22 @@
   >
     <div style="display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid #e2e8f0;flex-shrink:0;">
       <div>
-        <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#6366f1;letter-spacing:.14em;text-transform:uppercase;margin-bottom:4px;">Agendamentos</div>
-        <div style="font-size:15px;font-weight:600;color:#1e293b;">Tarefas</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#6366f1;letter-spacing:.14em;text-transform:uppercase;margin-bottom:4px;">{{ 'agenda.category' | translate }}</div>
+        <div style="font-size:15px;font-weight:600;color:#1e293b;">{{ 'agenda.title' | translate }}</div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;">
-        <button (click)="agenda.loadAgenda()" style="background:none;border:1px solid #e2e8f0;border-radius:6px;color:#94a3b8;padding:5px 10px;font-size:12px;cursor:pointer;">↺ Atualizar</button>
-        <button (click)="panelState.close()" style="background:none;border:none;color:#64748b;font-size:20px;cursor:pointer;line-height:1;">✕</button>
+        <button (click)="agenda.loadAgenda()" style="background:none;border:1px solid #e2e8f0;border-radius:6px;color:#94a3b8;padding:5px 10px;font-size:12px;cursor:pointer;">↺ {{ 'agenda.refresh' | translate }}</button>
+        <button (click)="panelState.close()" [title]="'agenda.close' | translate" style="background:none;border:none;color:#64748b;font-size:20px;cursor:pointer;line-height:1;">✕</button>
       </div>
     </div>
 
     <div style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;">
       @if (agenda.loading()) {
-        <div style="text-align:center;color:#475569;padding:40px 0;font-size:13px;">Carregando...</div>
+        <div style="text-align:center;color:#475569;padding:40px 0;font-size:13px;">{{ 'agenda.loading' | translate }}</div>
       } @else if (!agenda.activeTasks().length) {
         <div style="text-align:center;color:#475569;padding:40px 0;font-size:13px;">
-          Nenhuma tarefa agendada.<br /><br />
-          Use o chat para criar um relatório agendado ou recorrente e recebê-lo por email.
+          {{ 'agenda.empty' | translate }}<br /><br />
+          {{ 'agenda.emptyHint' | translate }}
         </div>
       } @else {
         @for (t of agenda.activeTasks(); track t.id) {
@@ -37,7 +37,7 @@
         (click)="newTaskViaChat()"
         style="width:100%;padding:10px;background:#e0e7ff;border:1px solid #4338ca;border-radius:8px;color:#4338ca;font-size:13px;font-weight:600;cursor:pointer;letter-spacing:.04em;"
       >
-        + Nova tarefa via chat
+        {{ 'agenda.newTaskCta' | translate }}
       </button>
     </div>
   </aside>

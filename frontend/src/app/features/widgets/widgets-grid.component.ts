@@ -1,13 +1,14 @@
 import { Component, inject, signal } from '@angular/core';
 import { WidgetsService } from '../../core/services/widgets.service';
 import { WidgetCardComponent } from './widget-card.component';
+import { TranslatePipe } from '../../core/pipes/translate.pipe';
 
 /**
  * Porta a seção "Painéis Customizados" de dashboard.html:981-991,1224-1328.
  */
 @Component({
   selector: 'app-widgets-grid',
-  imports: [WidgetCardComponent],
+  imports: [WidgetCardComponent, TranslatePipe],
   templateUrl: './widgets-grid.component.html',
 })
 export class WidgetsGridComponent {

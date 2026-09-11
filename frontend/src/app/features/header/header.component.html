@@ -10,39 +10,49 @@
     </span>
   </div>
   <div class="hdr-r">
-    <div class="api-status" style="cursor:pointer;" [title]="userIdCopied() ? 'Copiado!' : 'user_id: ' + userSession.userId + ' (clique para copiar)'" (click)="copyUserId()">
-      {{ userIdCopied() ? 'copiado!' : 'uid: ' + userSession.userId.slice(0, 8) }}
+    <div class="api-status" style="cursor:pointer;" [title]="userIdCopied() ? ('header.userIdCopied' | translate) : ('header.userIdTooltip' | translate: { id: userSession.userId })" (click)="copyUserId()">
+      {{ userIdCopied() ? ('header.userIdCopied' | translate) : ('header.uidLabel' | translate: { id: userSession.userId.slice(0, 8) }) }}
     </div>
     <select
       class="api-status"
       style="cursor:pointer;background:transparent;color:inherit;font-family:inherit;"
-      title="Trocar de usuário (demo)"
+      [title]="'header.switchUser' | translate"
       (change)="onUserChange($event)"
     >
       @for (uid of demoUserIds; track uid) {
         <option [value]="uid" [selected]="uid === userSession.userId">user {{ uid }}</option>
       }
     </select>
+    <select
+      class="api-status"
+      style="cursor:pointer;background:transparent;color:inherit;font-family:inherit;"
+      title="Language / Idioma"
+      (change)="onLangChange($event)"
+    >
+      @for (l of idiomas; track l) {
+        <option [value]="l" [selected]="l === locale.lang()">{{ l }}</option>
+      }
+    </select>
     <div class="api-status" [ngClass]="{ ok: apiStatus.status() === 'online', err: apiStatus.status() === 'offline' }">
-      {{ apiStatus.status() === 'online' ? 'API ONLINE' : apiStatus.status() === 'offline' ? 'API OFFLINE' : 'API —' }}
+      {{ (apiStatus.status() === 'online' ? 'header.apiOnline' : apiStatus.status() === 'offline' ? 'header.apiOffline' : 'header.apiUnknown') | translate }}
     </div>
     <div class="live">
       <div class="dot" [class.offline]="apiStatus.status() !== 'online'"></div>
-      <span>{{ apiStatus.status() === 'online' ? 'AO VIVO' : apiStatus.status() === 'offline' ? 'DESCONECTADO' : 'CONECTANDO' }}</span>
+      <span>{{ (apiStatus.status() === 'online' ? 'header.live' : apiStatus.status() === 'offline' ? 'header.offline' : 'header.connecting') | translate }}</span>
     </div>
     <div class="clk">{{ clock() }}</div>
     <button class="refresh-btn" [class.spinning]="apiStatus.refreshing()" (click)="apiStatus.refreshAll()">
-      <span class="refresh-icon">↺</span> Atualizar
+      <span class="refresh-icon">↺</span> {{ 'header.refresh' | translate }}
     </button>
     <button class="refresh-btn" style="position:relative;gap:6px;" (click)="panelState.toggle('agenda')">
       🗓
       @if (agenda.newCount() > 0) {
         <span style="position:absolute;top:-7px;right:-4px;background:#6366f1;color:#fff;font-size:8px;font-weight:700;border-radius:99px;padding:1px 5px;letter-spacing:.08em;">NEW</span>
       }
-      Tarefas<span style="color:#475569;font-size:11px;font-weight:400;">{{ agenda.activeCount() > 0 ? ' (' + agenda.activeCount() + ')' : '' }}</span>
+      {{ 'header.tasks' | translate }}<span style="color:#475569;font-size:11px;font-weight:400;">{{ agenda.activeCount() > 0 ? ' (' + agenda.activeCount() + ')' : '' }}</span>
     </button>
     <button class="refresh-btn" style="position:relative;gap:6px;" (click)="panelState.toggle('artifacts')">
-      🗂 Artifacts
+      🗂 {{ 'header.artifacts' | translate }}
     </button>
     <button class="refresh-btn" style="position:relative;gap:6px;" (click)="panelState.toggle('alerts')">
       🔔
@@ -51,7 +61,7 @@
           {{ alerts.unreadCount() > 99 ? '99+' : alerts.unreadCount() }}
         </span>
       }
-      Alertas
+      {{ 'header.alerts' | translate }}
     </button>
     @if (apiStatus.lastUpdate()) {
       <span class="last-update">{{ apiStatus.lastUpdate() }}</span>
@@ -61,10 +71,10 @@
 
 <nav class="tab-nav">
   <button
-    title="Auditoria de erros de geração de código"
+    [title]="'header.errorAuditTitle' | translate"
     style="margin-left:auto;background:none;border:1px solid #e2e8f0;border-radius:5px;color:#475569;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.1em;padding:4px 10px;cursor:pointer;display:flex;align-items:center;gap:6px;transition:color .15s,border-color .15s;"
     (click)="panelState.toggle('audit')"
   >
-    <i class="fa-solid fa-bug" style="font-size:10px;"></i> error audit
+    <i class="fa-solid fa-bug" style="font-size:10px;"></i> {{ 'header.errorAudit' | translate }}
   </button>
 </nav>

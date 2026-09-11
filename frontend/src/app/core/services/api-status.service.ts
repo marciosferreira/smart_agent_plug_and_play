@@ -1,6 +1,8 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
+import { LocaleService } from './locale.service';
+import { TranslateService } from './translate.service';
 
 export type ApiStatus = 'connecting' | 'online' | 'offline';
 
@@ -15,6 +17,8 @@ export type ApiStatus = 'connecting' | 'online' | 'offline';
 @Injectable({ providedIn: 'root' })
 export class ApiStatusService {
   private readonly http = inject(HttpClient);
+  private readonly locale = inject(LocaleService);
+  private readonly translate = inject(TranslateService);
 
   private readonly _status = signal<ApiStatus>('connecting');
   readonly status = this._status.asReadonly();
@@ -34,7 +38,8 @@ export class ApiStatusService {
       this._status.set('offline');
       console.error('refreshAll:', e);
     }
-    this._lastUpdate.set('Atualizado às ' + new Date().toLocaleTimeString('pt-BR', { hour12: false }));
+    const time = new Date().toLocaleTimeString(this.locale.lang(), { hour12: false });
+    this._lastUpdate.set(this.translate.t('header.updatedAt', { time }));
     this._refreshing.set(false);
   }
 }

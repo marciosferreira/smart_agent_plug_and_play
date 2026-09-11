@@ -1,8 +1,10 @@
 import { Component, HostListener, inject } from '@angular/core';
 import { ScreenshotService } from '../../core/services/screenshot.service';
+import { TranslatePipe } from '../../core/pipes/translate.pipe';
 
 @Component({
   selector: 'app-screenshot-overlay',
+  imports: [TranslatePipe],
   template: `
     <div id="screenshotOverlay" [class.active]="screenshot.overlayActive()">
       @if (screenshot.selectionRect(); as r) {
@@ -25,7 +27,7 @@ import { ScreenshotService } from '../../core/services/screenshot.service';
         [style.top.px]="pos.top"
         (click)="screenshot.capture()"
       >
-        &#10003; Capturar área
+        {{ 'screenshot.captureArea' | translate }}
       </button>
     }
 
@@ -36,7 +38,7 @@ import { ScreenshotService } from '../../core/services/screenshot.service';
         <div
           style="width:40px;height:40px;border:3px solid rgba(167,139,250,.3);border-top-color:#a78bfa;border-radius:50%;animation:spin .7s linear infinite;"
         ></div>
-        <span style="color:#1e293b;font-size:13px;font-family:Inter,sans-serif;">Capturando...</span>
+        <span style="color:#1e293b;font-size:13px;font-family:Inter,sans-serif;">{{ 'screenshot.capturing' | translate }}</span>
       </div>
     }
   `,

@@ -1,15 +1,17 @@
 import { Component, inject } from '@angular/core';
 import { ChatService } from '../../core/services/chat.service';
+import { TranslatePipe } from '../../core/pipes/translate.pipe';
 
 @Component({
   selector: 'app-chat-history-list',
+  imports: [TranslatePipe],
   template: `
     <div class="chat-hist-panel" [class.open]="chat.historyOpen()">
       <div class="chat-hist-head">
-        <span class="chat-hist-label">CONVERSAS</span>
+        <span class="chat-hist-label">{{ 'chatHistory.title' | translate }}</span>
         <div style="display:flex;gap:6px;align-items:center">
           <button class="chi-sel-btn" [class.active]="chat.selectionMode()" (click)="chat.toggleSelectionMode()">
-            {{ chat.selectionMode() ? 'CANCELAR' : 'SELECIONAR' }}
+            {{ (chat.selectionMode() ? 'chatHistory.cancel' : 'chatHistory.select') | translate }}
           </button>
           <button class="chat-hist-close" (click)="chat.hideHistory()">✕</button>
         </div>
@@ -17,19 +19,19 @@ import { ChatService } from '../../core/services/chat.service';
 
       <div class="chat-hist-sel-bar" [class.hidden]="!chat.selectionMode()">
         <span class="chat-hist-sel-count">
-          {{ chat.selectedSessionIds().size === 0 ? 'Nenhum selecionado' : chat.selectedSessionIds().size + ' selecionado' + (chat.selectedSessionIds().size !== 1 ? 's' : '') }}
+          {{ chat.selectedSessionIds().size === 0 ? ('chatHistory.noneSelected' | translate) : ('chatHistory.selectedCount' | translate: { n: chat.selectedSessionIds().size, plural: chat.selectedSessionIds().size !== 1 ? 's' : '' }) }}
         </span>
-        <button class="chat-hist-sel-all" (click)="chat.toggleSelectAll()">TODOS</button>
+        <button class="chat-hist-sel-all" (click)="chat.toggleSelectAll()">{{ 'chatHistory.selectAll' | translate }}</button>
         <button class="chat-hist-del-sel" [disabled]="chat.selectedSessionIds().size === 0" (click)="chat.deleteSelectedSessions()">
-          DELETAR
+          {{ 'chatHistory.delete' | translate }}
         </button>
       </div>
 
       <div class="chat-hist-list" [class.sel-mode]="chat.selectionMode()">
-        <button class="chat-hist-new" (click)="newChat()">+ Nova conversa</button>
+        <button class="chat-hist-new" (click)="newChat()">{{ 'chatHistory.newChat' | translate }}</button>
 
         @if (!chat.sessions().length) {
-          <div class="chat-hist-empty">Nenhuma conversa anterior.</div>
+          <div class="chat-hist-empty">{{ 'chatHistory.empty' | translate }}</div>
         }
 
         @for (s of chat.sessions(); track s.session_id) {
@@ -47,9 +49,9 @@ import { ChatService } from '../../core/services/chat.service';
             />
             <div class="chi-info">
               <div class="chi-title">{{ s.title }}</div>
-              <div class="chi-meta">{{ s.message_count }} mensagem{{ s.message_count !== 1 ? 's' : '' }}</div>
+              <div class="chi-meta">{{ 'chatHistory.messageCount' | translate: { n: s.message_count, plural: s.message_count !== 1 ? 's' : '' } }}</div>
             </div>
-            <button class="chi-del" title="Deletar conversa" (click)="onDeleteClick($event, s.session_id)">✕</button>
+            <button class="chi-del" [title]="'chatHistory.deleteTooltip' | translate" (click)="onDeleteClick($event, s.session_id)">✕</button>
           </div>
         }
       </div>

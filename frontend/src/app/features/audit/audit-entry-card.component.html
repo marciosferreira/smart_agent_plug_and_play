@@ -11,7 +11,7 @@
     />
     <span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:#1e293b;">task {{ entry.task_id }}</span>
     <span [style.color]="phaseColor" style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:1px 7px;border-radius:99px;border:1px solid;">{{ entry.phase }}</span>
-    <span [style.color]="attemptColor" style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:1px 7px;border-radius:99px;border:1px solid;">tentativa {{ entry.attempt }}</span>
+    <span [style.color]="attemptColor" style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:1px 7px;border-radius:99px;border:1px solid;">{{ 'auditEntry.attempt' | translate: { n: entry.attempt } }}</span>
     <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10px;color:#94a3b8;">{{ timestamp }}</span>
   </div>
   <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#94a3b8;white-space:pre-wrap;word-break:break-all;line-height:1.5;">
@@ -19,13 +19,13 @@
   </div>
   <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;">
     @if (errorIsLong) {
-      <button (click)="openError()" style="background:none;border:1px solid #7f1d1d;border-radius:4px;color:#f87171;font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;cursor:pointer;">Ver erro completo</button>
+      <button (click)="openError()" style="background:none;border:1px solid #7f1d1d;border-radius:4px;color:#f87171;font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;cursor:pointer;">{{ 'auditEntry.viewFullError' | translate }}</button>
     }
     @if (hasCode) {
-      <button (click)="openCode()" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#6366f1;font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;cursor:pointer;">⬡ Código com erro</button>
-      <button (click)="copyCode()" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#475569;font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;cursor:pointer;">{{ copied() ? '✔ Copiado' : 'Copiar' }}</button>
+      <button (click)="openCode()" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#6366f1;font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;cursor:pointer;">{{ 'auditEntry.viewCode' | translate }}</button>
+      <button (click)="copyCode()" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#475569;font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;cursor:pointer;">{{ (copied() ? 'auditEntry.copied' : 'auditEntry.copy') | translate }}</button>
     }
-    <button [disabled]="deleting()" (click)="deleteEntry()" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#475569;font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;cursor:pointer;margin-left:auto;" title="Apagar este registro">
+    <button [disabled]="deleting()" (click)="deleteEntry()" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#475569;font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;cursor:pointer;margin-left:auto;" [title]="'auditEntry.deleteRecord' | translate">
     {{ deleting() ? '…' : '🗑' }}
     </button>
   </div>

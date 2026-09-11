@@ -32,6 +32,10 @@ def migrate_db():
             "ALTER TABLE scheduled_tasks ADD COLUMN condition_operator TEXT",
             "ALTER TABLE scheduled_tasks ADD COLUMN condition_threshold REAL",
             "ALTER TABLE scheduled_tasks ADD COLUMN dominio TEXT",
+            # idioma no momento da criação — o daemon roda sem sessão de chat ativa
+            # (sem user_id/lang de requisição), então precisa ficar gravado na própria
+            # linha, igual dominio/user_id, para o relatório sair no idioma certo.
+            "ALTER TABLE scheduled_tasks ADD COLUMN lang TEXT",
             "ALTER TABLE threshold_alerts ADD COLUMN user_id TEXT",
             "ALTER TABLE threshold_alerts ADD COLUMN dominio TEXT",
             # dashboard_widgets pode não existir em bancos antigos
