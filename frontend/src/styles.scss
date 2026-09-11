@@ -39,7 +39,7 @@ header {
 :root { --chat-w: 360px; --hdr-h: 58px; }
 #appWrap { display:block; }
 .logo { display:flex; align-items:center; gap:10px; flex-shrink:0; }
-.logo-img { height:32px; width:auto; border-radius:4px; }
+.logo-img { height:52px; width:auto; border-radius:4px; }
 .hdr-r { display:flex; align-items:center; flex-wrap:wrap; gap:6px 12px; margin-left:auto; }
 .live { display:flex; align-items:center; gap:6px; font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--green); letter-spacing:.1em; }
 .dot { width:7px; height:7px; border-radius:50%; background:var(--green); animation:pulse 1.6s ease-in-out infinite; }
