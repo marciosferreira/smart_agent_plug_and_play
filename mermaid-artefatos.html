@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8">
+<title>Mermaid - Artefatos e Painéis</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<style>
+  body {
+    margin: 0;
+    padding: 20px;
+    background: #0B1220;
+  }
+  .mermaid {
+    display: flex;
+    justify-content: center;
+  }
+  table.ref {
+    margin: 32px auto 0;
+    max-width: 900px;
+    width: 100%;
+    border-collapse: collapse;
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+    color: #E2E8F0;
+  }
+  table.ref caption {
+    text-align: left;
+    color: #94A3B8;
+    font-size: 12px;
+    margin-bottom: 8px;
+  }
+  table.ref th, table.ref td {
+    border: 1px solid #334155;
+    padding: 6px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  table.ref th {
+    background: #1E293B;
+    color: #F8FAFC;
+  }
+  table.ref td:first-child {
+    white-space: nowrap;
+    font-weight: 600;
+    color: #E0E7FF;
+  }
+  table.ref tbody tr:first-child td {
+    padding-top: 10px;
+  }
+  code {
+    color: #7DD3FC;
+    background: #0F2027;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  .page-header {
+    max-width: 900px;
+    margin: 0 auto 24px;
+    font-family: system-ui, sans-serif;
+  }
+  .page-header h1 {
+    color: #F8FAFC;
+    font-size: 20px;
+    margin: 0 0 6px;
+  }
+  .page-header p {
+    color: #94A3B8;
+    font-size: 13px;
+    margin: 0;
+    line-height: 1.5;
+  }
+  .legend {
+    max-width: 900px;
+    margin: 12px auto 0;
+    font-family: system-ui, sans-serif;
+    font-size: 12px;
+    color: #94A3B8;
+    line-height: 1.6;
+  }
+  .legend strong {
+    color: #CBD5E1;
+  }
+</style>
+</head>
+<body>
+<div class="page-header">
+  <h1>Artefatos do Chat e Painéis Customizados do Dashboard</h1>
+  <p>Dois mecanismos fáceis de confundir. <strong>Fluxo 1</strong>: um gráfico/PDF/Excel gerado no chat vira um
+     BLOB salvo em <code>mfg.db</code> e é referenciado por um token que o backend resolve em link/imagem.
+     <strong>Fluxo 2</strong>: um painel fixado no dashboard salva apenas o <em>código-fonte</em> — o gráfico
+     em si é recalculado do zero a cada refresh, nunca persistido. Não cobre o núcleo orquestrador/agendamento —
+     ver <code>mermaid-only.html</code>.</p>
+</div>
+<div class="mermaid">
+graph TD
+    User["Usuário"]
+
+    subgraph CHAT["Fluxo 1 — Artefatos do chat (chart / pdf / excel)"]
+        AGENT["🤖 Sub-agente / Orquestrador<br/>gerar_pdf() · gerar_excel() · ctx.save_chart()"]
+        TOKEN["📎 Token no texto da resposta<br/>[chart:uuid] / [pdf:uuid] / [excel:uuid]"]
+        BLOB[("charts / pdfs / excels<br/>(BLOB em mfg.db)")]
+        ROUTE["🌐 GET /chart/{id}<br/>GET /pdf/{id} · GET /excel/{id}"]
+    end
+
+    AGENT -->|"salva bytes (chart_store.py)"| BLOB
+    AGENT -->|retorna| TOKEN
+    TOKEN -->|"markdown resolvido pelo backend<br/>(main.py: token → link/imagem)"| User
+    User -->|clica link / vê imagem| ROUTE
+    ROUTE -->|lê BLOB| BLOB
+    ROUTE -->|PNG ou download| User
+
+    subgraph WIDGET["Fluxo 2 — Painel customizado do dashboard (efêmero, recalculado)"]
+        LLM_W["🤖 OT (mesmo orquestrador do outro diagrama)<br/>escreve o widget_code:<br/>def run(from_date,to_date,ctx)<br/>— a função que VAI GERAR o gráfico customizado,<br/>consultando dados reais toda vez que rodar"]
+        TESTW["🧪 test_widget_code()<br/>sandbox (widget_runner.py)"]
+        SAVEW["💾 add_chart_to_dashboard()<br/>INSERT dashboard_widgets"]
+        DBW[("dashboard_widgets<br/>guarda CODE-FONTE, não o gráfico<br/>(mfg.db)")]
+        SSE_W["📡 evento SSE<br/>widget_added / updated / deleted"]
+        REFRESH["🔁 Refresh do dashboard<br/>GET /dashboard-widgets/{id}/data"]
+        RANGE["📅 compute_widget_range()<br/>range_unit/range_value → from_date/to_date"]
+        RUNW["⚙️ run_widget_code()<br/>exec() sandbox restrito<br/>CHAMA run(from_date,to_date,ctx) — o widget_code<br/>escrito pelo LLM — que roda SQL/API reais"]
+        JSONCFG["📊 config do gráfico customizado<br/>(dict Chart.js efêmero, retorno de run())<br/>{type, data, options}<br/>NUNCA persistido"]
+        WS["🖥️ WidgetsService (Angular)<br/>Map&lt;widgetId, Chart&gt; centralizado"]
+        CANVAS["🖼️ WidgetCardComponent<br/>&lt;canvas&gt; registra-se via registerCanvas()"]
+    end
+
+    User -->|"'adiciona ao dashboard...' (chat)"| LLM_W
+    LLM_W -->|valida| TESTW
+    TESTW -->|ok| SAVEW
+    TESTW -.->|"erro → LLM reescreve o código<br/>e chama test_widget_code de novo<br/>(mesmo loop do OT, SEM limite de tentativas)"| LLM_W
+    SAVEW -->|persiste code + range_unit/range_value| DBW
+    SAVEW -->|notifica| SSE_W
+    SSE_W -->|ChatService recebe evento| WS
+
+    User -->|carrega página / clica Atualizar| REFRESH
+    DBW -->|lê code + range| REFRESH
+    REFRESH --> RANGE
+    RANGE -->|from_date/to_date NAQUELE INSTANTE| RUNW
+    RUNW -->|"queries reais<br/>(banco de domínio)"| JSONCFG
+    JSONCFG -->|response HTTP| WS
+    WS -->|"new Chart(canvas, config)"| CANVAS
+    CANVAS -->|renderiza| User
+
+    classDef default fill:#1E293B,stroke:#475569,stroke-width:1px,color:#F8FAFC;
+    classDef llm fill:#312E81,stroke:#facc15,stroke-width:2px,color:#E0E7FF;
+    classDef storage fill:#0F2027,stroke:#0EA5E9,stroke-width:1px,color:#7DD3FC;
+    classDef ephemeral fill:#3a1e0c,stroke:#fb923c,stroke-width:1.5px,color:#fed7aa;
+    classDef frontend fill:#0c1a2e,stroke:#38BDF8,stroke-width:1.5px,color:#7DD3FC;
+    classDef user fill:#1a2535,stroke:#38BDF8,stroke-width:2px,color:#E0F2FE,font-weight:bold;
+
+    class AGENT,LLM_W llm;
+    class BLOB,DBW storage;
+    class JSONCFG ephemeral;
+    class ROUTE,SSE_W,REFRESH,RANGE,RUNW,WS,CANVAS,TESTW,SAVEW frontend;
+    class User user;
+</div>
+
+<p class="legend">
+  <strong>Siglas:</strong> <code>OT</code> = Orquestrador (o mesmo agente do <code>mermaid-only.html</code> —
+  aqui reaproveitado pra criar/testar/editar painéis) · <code>DBW</code> = tabela <code>dashboard_widgets</code> ·
+  <code>WS</code> = <code>WidgetsService</code> (Angular). Demais nós usam o nome da função que representam.
+  <strong>Linha tracejada (⇢)</strong>: relação secundária/indireta — ver detalhe na tabela abaixo.
+</p>
+
+<table class="ref">
+  <caption>Fluxo 1 — Artefatos do chat (chart/pdf/excel) — arquivo/função (sem nº de linha: muda a cada edição)</caption>
+  <thead>
+    <tr><th>Nó</th><th>Arquivo</th><th>Função / tool</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>AGENT — gera artefato</td><td><code>agent_multi.py</code></td><td><code>gerar_pdf()</code>, <code>gerar_excel()</code></td></tr>
+    <tr><td>AGENT — save_chart</td><td><code>scheduler/context.py</code></td><td><code>TaskContext.save_chart()</code></td></tr>
+    <tr><td>BLOB — persistência</td><td><code>chart_store.py</code></td><td><code>save_chart()</code>, <code>save_pdf()</code>, <code>save_excel()</code></td></tr>
+    <tr><td>TOKEN → markdown</td><td><code>main.py</code></td><td><code>_embed_charts()</code> (regex <code>[chart:uuid]</code>/<code>[pdf:uuid]</code>/<code>[excel:uuid]</code>)</td></tr>
+    <tr><td>ROUTE — download/render</td><td><code>main.py</code></td><td><code>GET /chart/{chart_id}</code>, <code>/pdf/{pdf_id}</code>, <code>/excel/{excel_id}</code></td></tr>
+    <tr><td>ROUTE — leitura do BLOB</td><td><code>chart_store.py</code></td><td><code>get_chart_b64()</code>, <code>get_pdf()</code>, <code>get_excel()</code></td></tr>
+  </tbody>
+</table>
+
+<table class="ref">
+  <caption>Fluxo 2 — Painel customizado do dashboard — arquivo/função (sem nº de linha: muda a cada edição)</caption>
+  <thead>
+    <tr><th>Nó</th><th>Arquivo</th><th>Função / tool</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>LLM_W — escreve código</td><td><code>agent_multi.py</code></td><td>é o próprio <code>OT</code> — <code>test_widget_code</code>/<code>add_chart_to_dashboard</code> estão em <code>orq_tools</code> (<code>_build_orchestrator()</code>), não é sub-agente à parte</td></tr>
+    <tr><td>TESTW — valida em sandbox</td><td><code>scheduler/widget_tools.py</code></td><td><code>test_widget_code()</code> — erro vira ToolMessage no próprio loop do OT, que decide se tenta de novo</td></tr>
+    <tr><td>SAVEW — persiste painel</td><td><code>scheduler/widget_tools.py</code></td><td><code>add_chart_to_dashboard()</code></td></tr>
+    <tr><td>DBW — tabela</td><td><code>db.py</code></td><td>tabela <code>dashboard_widgets</code> (schema/migrações)</td></tr>
+    <tr><td>SSE_W — notifica frontend</td><td><code>scheduler/widget_tools.py</code> / <code>agent_multi.py</code></td><td><code>_notify()</code> → <code>_push_event()</code></td></tr>
+    <tr><td>REFRESH — endpoint</td><td><code>main.py</code></td><td><code>GET /dashboard-widgets/{widget_id}/data</code> → <code>get_dashboard_widget_data()</code></td></tr>
+    <tr><td>RANGE — calcula período</td><td><code>scheduler/widget_runner.py</code></td><td><code>compute_widget_range()</code></td></tr>
+    <tr><td>RUNW — executa sandbox</td><td><code>scheduler/widget_runner.py</code></td><td><code>run_widget_code()</code></td></tr>
+    <tr><td>JSONCFG — config Chart.js</td><td><code>scheduler/widget_runner.py</code></td><td>retorno de <code>run_widget_code()</code> (nunca persistido)</td></tr>
+    <tr><td>WS — instâncias Chart.js</td><td><code>frontend/src/app/core/services/widgets.service.ts</code></td><td><code>registerCanvas()</code>, <code>onWidgetAdded/Updated/Deleted()</code></td></tr>
+    <tr><td>CANVAS — componente</td><td><code>frontend/src/app/features/widgets/widget-card.component.ts</code></td><td><code>ngAfterViewInit()</code></td></tr>
+  </tbody>
+</table>
+
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
+</body>
+</html>

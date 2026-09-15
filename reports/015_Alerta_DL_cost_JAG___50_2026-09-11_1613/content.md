@@ -1,0 +1,1 @@
+Custo DL de JAG (2026-06 - AFFINITY): USD 100.00 (Maior custo registrado: USD 100.00)

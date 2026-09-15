@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8">
+<title>Mermaid - Arquitetura</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<style>
+  body {
+    margin: 0;
+    padding: 20px;
+    background: #0B1220;
+  }
+  .mermaid {
+    display: flex;
+    justify-content: center;
+  }
+  table.ref {
+    margin: 32px auto 0;
+    max-width: 900px;
+    width: 100%;
+    border-collapse: collapse;
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+    color: #E2E8F0;
+  }
+  table.ref caption {
+    text-align: left;
+    color: #94A3B8;
+    font-size: 12px;
+    margin-bottom: 8px;
+  }
+  table.ref th, table.ref td {
+    border: 1px solid #334155;
+    padding: 6px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  table.ref th {
+    background: #1E293B;
+    color: #F8FAFC;
+  }
+  table.ref td:first-child {
+    white-space: nowrap;
+    font-weight: 600;
+    color: #E0E7FF;
+  }
+  code {
+    color: #7DD3FC;
+    background: #0F2027;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  .page-header {
+    max-width: 900px;
+    margin: 0 auto 24px;
+    font-family: system-ui, sans-serif;
+  }
+  .page-header h1 {
+    color: #F8FAFC;
+    font-size: 20px;
+    margin: 0 0 6px;
+  }
+  .page-header p {
+    color: #94A3B8;
+    font-size: 13px;
+    margin: 0;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+<div class="page-header">
+  <h1>Arquitetura — Orquestrador, Sub-Agentes e Agendamento</h1>
+  <p>Como o orquestrador delega para o sub-agente analista (consultas de dados) e para o sub-agente de agendamento;
+     como o <code>SchedulingGraph</code> cria/edita/testa o código de tarefas agendadas; e como o daemon (60s)
+     executa essas tarefas e registra o resultado em <code>mfg.db</code>. Não cobre artefatos do chat nem painéis
+     do dashboard — ver <code>mermaid-artefatos.html</code>.</p>
+</div>
+<div class="mermaid">
+graph TD
+    User["Usuário"]
+
+    subgraph Orch["Orquestrador"]
+        OT["🤖 Orquestrador (LLM)"]
+    end
+
+    User --> OT
+    OT -->|resposta via chat| User
+
+    subgraph ANA["Sub-Agente Analista"]
+        AT["🔍 Analista ReAct (LLM)"]
+    end
+
+    OT -->|delega analise| AT
+    AT -->|dados e relatorios| OT
+
+    subgraph SCH["Sub-Agente Scheduling"]
+        ST["📅 Scheduler ReAct (LLM)"]
+    end
+
+    OT -->|gerencia agenda| ST
+
+    subgraph SG["SchedulingGraph (StateGraph)"]
+        SG1["⚡ Criar Tarefa (LLM)"]
+        SG2["✓ Consultar Dados"]
+        SG_G["⚡ Gerar Codigo (LLM)"]
+        SG3["✓ Testar Sandbox"]
+        SG_E["⚡ Editar Codigo (LLM)"]
+        SG4["⚡ Corrigir Codigo (LLM)"]
+        SG5["✓ Salvar SQLite"]
+        SG6["✓ Retornar Status"]
+    end
+
+    SG1 -->|busca dados| SG2
+    SG2 -->|cria codigo| SG_G
+    SG_G -->|testa sandbox| SG3
+    SG_E -->|testa sandbox| SG3
+    SG3 -->|erro retry| SG4
+    SG4 -->|retestar| SG3
+    SG3 -->|sucesso| SG5
+    SG5 -->|concluido| SG6
+
+    OT -->|criar agendamento| SG1
+    OT -->|editar agendamento| SG_E
+    SG2 -->|solicita analise| AT
+    AT -->|envia dados| SG2
+
+    DB[("mfg.db - SQLite")]
+    SG5 -->|persiste script| DB
+    ST -->|CRUD banco| DB
+    SG6 -->|sucesso| OT
+
+    subgraph DAEMON["Daemon (60s)"]
+        RUNNER["⚙️ Daemon Runner"]
+    end
+
+    DB -->|executa pendente| RUNNER
+    RUNNER -->|registra log + metadata.json pending_send| DB
+    RUNNER -.->|relatorio pronto p/ envio externo| User
+
+    classDef default fill:#1E293B,stroke:#475569,stroke-width:1px,color:#F8FAFC;
+    classDef agent fill:#312E81,stroke:#6366F1,stroke-width:1px,color:#E0E7FF;
+    classDef agentllm fill:#312E81,stroke:#facc15,stroke-width:2px,color:#E0E7FF;
+    classDef sg fill:#1e3a1e,stroke:#4ade80,stroke-width:1.5px,color:#bbf7d0;
+    classDef sgllm fill:#1e3a1e,stroke:#facc15,stroke-width:2px,color:#bbf7d0;
+    classDef storage fill:#0F2027,stroke:#0EA5E9,stroke-width:1px,color:#7DD3FC;
+    classDef daemon fill:#0c1a2e,stroke:#38BDF8,stroke-width:1.5px,color:#7DD3FC;
+    classDef user fill:#1a2535,stroke:#38BDF8,stroke-width:2px,color:#E0F2FE,font-weight:bold;
+
+    class OT,AT,ST agentllm;
+    class SG2,SG3,SG5,SG6 sg;
+    class SG1,SG_G,SG_E,SG4 sgllm;
+    class DB storage;
+    class RUNNER daemon;
+    class User user;
+</div>
+
+<table class="ref">
+  <caption>Referência — nó do diagrama → arquivo/função (sem nº de linha: muda a cada edição)</caption>
+  <thead>
+    <tr><th>Nó</th><th>Arquivo</th><th>Função / tool</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>OT — Orquestrador</td><td><code>agent_multi.py</code></td><td><code>_build_orchestrator()</code> / nó <code>no_orquestrador</code></td></tr>
+    <tr><td>AT — Analista ReAct</td><td><code>agent_multi.py</code></td><td><code>_build_sub_agent()</code> / nó <code>no_sub_agente</code></td></tr>
+    <tr><td>consultar_analista (OT→AT)</td><td><code>agent_multi.py</code></td><td><code>consultar_analista()</code></td></tr>
+    <tr><td>ST — Scheduler ReAct</td><td><code>agent_multi.py</code></td><td><code>_build_scheduler_agent()</code> / nó <code>no_scheduler</code></td></tr>
+    <tr><td>gerencia agenda (OT→ST)</td><td><code>agent_multi.py</code></td><td><code>gerenciar_agenda()</code></td></tr>
+    <tr><td>ST → DB (CRUD)</td><td><code>scheduler/tools.py</code></td><td><code>list_scheduled_tasks()</code>, <code>toggle_pause_task()</code>, <code>delete_scheduled_task()</code>, <code>set_task_instructions()</code></td></tr>
+    <tr><td>criar agendamento (OT→SG1)</td><td><code>agent_multi.py</code></td><td><code>criar_tarefa_agendada()</code></td></tr>
+    <tr><td>editar agendamento (OT→SG_E)</td><td><code>agent_multi.py</code></td><td><code>editar_tarefa_agendada()</code></td></tr>
+    <tr><td>SchedulingGraph (montagem)</td><td><code>agent_multi.py</code></td><td><code>_build_scheduling_graph()</code></td></tr>
+    <tr><td>SG1 — Criar Tarefa</td><td><code>agent_multi.py</code></td><td><code>node_criar_tarefa()</code> (chama <code>schedule_task()</code>/<code>schedule_monitor()</code> em <code>scheduler/tools.py</code>)</td></tr>
+    <tr><td>SG2 — Consultar Dados</td><td><code>agent_multi.py</code></td><td><code>node_consultar_dados()</code> (invoca o grafo do AT)</td></tr>
+    <tr><td>SG_G — Gerar Código</td><td><code>agent_multi.py</code></td><td><code>node_gerar_codigo()</code></td></tr>
+    <tr><td>SG_E — Editar Código</td><td><code>agent_multi.py</code></td><td><code>node_editar_codigo()</code></td></tr>
+    <tr><td>SG3 — Testar Sandbox</td><td><code>agent_multi.py</code> / <code>scheduler/tools.py</code></td><td><code>node_testar_codigo()</code> → <code>test_task_code()</code></td></tr>
+    <tr><td>SG4 — Corrigir Código</td><td><code>agent_multi.py</code></td><td><code>node_corrigir_codigo()</code></td></tr>
+    <tr><td>SG5 — Salvar SQLite</td><td><code>agent_multi.py</code> / <code>scheduler/tools.py</code></td><td><code>node_salvar_codigo()</code> → <code>save_task_code()</code></td></tr>
+    <tr><td>SG6 — Retornar Status</td><td><code>agent_multi.py</code></td><td><code>node_responder()</code></td></tr>
+    <tr><td>DB — mfg.db</td><td><code>db.py</code></td><td>tabela <code>scheduled_tasks</code> (schema/migrações)</td></tr>
+    <tr><td>Daemon Runner</td><td><code>scheduler/daemon.py</code></td><td><code>scheduler_loop()</code> (loop 60s) → <code>_execute_task()</code></td></tr>
+  </tbody>
+</table>
+
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
+</body>
+</html>
