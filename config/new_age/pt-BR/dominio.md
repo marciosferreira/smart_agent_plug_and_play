@@ -6,29 +6,6 @@
 
 ## Regras do agente
 
-### Sempre informe ressalvas relevantes na resposta
-
-Sempre que o dado usado numa resposta tiver uma limitação que afete a confiabilidade
-ou o escopo do número entregue, diga isso explicitamente na resposta — não entregue só
-o número "limpo". Isso vale, por exemplo, para: quarter em andamento (não fechado,
-potencialmente incompleto) misturado ou comparado com quarter fechado; coluna
-`NULL`/vazia numa amostra relevante (`site_id`/`product_id` de `fact_standard_time`,
-`sales_model_id`); grupo com um único candidato numa pergunta de comparação/ranking (não
-existe "mais barato" com um item só); custo de `fact_final_dl_cost` que não pode ser
-dividido por Sales Model (grupo N:N); ou qualquer outra divergência entre o que a skill
-descreve e o que o servidor realmente retornou. A ressalva é parte da resposta, não um
-rodapé opcional — omiti-la é dar uma resposta tecnicamente correta mas enganosa.
-
-⚠️ **A ressalva tem que BLOQUEAR a conclusão problemática, não só acompanhá-la.**
-Testado ao vivo e confirmado como falha real: numa resposta sobre custo de `AFFINITY`
-por site, a ressalva "os períodos são diferentes" apareceu, mas a resposta AINDA assim
-liderou com "BPL foi significativamente mais barato" como conclusão — cumpriu a letra da
-regra (mencionou a ressalva) mas não o espírito (a ressalva deveria ter impedido aquela
-conclusão de aparecer). Regra prática: se a ressalva invalida uma comparação/número, a
-resposta não formula essa comparação — nem como conclusão principal, nem "com ressalva
-ao lado". A ressalva não é decoração da conclusão errada, ela substitui a conclusão
-errada (ver exemplo completo no bullet "Em qual site foi mais barato produzir [Produto]").
-
 ### Acesso via GraphQL — três tools disponíveis (mesmo mecanismo do posh)
 
 Existem três tools de leitura de dados neste domínio — escolha pela natureza do pedido:
@@ -115,6 +92,71 @@ Existem três tools de leitura de dados neste domínio — escolha pela natureza
   `bridge_final_dl_cost_sales_model` foram adicionadas ao schema depois da última
   verificação — ver "Sales Model" no Modelo de dados abaixo).
 
+## Regras do orquestrador
+
+Este é um sistema de custo de mão de obra direta (DL cost) pago a fábricas contratadas (CMs)
+que fabricam os produtos — não é um sistema de pedidos de compra (isso é o domínio posh) nem
+de alocação de supply. Se o usuário NÃO mencionar período nenhum, use
+calcular_periodo('ultimo quarter') como padrão (o quarter fiscal fechado mais recente — escolha
+deliberada de granularidade, não workaround: `calcular_periodo('todo o período')` também
+funciona aqui via fallback genérico de calendário, cobrindo 2000-01-01 até hoje) e siga direto
+para consultar_analista — NUNCA pergunte o período ao usuário.
+
+Ao delegar a consultar_analista, avise de antemão sobre as duas limitações de dado mais
+comuns deste domínio (evita ida e volta desnecessária): (1) "Sales Model" é filtrável via
+`bridge_final_dl_cost_sales_model`, mas o custo (`dl_cost_by_cm_usd`) NÃO é alocado por
+Sales Model — é o total do grupo Produto+Site+Quarter repetido para cada Sales Model
+associado, então "custo por Sales Model" não tem resposta exata (só "quais Sales Models
+existem" tem); (2) `fact_standard_time` tem `site_id`/`product_id` sempre nulos nesta
+base — perguntas de Standard Time por produto/site provavelmente não retornam dado. Se a
+pergunta tocar nesses temas, inclua isso na instrução já na primeira chamada a
+consultar_analista, em vez de aguardar a resposta dele para descobrir.
+
+## Períodos
+
+> ⚠️ A consulta SQL abaixo não executa neste domínio: depende de `db_config.run_select`,
+> que exige `database.url`, ausente em `modo: graphql`. Com o domínio em `modo: graphql`,
+> a resolução do range real dos dados fica a cargo do fallback genérico de
+> `calcular_periodo` em `agent_multi.py` — "todo o período"/"histórico completo"/"desde o
+> início" resolve para `2000-01-01` até hoje (cobre qualquer domínio sem SQL), não para
+> "hoje". O bloco SQL ficou apenas como referência para o caso deste domínio um dia rodar
+> em `modo: sql`.
+
+### re:todo o per[ií]odo|hist[oó]rico completo|desde o in[ií]cio
+
+```sql
+SELECT MIN(id), MAX(id) FROM dim_calendar
+```
+
+## Modelo de dados
+
+### Ressalvas — onde isso importa neste domínio
+
+A regra geral de sempre bloquear (não só mencionar) uma conclusão inválida por causa de
+uma ressalva já é comportamento padrão do analista (ver prompt do sub-agente) — não
+repetida aqui. Neste domínio, os pontos onde ela mais se aplica na prática:
+
+- Comparação de custo cruzando um quarter em andamento (ver "Período padrão" e o bullet
+  "Em qual site foi mais barato produzir [Produto]" — inclui o caso real testado onde
+  isso falhou na prática).
+- Custo de Sales Model que não pode ser dividido/ranqueado entre os SMs de um grupo
+  (ver seção "Sales Model" abaixo).
+- Linha de `fact_final_dl_cost` com `start_month` no futuro, sem `is_forecast` pra
+  sinalizar (ver "status_approval e is_forecast" abaixo).
+- Grupo com um único candidato numa pergunta de comparação/ranking — não existe "mais
+  barato" com um item só.
+- Coluna `NULL`/vazia numa amostra relevante (`site_id`/`product_id` de
+  `fact_standard_time`, `sales_model_id`).
+
+### `dim_calendar` — mês de referência (dimensão de tempo)
+
+| Coluna | Significado |
+|--------|-------------|
+| id | PK — texto `"YYYY-MM"` (ex.: `"2026-08"`), usado como FK (`month_id`) nas facts |
+| month | Mês civil (1–12) |
+| year | Ano civil do mês |
+| quarter | Trimestre **fiscal** (Abr–Jun=1, Jul–Set=2, Out–Dez=3, Jan–Mar=4) — ver seção abaixo |
+
 ### Calendário fiscal — `dim_calendar.quarter` NÃO é o trimestre civil
 
 `dim_calendar.id` é `"YYYY-MM"` (texto, ex.: `"2026-08"`). O campo `quarter` segue o
@@ -140,80 +182,39 @@ o texto do quarter manualmente a partir de `dim_calendar.year`.
 
 Sinônimo de negócio: "trimestre" = "quarter" = `"FY<ano> Q<n>"` — ver Glossário de negócio.
 
-### Dimensão temporal — três datas diferentes, não confunda
+### `dim_product` — produto (celular/tablet)
 
-Cada fact tem uma data "de negócio" (quando a taxa/tempo/desconto VALE) diferente da
-data "de aprovação" (quando foi aprovado no sistema):
+| Coluna | Significado |
+|--------|-------------|
+| id | PK |
+| name | Codinome comercial do produto (ex.: `OAKLAND27`, `STOCKHOLMLITE27`) |
+| type | enum: `PHONE` · `TABLET` · `OTHER` |
+| product_family_id | FK → `dim_product_family.id` |
+| sa_date | Provável "Start of Availability" — data de início de disponibilidade comercial do produto (termo comum na indústria de celulares; não confirmado com o time de negócio) |
 
-| Tabela | Data de negócio (vigência) | Data de aprovação |
-|--------|------------------------------|--------------------|
-| `fact_hourly_rate` | `month_id` (mês de referência, via `dim_calendar`) | `approved_at` |
-| `fact_standard_time` | `effective_date` | `approved_at` |
-| `fact_dl_discount` | `start_date` / `end_date` (janela de vigência) | `approved_at` |
-| `fact_final_dl_cost` | `start_month`/`end_month` (janela do trimestre fiscal) — ⚠️ **NÃO use `month_id` para filtrar período nesta tabela**, ver nota abaixo | `approved_at` (frequentemente `NULL`) |
+### `dim_product_family` — família de produto
 
-Para "quanto custou em [período]" use a data de negócio, não `approved_at` — `approved_at`
-responde "quando foi aprovado", não "a que mês/período o valor se refere".
+`id`, `name` (ex.: `A SERIES`, `K SERIES`, `MOTOROLA ONE`, `GAMING`, `MOTO Z`).
 
-⚠️ **`fact_final_dl_cost.month_id` já foi observado inconsistente com o próprio
-`start_month`/`end_month` da mesma linha** — caso real verificado: uma linha com
-`quarter = "Q1,2026"` e `start_month`/`end_month` = Abr–Jun/2026 tinha `month_id =
-"2026-09"` (Setembro, fora da janela do próprio trimestre). Para período nesta tabela,
-filtre SEMPRE por `start_month`/`end_month` (sobreposição de intervalo, ver "Exemplos
-task_code" abaixo) — nunca por `month_id`, mesmo que pareça mais direto.
+### `dim_sales_model` — variante comercial de um Produto (SM)
 
-### `status_approval` e `is_forecast` — valores observados
+`id`, `name` (ex.: `PAG50037SA`), `description`. Catálogo com 1000 linhas observadas —
+maior que o número de Sales Models efetivamente ligados a algum custo de DL (ver
+"Sales Model" abaixo).
 
-Valores vistos no ambiente de dev/non-prod: `APPROVED`, `EXPIRED` (podem existir outros,
-ex. `PENDING`/`REJECTED`, não vistos nesta base — trate como enum não fechado). Para "custo
-atual"/"taxa vigente", filtre `status_approval = 'APPROVED'` — `EXPIRED` são versões
-substituídas mantidas por histórico.
+### `bridge_final_dl_cost_sales_model` — ponte N:N entre custo final e Sales Model
 
-⚠️ `fact_final_dl_cost` **não tem** coluna `is_forecast` (as outras três facts têm).
-`is_forecast = true` marca valor projetado/estimado; `false` = valor real negociado/realizado.
+| Coluna | Significado |
+|--------|-------------|
+| final_dl_cost_id | FK → `fact_final_dl_cost.id` |
+| sales_model_id | FK → `dim_sales_model.id` |
 
-⚠️⚠️ **Consequência prática, testada ao vivo: `fact_final_dl_cost` pode ter linhas de
-quarters que AINDA NEM COMEÇARAM** — não é só "em andamento" (ver seção "Período
-padrão" abaixo), pode ser totalmente futuro. Caso real: `ARUBA21` em `JAG` tem uma linha
-`APPROVED` pro Q3,2026 (Out–Dez), mas em 16/09/2026 (Q2,2026 em andamento) esse quarter
-nem começou. Sem `is_forecast` nesta tabela, **não tem como distinguir pelo schema** se
-é um valor já realizado ou uma projeção/planejamento futuro. Antes de tratar qualquer
-linha como "custo real do período", confira `start_month` contra a data de hoje — se
-`start_month` for no futuro, deixe isso explícito na resposta (não apresente como custo
-já incorrido). Isso é ainda mais importante em perguntas de série temporal/"evolução ao
-longo do tempo" — ver bullet dedicado em "Padrões de pergunta validados".
+Tabela só de ligação (sem coluna própria de custo) — uma linha de `fact_final_dl_cost`
+pode estar ligada a dezenas de Sales Models diferentes (observado até 45 na mesma base).
+Ver aviso de criptografia e de fan-out de custo na seção "Sales Model" logo abaixo antes
+de usar esta tabela para qualquer cálculo de custo.
 
-### Período padrão E a frase "último quarter" — SEMPRE o quarter FECHADO, nunca o em andamento
-
-Isso vale em DOIS casos, não só quando o usuário fica em silêncio sobre período:
-
-1. **Usuário não menciona período nenhum** — considere o ano fiscal corrente até o
-   último quarter já fechado.
-2. **Usuário diz literalmente "último quarter"/"quarter passado"/"trimestre anterior"**
-   — ⚠️ **testado ao vivo contra o agente real e confirmado como erro recorrente**: o
-   agente interpretou "último quarter" como o quarter EM ANDAMENTO (ex.: perguntado em
-   setembro, respondeu com Jul–Set, que é o quarter corrente) em vez do último FECHADO
-   (Abr–Jun) — o oposto da convenção usada pelo especialista do produto ("estamos em
-   Setembro, ou seja Quarter 2 de 2026" [em andamento] "... o último quarter foi
-   Q1,2026" [fechado]). NÃO delegue essa frase para `calcular_periodo` genérico sem
-   revisar o resultado — ele tende a devolver o trimestre civil/fiscal CORRENTE, não o
-   anterior a ele.
-
-**Algoritmo para resolver "último quarter" (não depende de data fixa, calcule a partir
-de hoje)**:
-1. Ache o mês corrente e determine o quarter fiscal corrente pela tabela de meses
-   (Abr–Jun=1, Jul–Set=2, Out–Dez=3, Jan–Mar=4 — ver "Calendário fiscal" acima).
-2. "Último quarter" = o quarter fiscal **imediatamente anterior** a esse, não o corrente.
-   Se o corrente é Q1, o anterior é Q4 do FY anterior (ver regra de rótulo de ano fiscal
-   acima — o número do FY muda nessa borda).
-3. Nunca inclua o quarter em andamento nem quarters futuros/forecast como "último
-   quarter".
-
-Isso é mais específico que o fallback genérico de `calcular_periodo('todo o período')`
-usado por outros domínios — aqui "até agora"/"último quarter" tem um corte de quarter
-fechado, não a data de hoje.
-
-### `Sales Model` — agora filtrável via tabela ponte, mas custo NÃO é alocado por Sales Model
+### Sales Model — agora filtrável via tabela ponte, mas custo NÃO é alocado por Sales Model
 
 O glossário de negócio define uma granularidade abaixo de "Produto" chamada **Sales
 Model** (variante comercial de um Produto para um mercado/região específico — cada
@@ -221,16 +222,10 @@ Produto tem 1 ou mais Sales Models). Especialistas descrevem `fact_final_dl_cost
 granular por "Produto, Sales Model, Quarter, Site".
 
 ⚠️ **Isto já foi uma limitação do schema (Sales Model não filtrável) — não é mais.**
-O schema foi ampliado (confirmado via `executar_graphql_schema`) e agora tem:
-- **`dim_sales_model`** — `id`, `name` (ex.: `PAG50037SA`), `description`. Catálogo
-  maior (observadas 1000 linhas) — nem todo Sales Model cadastrado tem custo de DL
-  associado.
-- **`bridge_final_dl_cost_sales_model`** — tabela ponte N:N, só `final_dl_cost_id`
-  (FK → `fact_final_dl_cost.id`) e `sales_model_id` (FK → `dim_sales_model.id`).
-  `fact_hourly_rate`, `fact_dl_discount` e `dim_product` continuam sem `sales_model_id`
-  próprio — só `fact_final_dl_cost` tem esse relacionamento (via a ponte), e
-  `fact_standard_time.sales_model_id` (coluna própria, sem passar pela ponte) segue
-  100% `NULL` na amostra verificada.
+`fact_hourly_rate`, `fact_dl_discount` e `dim_product` continuam sem `sales_model_id`
+próprio — só `fact_final_dl_cost` tem esse relacionamento (via a ponte), e
+`fact_standard_time.sales_model_id` (coluna própria, sem passar pela ponte) segue
+100% `NULL` na amostra verificada.
 
 **Agora dá pra responder "quais Sales Models existem para o Produto/Site/Quarter X"**
 — exemplo validado (retorna nome do Sales Model junto):
@@ -280,86 +275,6 @@ custo chega a estar ligada a 45 Sales Models diferentes. Consequências prática
   segurança** via `bridge_final_dl_cost_sales_model` (junte com `dim_product`/
   `fact_final_dl_cost` conforme necessário).
 
-## Regras do orquestrador
-
-Este é um sistema de custo de mão de obra direta (DL cost) pago a fábricas contratadas (CMs)
-que fabricam os produtos — não é um sistema de pedidos de compra (isso é o domínio posh) nem
-de alocação de supply. Se o usuário NÃO mencionar período nenhum, use
-calcular_periodo('ultimo quarter') como padrão (o quarter fiscal fechado mais recente — escolha
-deliberada de granularidade, não workaround: `calcular_periodo('todo o período')` também
-funciona aqui via fallback genérico de calendário, cobrindo 2000-01-01 até hoje) e siga direto
-para consultar_analista — NUNCA pergunte o período ao usuário.
-
-Ao delegar a consultar_analista, avise de antemão sobre as duas limitações de dado mais
-comuns deste domínio (evita ida e volta desnecessária): (1) "Sales Model" é filtrável via
-`bridge_final_dl_cost_sales_model`, mas o custo (`dl_cost_by_cm_usd`) NÃO é alocado por
-Sales Model — é o total do grupo Produto+Site+Quarter repetido para cada Sales Model
-associado, então "custo por Sales Model" não tem resposta exata (só "quais Sales Models
-existem" tem); (2) `fact_standard_time` tem `site_id`/`product_id` sempre nulos nesta
-base — perguntas de Standard Time por produto/site provavelmente não retornam dado. Se a
-pergunta tocar nesses temas, inclua isso na instrução já na primeira chamada a
-consultar_analista, em vez de aguardar a resposta dele para descobrir.
-
-## Períodos
-
-> ⚠️ A consulta SQL abaixo não executa neste domínio: depende de `db_config.run_select`,
-> que exige `database.url`, ausente em `modo: graphql`. Com o domínio em `modo: graphql`,
-> a resolução do range real dos dados fica a cargo do fallback genérico de
-> `calcular_periodo` em `agent_multi.py` — "todo o período"/"histórico completo"/"desde o
-> início" resolve para `2000-01-01` até hoje (cobre qualquer domínio sem SQL), não para
-> "hoje". O bloco SQL ficou apenas como referência para o caso deste domínio um dia rodar
-> em `modo: sql`.
-
-### re:todo o per[ií]odo|hist[oó]rico completo|desde o in[ií]cio
-
-```sql
-SELECT MIN(id), MAX(id) FROM dim_calendar
-```
-
-## Modelo de dados
-
-### `dim_calendar` — mês de referência (dimensão de tempo)
-
-| Coluna | Significado |
-|--------|-------------|
-| id | PK — texto `"YYYY-MM"` (ex.: `"2026-08"`), usado como FK (`month_id`) nas facts |
-| month | Mês civil (1–12) |
-| year | Ano civil do mês |
-| quarter | Trimestre **fiscal** (Abr–Jun=1, Jul–Set=2, Out–Dez=3, Jan–Mar=4) — ver seção acima |
-
-### `dim_product` — produto (celular/tablet)
-
-| Coluna | Significado |
-|--------|-------------|
-| id | PK |
-| name | Codinome comercial do produto (ex.: `OAKLAND27`, `STOCKHOLMLITE27`) |
-| type | enum: `PHONE` · `TABLET` · `OTHER` |
-| product_family_id | FK → `dim_product_family.id` |
-| sa_date | Provável "Start of Availability" — data de início de disponibilidade comercial do produto (termo comum na indústria de celulares; não confirmado com o time de negócio) |
-
-### `dim_product_family` — família de produto
-
-`id`, `name` (ex.: `A SERIES`, `K SERIES`, `MOTOROLA ONE`, `GAMING`, `MOTO Z`).
-
-### `dim_sales_model` — variante comercial de um Produto (SM)
-
-`id`, `name` (ex.: `PAG50037SA`), `description`. Catálogo com 1000 linhas observadas —
-maior que o número de Sales Models efetivamente ligados a algum custo de DL (ver
-`bridge_final_dl_cost_sales_model` e seção "Sales Model" acima para a ressalva de
-alocação de custo N:N — não some `dl_cost_by_cm_usd` agrupado por Sales Model).
-
-### `bridge_final_dl_cost_sales_model` — ponte N:N entre custo final e Sales Model
-
-| Coluna | Significado |
-|--------|-------------|
-| final_dl_cost_id | FK → `fact_final_dl_cost.id` |
-| sales_model_id | FK → `dim_sales_model.id` |
-
-Tabela só de ligação (sem coluna própria de custo) — uma linha de `fact_final_dl_cost`
-pode estar ligada a dezenas de Sales Models diferentes (observado até 45 na mesma base).
-⚠️ Ver aviso de criptografia e de fan-out de custo na seção "Sales Model" acima antes de
-usar esta tabela para qualquer cálculo de custo.
-
 ### `dim_site` — site produtivo da fábrica contratada (CM)
 
 | Coluna | Significado |
@@ -376,6 +291,79 @@ um site como `"<name>-<company>"` (ex.: "JAG-FLEX" para o site `JAG` da empresa 
 Brasil), então "custo da FLEX" (agregado por `company`, via `expand` em `site_id`) é uma
 pergunta DIFERENTE de "custo do JAG" (um site específico) — confirme qual o usuário quer
 quando o nome usado for o da empresa (`company`), não o código do site (`name`).
+
+### Dimensão temporal — três datas diferentes, não confunda
+
+Cada fact tem uma data "de negócio" (quando a taxa/tempo/desconto VALE) diferente da
+data "de aprovação" (quando foi aprovado no sistema):
+
+| Tabela | Data de negócio (vigência) | Data de aprovação |
+|--------|------------------------------|--------------------|
+| `fact_hourly_rate` | `month_id` (mês de referência, via `dim_calendar`) | `approved_at` |
+| `fact_standard_time` | `effective_date` | `approved_at` |
+| `fact_dl_discount` | `start_date` / `end_date` (janela de vigência) | `approved_at` |
+| `fact_final_dl_cost` | `start_month`/`end_month` (janela do trimestre fiscal) — ⚠️ **NÃO use `month_id` para filtrar período nesta tabela**, ver nota abaixo | `approved_at` (frequentemente `NULL`) |
+
+Para "quanto custou em [período]" use a data de negócio, não `approved_at` — `approved_at`
+responde "quando foi aprovado", não "a que mês/período o valor se refere".
+
+⚠️ **`fact_final_dl_cost.month_id` já foi observado inconsistente com o próprio
+`start_month`/`end_month` da mesma linha** — caso real verificado: uma linha com
+`quarter = "Q1,2026"` e `start_month`/`end_month` = Abr–Jun/2026 tinha `month_id =
+"2026-09"` (Setembro, fora da janela do próprio trimestre). Para período nesta tabela,
+filtre SEMPRE por `start_month`/`end_month` (sobreposição de intervalo, ver "Exemplos
+task_code" abaixo) — nunca por `month_id`, mesmo que pareça mais direto.
+
+### `status_approval` e `is_forecast` — valores observados
+
+Valores vistos no ambiente de dev/non-prod: `APPROVED`, `EXPIRED` (podem existir outros,
+ex. `PENDING`/`REJECTED`, não vistos nesta base — trate como enum não fechado). Para "custo
+atual"/"taxa vigente", filtre `status_approval = 'APPROVED'` — `EXPIRED` são versões
+substituídas mantidas por histórico.
+
+⚠️ `fact_final_dl_cost` **não tem** coluna `is_forecast` (as outras três facts têm).
+`is_forecast = true` marca valor projetado/estimado; `false` = valor real negociado/realizado.
+
+⚠️⚠️ **Consequência prática, testada ao vivo: `fact_final_dl_cost` pode ter linhas de
+quarters que AINDA NEM COMEÇARAM** — não é só "em andamento" (ver seção "Período
+padrão" abaixo), pode ser totalmente futuro. Caso real: `ARUBA21` em `JAG` tem uma linha
+`APPROVED` pro Q3,2026 (Out–Dez), mas em 16/09/2026 (Q2,2026 em andamento) esse quarter
+nem começou. Sem `is_forecast` nesta tabela, **não tem como distinguir pelo schema** se
+é um valor já realizado ou uma projeção/planejamento futuro — a única forma de perceber
+é comparar `start_month` com a data de hoje (o analista já trata dado com data futura
+como não-realizado por regra própria, mas só se checar essa coluna). Isso é ainda mais
+importante em perguntas de série temporal/"evolução ao longo do tempo" — ver bullet
+dedicado em "Padrões de pergunta validados".
+
+### Período padrão E a frase "último quarter" — SEMPRE o quarter FECHADO, nunca o em andamento
+
+Isso vale em DOIS casos, não só quando o usuário fica em silêncio sobre período:
+
+1. **Usuário não menciona período nenhum** — considere o ano fiscal corrente até o
+   último quarter já fechado.
+2. **Usuário diz literalmente "último quarter"/"quarter passado"/"trimestre anterior"**
+   — ⚠️ **testado ao vivo contra o agente real e confirmado como erro recorrente**: o
+   agente interpretou "último quarter" como o quarter EM ANDAMENTO (ex.: perguntado em
+   setembro, respondeu com Jul–Set, que é o quarter corrente) em vez do último FECHADO
+   (Abr–Jun) — o oposto da convenção usada pelo especialista do produto ("estamos em
+   Setembro, ou seja Quarter 2 de 2026" [em andamento] "... o último quarter foi
+   Q1,2026" [fechado]). NÃO delegue essa frase para `calcular_periodo` genérico sem
+   revisar o resultado — ele tende a devolver o trimestre civil/fiscal CORRENTE, não o
+   anterior a ele.
+
+**Algoritmo para resolver "último quarter" (não depende de data fixa, calcule a partir
+de hoje)**:
+1. Ache o mês corrente e determine o quarter fiscal corrente pela tabela de meses
+   (Abr–Jun=1, Jul–Set=2, Out–Dez=3, Jan–Mar=4 — ver "Calendário fiscal" acima).
+2. "Último quarter" = o quarter fiscal **imediatamente anterior** a esse, não o corrente.
+   Se o corrente é Q1, o anterior é Q4 do FY anterior (ver regra de rótulo de ano fiscal
+   acima — o número do FY muda nessa borda).
+3. Nunca inclua o quarter em andamento nem quarters futuros/forecast como "último
+   quarter".
+
+Isso é mais específico que o fallback genérico de `calcular_periodo('todo o período')`
+usado por outros domínios — aqui "até agora"/"último quarter" tem um corte de quarter
+fechado, não a data de hoje.
 
 ### `fact_hourly_rate` — taxa horária de mão de obra por site/produto/mês
 
@@ -443,7 +431,7 @@ Cada combinação **SITE + PRODUTO + ÁREA** tem sua própria linha do tempo de 
 | id | PK |
 | site_id | FK → `dim_site.id`, nullable — ⚠️ **100% NULL nesta base** (verificado nas 1000 linhas amostradas, não é só uma amostra pequena) — perguntas de Standard Time segmentadas por site provavelmente não retornam dado aqui, mesmo sendo suportadas pelo schema; validar se isso muda em produção |
 | product_id | FK → `dim_product.id`, nullable — mesma observação de `site_id` (100% NULL nas 1000 linhas amostradas) |
-| sales_model_id | FK → `dim_sales_model.id` (coluna própria desta tabela, não passa pela ponte `bridge_final_dl_cost_sales_model` — ver seção "Sales Model" nas Regras do agente) — ⚠️ **100% NULL nesta base**, mesmo já existindo `dim_sales_model` no schema |
+| sales_model_id | FK → `dim_sales_model.id` (coluna própria desta tabela, não passa pela ponte `bridge_final_dl_cost_sales_model` — ver seção "Sales Model" acima) — ⚠️ **100% NULL nesta base**, mesmo já existindo `dim_sales_model` no schema |
 | area | enum: `BACKEND` · `CFC` · `SMT` · `L5` (mesmos valores de `fact_hourly_rate`) |
 | stage | enum do estágio de validação do tempo: `RFQ` (cotação inicial) · `THIRTY_DAYS_REVIEW` (revisão aos 30 dias) · `POST_30DAYS` (pós 30 dias) |
 | standard_time | Tempo padrão (unidade não confirmada — provável minutos/peça) |
@@ -499,16 +487,15 @@ Cada combinação **SITE + PRODUTO + ÁREA** tem sua própria linha do tempo de 
 | status_approval | enum — só `APPROVED` observado nesta base |
 | approved_at | Frequentemente `NULL` nesta base (tabela parece ser resultado calculado, não um fluxo de aprovação manual como as demais) |
 
-⚠️ **NUNCA insira uma linha "Desconto" ao decompor `dl_cost_by_cm_usd` a partir de
-`backend_cost`+`cfc_cost`+`smt_cost`+`l5_cost`** — testado ao vivo e confirmado como
-alucinação real: numa resposta sobre `AFFINITY` em `BPL`, o agente apresentou
-`3+6+0+5 - Desconto($7,00) = $7,00`, quando na verdade é `(3+6+0+5=14) / currency_rate(2)
-= 7` (conversão de câmbio, ver linha `dl_cost_by_cm_usd` acima) — não existe coluna de
-desconto em `fact_final_dl_cost`, e os descontos negociados reais de `fact_dl_discount`
-para esse produto/site estavam todos `EXPIRED` (não aplicáveis) e com valores diferentes
-($33 valor fixo, 4%, 6% — nenhum bate com "$7"). Se quiser mostrar descontos negociados,
-busque-os EXPLICITAMENTE em `fact_dl_discount` com `status_approval = 'APPROVED'` — nunca
-invente uma linha de desconto só para fechar a conta entre moeda local e USD.
+⚠️ **Não existe coluna de desconto em `fact_final_dl_cost`** — testado ao vivo, caso real
+de alucinação (a regra geral do analista contra inventar linha/explicação auxiliar já
+cobre isso, esta é a prova de por que ela existe): numa resposta sobre `AFFINITY` em
+`BPL`, o agente apresentou `3+6+0+5 - Desconto($7,00) = $7,00`, quando na verdade é
+`(3+6+0+5=14) / currency_rate(2) = 7` (conversão de câmbio, ver linha `dl_cost_by_cm_usd`
+acima). Os descontos negociados reais de `fact_dl_discount` para esse produto/site
+estavam todos `EXPIRED` e com valores diferentes ($33 valor fixo, 4%, 6% — nenhum bate
+com "$7"). Descontos negociados vêm de `fact_dl_discount` (`status_approval='APPROVED'`),
+nunca de uma dedução inventada em `fact_final_dl_cost`.
 
 ⚠️ Esta é a tabela mais pequena das facts (poucas dezenas de linhas na base observada) —
 é o resultado consolidado, não um detalhe transacional. Para "quanto custou" no agregado,
@@ -579,7 +566,7 @@ executar_graphql(
 -- agora, sem olhar histórico". NÃO use esse padrão pra perguntas que cruzam meses/
 -- comparam sites ao longo do tempo (ex.: "comparativo... no último ano") — nesses
 -- casos, filtrar por status_approval=APPROVED sozinho já foi provado errado (inverte
--- o ranking entre sites) — ver "Regra de vigência do Hourly Rate" no Modelo de dados.
+-- o ranking entre sites) — ver "Regra de vigência do Hourly Rate" acima.
 executar_graphql_agregado(
     table="fact_hourly_rate", chave="taxa_media_por_area",
     group_by="area", metric_field="hourly_rate", metric_op="AVG",
@@ -600,71 +587,47 @@ executar_graphql_agregado(
     metric_op="SUM", where=[site_id IN os ids da empresa, ...])` e some `metricValue` das
     linhas retornadas em pandas — soma de somas = soma total, sem problema.
   - ⚠️ **Para custo MÉDIO da empresa, NÃO agregue por site e depois "junte" as médias em
-    pandas** — testado ao vivo e confirmado como armadilha real: `FLEX` tem 2 linhas em
-    `JAG` e 5 em `MAN` na base observada (contagem desigual), então média(média do JAG,
-    média do MAN) dá um número diferente — e errado — da média real das 7 linhas juntas.
-    "Média das médias" só bate com a média real quando todos os sites têm o MESMO número
-    de linhas, o que não é garantido. `executar_graphql_agregado` também sempre exige
-    `group_by` — não existe forma de pedir uma média geral já sem quebrar por grupo nesse
-    endpoint. Para a média correta cruzando sites de uma empresa: busque as linhas CRUAS
-    com `executar_graphql(table="fact_final_dl_cost", where=[{"field": "site_id", "op": "IN", "value": [<ids da empresa>]}, ...])`
+    pandas** (a regra geral do analista contra "média das médias" já cobre o motivo) —
+    confirmado com dado real que a armadilha se aplica aqui: `FLEX` tem 2 linhas em
+    `JAG` e 5 em `MAN` na base observada, contagem desigual o suficiente pra dar um
+    número diferente do correto. Detalhe de tool específico daqui: `executar_graphql_agregado`
+    sempre exige `group_by` — não existe forma de pedir uma média geral sem quebrar por
+    grupo nesse endpoint. Pra média correta cruzando sites de uma empresa: busque as
+    linhas CRUAS com `executar_graphql(table="fact_final_dl_cost", where=[{"field": "site_id", "op": "IN", "value": [<ids da empresa>]}, ...])`
     (não use `executar_graphql_agregado` aqui) e calcule `.mean()` direto em pandas sobre
-    TODAS as linhas retornadas, sem passar por um agregado intermediário por site.
+    TODAS as linhas retornadas.
 - **"Qual [Produto] mais barato de produzir em [Site]"** — MIN de `dl_cost_by_cm` (ou
   `dl_cost_by_cm_usd`) em `fact_final_dl_cost`, filtrando `product_id` e `site_id`,
   com `status_approval = 'APPROVED'`, na média/menor valor até o último quarter fechado
-  (ver "Período padrão"). Se o pedido for por "Sales Model", ver seção dedicada nas
-  Regras do agente — dá pra listar os Sales Models do grupo, mas NÃO pra dividir o
-  custo entre eles (custo é do grupo Produto+Site+Quarter, não por Sales Model).
+  (ver "Período padrão"). Se o pedido for por "Sales Model", ver seção "Sales Model"
+  acima — dá pra listar os Sales Models do grupo, mas NÃO pra dividir o custo entre eles
+  (custo é do grupo Produto+Site+Quarter, não por Sales Model).
 - **"Em qual site foi mais barato produzir [Produto]"** (com ou sem "no último quarter"
   explícito — sem período mencionado, o padrão deste domínio já é o último quarter
   fechado, ver "Regras do orquestrador") — filtre `fact_final_dl_cost` por `product_id`
   E pelo `quarter` fiscal fechado mais recente (via `start_month`/`end_month`, não monte
   o texto do quarter manualmente — ver seção de calendário fiscal), agrupe por `site_id`
   e pegue o menor `dl_cost_by_cm`/`dl_cost_by_cm_usd`.
-  - ⚠️ **NUNCA compare/ranqueie linhas de quarters diferentes sem excluir o quarter em
-    andamento — e a ressalva tem que BLOQUEAR a conclusão, não só acompanhá-la.**
-    Testado ao vivo DUAS vezes: `AFFINITY` tem custo em `BPL` (Q2,2026, `$7,00`) e em
-    `JAG` (Q1,2026, `$100,00`). Em 16/09/2026, Q2,2026 (Jul–Set) ainda está EM
-    ANDAMENTO — só Q1,2026 (Abr–Jun) está fechado. Na primeira tentativa, mesmo já
-    com a ressalva desta seção documentada, a resposta liderou com "BPL foi
-    significativamente mais barato ($7 vs $100)" como conclusão principal e só citou a
-    diferença de período como nota secundária ("trimestre seguinte") — isso é a
-    ressalva FALHANDO em bloquear a conclusão errada, mesmo tecnicamente presente.
-    Pra evitar repetir esse erro:
-    - **NÃO lidere a resposta com um número/comparação que cruze um quarter aberto.**
-      A resposta começa pelo resultado do quarter FECHADO (ou pela ausência de
-      comparação possível), não por "X foi mais barato que Y".
-    - **Diga "Q2/2026 ainda está em andamento" (ou equivalente), nunca só "trimestre
-      seguinte"** — "trimestre seguinte" soa como só uma diferença de rótulo; "ainda em
-      andamento" deixa claro que o valor pode mudar e não é definitivo.
-    - **Proibido usar "substancialmente mais barato/inferior" (ou qualquer linguagem de
-      comparação/ranking) cruzando um quarter fechado com um aberto** — isso é
-      precisamente a conclusão que a ressalva deveria impedir, não uma observação ao
-      lado dela.
-  - Depois de filtrar corretamente pelo quarter fechado, **se sobrar só 1 site com
-    dado**, não há "mais barato" pra apontar (não é uma comparação, é um dado único) —
-    diga isso explicitamente na resposta, e opcionalmente mencione o dado do quarter em
-    andamento à parte (rotulado como preliminar/não fechado, sem comparar valores)
-    (ver "Sempre informe ressalvas relevantes" nas Regras do agente).
-- **"Evolução do custo de DL de [Site/Produto] ao longo dos trimestres"** — antes de
-  montar qualquer gráfico/série, confira o que realmente existe: `fact_final_dl_cost`
+  - ⚠️ **Cuidado real e já observado nesta base: quarters diferentes na mesma consulta
+    podem misturar fechado com em andamento sem aviso nenhum do servidor.** Caso real:
+    `AFFINITY` tem custo em `BPL` (Q2,2026, `$7,00`) e em `JAG` (Q1,2026, `$100,00`). Em
+    16/09/2026, Q2,2026 (Jul–Set) ainda está EM ANDAMENTO — só Q1,2026 (Abr–Jun) está
+    fechado. Testado ao vivo: mesmo com a regra geral do analista sobre isso já
+    documentada, a primeira resposta ainda liderou com "BPL foi significativamente mais
+    barato ($7 vs $100)" tratando as duas linhas como comparáveis — a correção só
+    funcionou na segunda tentativa, reforçando explicitamente que a comparação era
+    inválida (ver regra geral do analista sobre período fechado vs. em andamento).
+  - Depois de filtrar corretamente pelo quarter fechado, se sobrar só 1 site com dado,
+    não há "mais barato" pra apontar — é um dado único, não uma comparação.
+- **"Evolução do custo de DL de [Site/Produto] ao longo dos trimestres"** — `fact_final_dl_cost`
   tem só ~19 linhas no total, então é comum um site/produto ter só 1-2 pontos, não uma
-  série contínua. Passos:
-  1. Busque TODAS as linhas do site/produto pedido (sem filtro de período — é pra
-     mapear o que existe, não pra responder ainda).
-  2. Verifique se as linhas são do MESMO produto — se vierem produtos diferentes (caso
-     real: `JAG` só tem `AFFINITY` no Q1,2026 e `ARUBA21` no Q3,2026, nenhum overlap),
-     **não é uma evolução/série temporal válida**, são pontos isolados de coisas
-     diferentes. Diga isso explicitamente em vez de plotar como se fosse uma tendência.
-  3. Verifique `start_month` de cada linha contra a data de hoje — linhas com
-     `start_month` no futuro (quarter que nem começou, ver "não tem `is_forecast`"
-     acima) NÃO são custo já incorrido; nunca as trate como ponto real da série sem
-     rotular explicitamente como projeção/planejamento, se é que é isso (o schema não
-     confirma, só a data sugere).
-  4. Só monte gráfico de evolução se sobrar mais de 1 quarter FECHADO do MESMO produto
-     — caso contrário, responda em texto explicando por que não há série pra mostrar
-     (dado insuficiente ou descontínuo), em vez de forçar um gráfico com 1-2 pontos.
+  série contínua (a regra geral do analista sobre confirmar mesma entidade + pontos
+  suficientes em período fechado antes de plotar tendência já cobre o comportamento
+  esperado — aqui é só o alerta de que ESTE domínio cai nesse caso com frequência). Caso
+  real: `JAG` só tem `AFFINITY` no Q1,2026 e `ARUBA21` no Q3,2026 — produtos diferentes,
+  sem overlap, não é uma série válida. Por ser tabela pequena, busque TODAS as linhas do
+  site/produto pedido sem filtro de período primeiro, pra mapear o que existe antes de
+  decidir se há série pra mostrar.
 - **"Evolução do Standard Time de [Produto] em [Site] no último ano"** — série temporal
   de `fact_standard_time.standard_time` (ou `uph`/`upph`) ao longo dos 4 quarters do ano
   fiscal, filtrando por `product_id`/`site_id`. ⚠️ Nesta base de dev, `site_id` e
@@ -679,9 +642,8 @@ executar_graphql_agregado(
     `month_id` antes de assumir "último ano" (na base observada vai só de `2026-03` a
     `2026-09`, ~6 meses, e varia por site — `MAN` só tem dado do mês corrente). Responda
     com o período que realmente existe, e avise que não é um ano completo.
-  - Aplica-se aqui a regra geral "Sempre informe ressalvas relevantes" e a de não liderar
-    com comparação cruzando dado do quarter/mês em andamento — mesmo raciocínio já usado
-    pra custo de `fact_final_dl_cost`.
+  - Vale a mesma regra geral do analista de não liderar com comparação cruzando dado de
+    período em andamento — mesmo raciocínio já usado pra custo de `fact_final_dl_cost`.
 
 ## Domínio de negócio
 
@@ -704,11 +666,11 @@ executar_graphql_agregado(
   específico. Um Product pode ter vários SMs; cada SM pertence a um único Product; todo
   Product tem pelo menos um SM. `dim_sales_model` no schema. Filtrável via a tabela
   ponte `bridge_final_dl_cost_sales_model`, mas o custo NÃO é alocado por SM — ver
-  seção dedicada nas Regras do agente antes de responder qualquer pergunta de custo
+  seção "Sales Model" em Modelo de dados antes de responder qualquer pergunta de custo
   por Sales Model.
 - **Quarter** — unidade temporal do calendário fiscal Motorola/Lenovo (ano fiscal
   Abril–Março), usada para vigência de custos, comparações QoQ (quarter-over-quarter) e
-  Forecast. Ver seção "Calendário fiscal" nas Regras do agente para a regra de rótulo do
+  Forecast. Ver seção "Calendário fiscal" em Modelo de dados para a regra de rótulo do
   ano fiscal (FY) — não confundir com `dim_calendar.year`.
 
 ### O que é este sistema
@@ -763,8 +725,8 @@ manufatura de celulares) — mesmas quatro áreas em `fact_hourly_rate`, `fact_s
 > Neste domínio (`database.modo: graphql`), `ctx.sql()` NÃO funciona — use
 > `ctx.graphql_table(...)` (equivalente a `executar_graphql`) ou `ctx.graphql_aggregate(...)`
 > (equivalente a `executar_graphql_agregado`), mesmos argumentos e schema documentados em
-> "Regras do agente" acima. Os exemplos com `ctx.sql()` abaixo só se aplicam se este domínio
-> voltar a `modo: sql`.
+> "Regras do agente" e "Modelo de dados" acima. Os exemplos com `ctx.sql()` abaixo só se
+> aplicam se este domínio voltar a `modo: sql`.
 
 ### Painel/relatório com ctx.graphql_aggregate — custo final de DL por site
 
