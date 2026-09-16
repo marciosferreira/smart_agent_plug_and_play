@@ -286,6 +286,7 @@ _TOOL_LABELS: dict[str, str] = {
     "executar_sql":            "🗄️ Consultando banco de dados (SQL)",
     "executar_graphql":        "🗄️ Consultando banco de dados (GraphQL)",
     "executar_graphql_agregado": "🗄️ Consultando banco de dados (GraphQL, agregado)",
+    "executar_graphql_schema": "🗄️ Consultando esquema do banco (GraphQL)",
     "analisar_dataframe":      "🔢 Processando e analisando dados",
     "consultar_analista":      "🔍 Delegando ao sub-agente analista",
     "rag_dominio":             "📚 Consultando base de conhecimento (domínio)",
@@ -331,6 +332,7 @@ _LABEL_TRANSLATIONS: dict[str, dict[str, str]] = {
     "🗄️ Consultando banco de dados (SQL)": {"en": "🗄️ Querying database (SQL)", "zh": "🗄️ 正在查询数据库（SQL）"},
     "🗄️ Consultando banco de dados (GraphQL)": {"en": "🗄️ Querying database (GraphQL)", "zh": "🗄️ 正在查询数据库（GraphQL）"},
     "🗄️ Consultando banco de dados (GraphQL, agregado)": {"en": "🗄️ Querying database (GraphQL, aggregate)", "zh": "🗄️ 正在查询数据库（GraphQL，聚合）"},
+    "🗄️ Consultando esquema do banco (GraphQL)": {"en": "🗄️ Querying database schema (GraphQL)", "zh": "🗄️ 正在查询数据库架构（GraphQL）"},
     "🔢 Processando e analisando dados": {"en": "🔢 Processing and analyzing data", "zh": "🔢 正在处理和分析数据"},
     "🔍 Delegando ao sub-agente analista": {"en": "🔍 Delegating to the analyst sub-agent", "zh": "🔍 正在委派给分析子代理"},
     "📚 Consultando base de conhecimento (domínio)": {"en": "📚 Consulting knowledge base (domain)", "zh": "📚 正在查询知识库（业务领域）"},
@@ -1149,6 +1151,45 @@ def executar_graphql_agregado(
 
 
 @tool
+def executar_graphql_schema() -> str:
+    """Consulta o schema real (tabelas e colunas) exposto pelo backend GraphQL (reportSchema)
+    e retorna como texto — NÃO injeta DataFrame no ambiente, é só para leitura/conferência.
+
+    Sem argumentos — traz todas as tabelas do domínio ativo de uma vez.
+
+    Use esta tool quando a skill 'dominio.md' não for suficiente para resolver a análise:
+    coluna/tabela citada na skill que o servidor rejeita como inexistente, dúvida sobre o
+    tipo real de uma coluna, ou suspeita de que a skill esteja desatualizada em relação ao
+    que o backend expõe hoje. Não é o fluxo padrão — leia a skill primeiro; só consulte o
+    schema se estiver travado.
+    """
+    _tlog("executar_graphql_schema", "CHAMADA")
+
+    if not db_config.is_configured():
+        msg = db_config.MSG_NAO_CONFIGURADO
+        _tlog("executar_graphql_schema", "RETORNO", status="ERRO", erro=msg)
+        return msg
+
+    try:
+        tables = graphql_config.run_schema()
+        linhas = [f"Schema real do backend GraphQL — {len(tables)} tabela(s):\n"]
+        for t in tables:
+            cols = ", ".join(
+                f"{c['column']} ({c['dataType']}{', nullable' if c.get('nullable') else ''})"
+                for c in t.get("columns", [])
+            )
+            linhas.append(f"- {t['table']}: {cols}")
+        msg = "\n".join(linhas)
+        _tlog("executar_graphql_schema", "RETORNO", status="OK", tabelas=len(tables))
+    except Exception as e:
+        msg = f"Erro ao consultar schema GraphQL: {e}"
+        _tlog("executar_graphql_schema", "RETORNO", status="ERRO", erro=msg)
+        return msg
+
+    return msg
+
+
+@tool
 def analisar_dataframe(script: str) -> str:
     """Processa e analisa os dados disponíveis no ambiente, retornando o resultado formatado.
 
@@ -1495,7 +1536,7 @@ def _build_sub_agent(llm):
     modo = db_config.modo_acesso()
     tool_dados = executar_sql if modo == "sql" else executar_graphql
     nome_tool_dados = tool_dados.name
-    tools_extras = [executar_graphql_agregado] if modo == "graphql" else []
+    tools_extras = [executar_graphql_agregado, executar_graphql_schema] if modo == "graphql" else []
 
     hoje = datetime.now().strftime("%d/%m/%Y")
     ident = db_config.identidade()
@@ -1503,6 +1544,18 @@ def _build_sub_agent(llm):
     bloco_regras = (
         f"## Regras do domínio (do pack de configuração)\n{regras_dominio}\n\n"
         if regras_dominio else ""
+    )
+    bloco_schema = (
+        "## Schema real — use quando travar\n"
+        "A skill 'dominio.md' é a fonte principal de tabelas/colunas, mas pode ficar "
+        "desatualizada em relação ao que o backend realmente expõe. Se você travar numa "
+        "análise por causa do schema — o servidor rejeitar uma tabela/coluna citada na "
+        "skill como inexistente, dúvida sobre o tipo real de uma coluna, ou suspeita de "
+        "divergência entre a skill e o servidor — chame `executar_graphql_schema()` "
+        "(sem argumentos) para conferir o schema real antes de desistir ou responder com "
+        "base em suposição. Não é passo obrigatório do fluxo normal, só um recurso para "
+        "destravar quando a skill não é suficiente.\n\n"
+        if modo == "graphql" else ""
     )
 
     SUB_SYSTEM_PROMPT = (
@@ -1527,6 +1580,7 @@ def _build_sub_agent(llm):
         "— você os encontra no histórico da conversa — e aplique a modificação solicitada no script "
         "passado para analisar_dataframe. NUNCA responda que não é possível modificar um gráfico.\n\n"
         f"{bloco_regras}"
+        f"{bloco_schema}"
         "## Disciplina de saída — nunca despeje linhas cruas\n"
         "Para perguntas do tipo 'quais KAs/produtos...', SEMPRE agregue "
         "(SELECT DISTINCT ou GROUP BY) — nunca liste a mesma combinação repetida por "

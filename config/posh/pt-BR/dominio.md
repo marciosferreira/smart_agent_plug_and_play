@@ -13,9 +13,9 @@ Para "pedidos deste mês", "pedidos de hoje", "pedidos por período" — use sem
 `issue_date` é a data original informada pelo cliente; `delivery_month` é o mês de entrega
 desejado. NÃO existe coluna genérica `date` neste sistema.
 
-### Acesso via GraphQL — duas tools disponíveis
+### Acesso via GraphQL — três tools disponíveis
 
-Existem duas tools de leitura de dados neste domínio — escolha pela natureza do pedido:
+Existem três tools de leitura de dados neste domínio — escolha pela natureza do pedido:
 
 - **`executar_graphql`** — linhas cruas de uma tabela (`reportTable`). Use quando
   precisa dos dados em nível de item/registro (listar, detalhar, ou quando o
@@ -25,8 +25,13 @@ Existem duas tools de leitura de dados neste domínio — escolha pela natureza 
   no banco (`reportAggregate`). Use SEMPRE que o pedido for do tipo "quantos",
   "total de", "média de", "top N por" — é mais rápido e não traz a tabela inteira
   só para agregar depois em pandas. Ver subseção própria abaixo.
+- **`executar_graphql_schema`** — schema real (tabelas e colunas) do servidor
+  (`reportSchema`). NÃO é fluxo padrão — só chame se travar numa análise por causa
+  do schema (tabela/coluna citada aqui que o servidor rejeita como inexistente,
+  dúvida sobre tipo real de coluna, suspeita de que esta skill esteja desatualizada).
+  Ver subseção própria abaixo.
 
-Ambas fazem parte do que está **de fato disponível para uso hoje**, mesmo que o
+Todas fazem parte do que está **de fato disponível para uso hoje**, mesmo que o
 servidor GraphQL saiba fazer mais (ver "Recursos do servidor NÃO disponíveis
 nestas tools" no fim desta seção).
 
@@ -98,13 +103,27 @@ nestas tools" no fim desta seção).
   -- colunas groupKey (customer_id), name, channel, metricValue (contagem)
   ```
 
+#### Regras de `executar_graphql_schema` (reportSchema)
+
+- Sem argumentos — retorna de uma vez todas as tabelas do schema `brazil` com suas
+  colunas (`column`, `dataType`, `nullable`). Não injeta DataFrame no ambiente,
+  retorna texto — é só para conferência, não para alimentar `analisar_dataframe`.
+- **Não é passo do fluxo normal.** O fluxo padrão continua: `read_skill('dominio.md')`
+  → `executar_graphql`/`executar_graphql_agregado` → `analisar_dataframe`. Só chame
+  `executar_graphql_schema` se travar por causa do schema: o servidor rejeitar uma
+  tabela/coluna citada nesta skill como inexistente, dúvida sobre o tipo real de uma
+  coluna, ou suspeita de que esta skill esteja desatualizada em relação ao que o
+  servidor expõe hoje.
+- Não substitui o "Grafo de relações" desta skill para descobrir FKs — traz só nome/
+  tipo/nullable de coluna, não relações entre tabelas.
+
 #### Recursos do servidor GraphQL NÃO disponíveis nestas tools hoje
 
 O backend (`ReportResolver`) expõe mais do que essas tools usam — documentado
 aqui só como referência, para não tentar chamar algo que não existe do lado da tool:
 
 - `reportTableRelations(table)` — relações de FK de uma tabela só (mais leve
-  que `reportSchema` completo).
+  que `reportSchema` completo, que já está disponível via `executar_graphql_schema`).
 - `reportTables` — lista simples dos nomes de tabela do schema `brazil`.
 
 Se algum dia esses recursos forem expostos nas tools, esta seção precisa ser

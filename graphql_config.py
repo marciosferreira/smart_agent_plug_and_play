@@ -1,10 +1,11 @@
 """Acesso ao endpoint GraphQL do domínio ativo — alternativa a db_config.run_select()
 para domínios com database.modo = graphql ou both (ver config/settings.yml).
 
-Expõe dois métodos de leitura: reportTable (linhas cruas, com filtro, ordenação,
-paginação e join de um salto via `expand`) e reportAggregate (GROUP BY + agregação
+Expõe três métodos de leitura: reportTable (linhas cruas, com filtro, ordenação,
+paginação e join de um salto via `expand`), reportAggregate (GROUP BY + agregação
 feitos no Postgres, com join de um salto via `expand` se o campo de agrupamento
-for FK — formato de `expand` diferente do de reportTable). Ver ARQUITETURA.md.
+for FK — formato de `expand` diferente do de reportTable) e reportSchema (schema
+real do domínio ativo — tabelas e colunas). Ver ARQUITETURA.md.
 """
 import requests
 
@@ -21,6 +22,21 @@ query ReportTable($table: String!, $where: [FilterInput!], $orderBy: SortInput, 
 _QUERY_AGGREGATE = """
 query ReportAggregate($input: ReportAggregateInput!) {
   reportAggregate(input: $input)
+}
+"""
+
+_QUERY_SCHEMA = """
+query ReportSchema {
+  reportSchema {
+    tables {
+      table
+      columns {
+        column
+        dataType
+        nullable
+      }
+    }
+  }
 }
 """
 
@@ -133,3 +149,17 @@ def run_aggregate(
 
     data = _post(_QUERY_AGGREGATE, {"input": input_obj})
     return data["reportAggregate"]
+
+
+def run_schema() -> "list[dict]":
+    """Busca o schema real (tabelas e colunas) exposto pelo backend via reportSchema.
+
+    Sem argumentos — retorna todas as tabelas do domínio ativo de uma vez. Cada item:
+    {"table": str, "columns": [{"column": str, "dataType": str, "nullable": bool}, ...]}.
+
+    Útil para confirmar nomes de tabela/coluna reais quando a skill `dominio.md` estiver
+    desatualizada ou divergir do que o servidor expõe (ver seção de discrepâncias em
+    config/new_age/*/dominio.md como exemplo de caso real já encontrado).
+    """
+    data = _post(_QUERY_SCHEMA, {})
+    return data["reportSchema"]["tables"]

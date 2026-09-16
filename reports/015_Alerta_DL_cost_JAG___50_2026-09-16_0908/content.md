@@ -1,0 +1,1 @@
+Custo DL de JAG (2026-09 - ARUBA21): USD 172.00 (Maior custo registrado: USD 172.00)

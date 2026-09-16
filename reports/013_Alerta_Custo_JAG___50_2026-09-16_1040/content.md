@@ -1,0 +1,1 @@
+Custo DL (JAG): 100.00 USD — ACIMA do limite (> 50)
