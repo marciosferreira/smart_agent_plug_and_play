@@ -63,7 +63,11 @@
       <div class="chat-actions">
         <button class="chat-screenshot" (click)="screenshot.start()" [title]="'chat.screenshotStart' | translate">📷</button>
         <button class="chat-mic" [class.recording]="voice.recording()" [disabled]="transcribing()" (click)="toggleRecording()" [title]="'chat.recordVoice' | translate">🎤</button>
-        <button class="chat-send" [class.loading]="transcribing()" [disabled]="chat.sending() || transcribing()" (click)="handleSend()">{{ transcribing() ? '' : '↑' }}</button>
+        @if (chat.sending()) {
+          <button class="chat-send chat-stop" (click)="chat.stopChat()" [title]="'chat.stop' | translate">■</button>
+        } @else {
+          <button class="chat-send" [class.loading]="transcribing()" [disabled]="transcribing()" (click)="handleSend()">{{ transcribing() ? '' : '↑' }}</button>
+        }
       </div>
     </div>
 

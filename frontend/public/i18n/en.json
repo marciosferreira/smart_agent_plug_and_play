@@ -36,6 +36,8 @@
     "deleteSessionsConfirm": "Delete {n} conversation{plural}? This action cannot be undone.",
     "deleteSessionError": "Error deleting conversation.",
     "connectionLost": "Connection to the agent was interrupted.",
+    "stop": "Stop response",
+    "stopped": "Response stopped.",
     "transcribeError": "Failed to transcribe: {error}",
     "imageAttached": "Attached image",
     "savedBadge": "✔ Saved",

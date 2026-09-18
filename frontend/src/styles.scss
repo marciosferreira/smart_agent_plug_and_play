@@ -494,6 +494,8 @@ header {
 .chat-send:hover { background:#7dd3fc; box-shadow:0 4px 16px rgba(249,115,22,.45); }
 .chat-send:disabled { opacity:.3; cursor:not-allowed; box-shadow:none; }
 .chat-send.loading { opacity:1 !important; cursor:wait; }
+.chat-stop { background:#475569; box-shadow:none; font-size:14px; }
+.chat-stop:hover { background:#64748b; box-shadow:none; }
 .chat-send.loading::after {
   content:''; display:block; width:16px; height:16px;
   border:2px solid rgba(241,245,249,.35); border-top-color:#f1f5f9;

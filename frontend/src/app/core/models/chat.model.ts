@@ -19,6 +19,7 @@ export type ChatStreamEvent =
   | { type: 'widget_updated'; widget_id: string }
   | { type: 'widget_deleted'; widget_id: string }
   | { type: 'reply'; text: string }
+  | { type: 'cancelled' }
   | { type: 'error'; text: string };
 
 export interface ThinkingStep {

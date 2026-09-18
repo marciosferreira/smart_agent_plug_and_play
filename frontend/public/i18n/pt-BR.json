@@ -36,6 +36,8 @@
     "deleteSessionsConfirm": "Deletar {n} conversa{plural}? Esta ação não pode ser desfeita.",
     "deleteSessionError": "Erro ao deletar conversa.",
     "connectionLost": "Conexão com o agente foi interrompida.",
+    "stop": "Parar resposta",
+    "stopped": "Resposta interrompida.",
     "transcribeError": "Falha ao transcrever: {error}",
     "imageAttached": "Imagem anexada",
     "savedBadge": "✔ Salvo",

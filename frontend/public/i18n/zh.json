@@ -36,6 +36,8 @@
     "deleteSessionsConfirm": "删除 {n} 个对话？此操作无法撤销。",
     "deleteSessionError": "删除对话时出错。",
     "connectionLost": "与代理的连接已中断。",
+    "stop": "停止回复",
+    "stopped": "已停止回复。",
     "transcribeError": "转录失败：{error}",
     "imageAttached": "已附加图片",
     "savedBadge": "✔ 已保存",

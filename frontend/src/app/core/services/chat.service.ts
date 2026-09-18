@@ -58,6 +58,10 @@ export class ChatService {
   readonly messages = signal<ChatMessage[]>([]);
   readonly sessions = signal<ChatSession[]>([]);
   readonly sending = signal(false);
+
+  /** Incrementado a cada envio e a cada stop; um sendChat cujo token ficou velho aborta. */
+  private runSeq = 0;
+  private cancelActive: (() => void) | null = null;
   readonly historyOpen = signal(false);
   readonly selectionMode = signal(false);
   readonly selectedSessionIds = signal<Set<string>>(new Set());
@@ -223,9 +227,11 @@ export class ChatService {
     }
     this.pushText('user', userHtml);
     this.sending.set(true);
+    const runToken = ++this.runSeq;
 
     await this.postChartSnapshot();
     this.screenshot.clear();
+    if (this.runSeq !== runToken) return; // parado pelo usuário antes de abrir o stream
 
     const thinkingId = nextId('tm');
     const thinking: ThinkingChatMessage = {
@@ -267,7 +273,10 @@ export class ChatService {
       else updateThinking({ done: true });
     };
 
-    const finishSending = () => this.sending.set(false);
+    const finishSending = () => {
+      this.cancelActive = null;
+      this.sending.set(false);
+    };
 
     const subscription = this.stream.open(text, this.sessionId, this.userSession.userId, this.locale.lang()).subscribe({
       next: (ev) => {
@@ -330,6 +339,12 @@ export class ChatService {
             this.pushText('assistant', marked.parse(ev.text) as string);
             finishSending();
             break;
+          case 'cancelled':
+            subscription.unsubscribe();
+            finalizeThinking();
+            this.pushText('assistant', this.translate.t('chat.stopped'));
+            finishSending();
+            break;
           case 'error':
             subscription.unsubscribe();
             removeThinking();
@@ -344,6 +359,25 @@ export class ChatService {
         finishSending();
       },
     });
+    this.cancelActive = () => {
+      subscription.unsubscribe();
+      finalizeThinking();
+    };
+  }
+
+  /**
+   * Botão "parar": fecha o SSE, avisa o back para interromper o agente e libera o
+   * input na hora. O back serializa runs da mesma sessão, então uma nova pergunta
+   * feita logo em seguida só começa quando o run interrompido terminar de fato.
+   */
+  stopChat(): void {
+    if (!this.sending()) return;
+    this.runSeq++;
+    this.cancelActive?.();
+    this.cancelActive = null;
+    this.http.post('/chat/cancel', { session_id: this.sessionId }).subscribe({ error: () => {} });
+    this.pushText('assistant', this.translate.t('chat.stopped'));
+    this.sending.set(false);
   }
 
   async sendAudio(blob: Blob): Promise<string> {
