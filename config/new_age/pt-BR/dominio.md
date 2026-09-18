@@ -198,9 +198,14 @@ Sinônimo de negócio: "trimestre" = "quarter" = `"FY<ano> Q<n>"` — ver Gloss�
 
 ### `dim_sales_model` — variante comercial de um Produto (SM)
 
-`id`, `name` (ex.: `PAG50037SA`), `description`. Catálogo com 1000 linhas observadas —
-maior que o número de Sales Models efetivamente ligados a algum custo de DL (ver
-"Sales Model" abaixo).
+`id`, `name` (ex.: `PAG50037SA`), `description` (ex.: `LENOVO PHONE L19111 MY 2+32G BL
+DS`). Catálogo com **5.458 linhas** (verificado paginando em 2026-09-18) — bem maior que
+o número de Sales Models efetivamente ligados a algum custo de DL (132 distintos na
+ponte). ⚠️ Como passa do teto de `limit` (1000), buscar `dim_sales_model` direto sem
+`offset` traz só uma fração do catálogo e faz o merge perder Sales Models (na verificação,
+324 das 380 linhas da ponte ficaram "sem SM" por causa disso). Para nome do SM, prefira
+`expand` a partir da ponte (ver "Sales Model" abaixo); se precisar do catálogo cru,
+pagine com `offset` de 1000 em 1000.
 
 ### `bridge_final_dl_cost_sales_model` — ponte N:N entre custo final e Sales Model
 
@@ -253,9 +258,13 @@ Model, sempre faça duas chamadas separadas e junte em pandas dentro de
 
 ⚠️⚠️ **`dl_cost_by_cm`/`dl_cost_by_cm_usd` NÃO é alocado/dividido por Sales Model — é o
 custo TOTAL do grupo Produto+Site+Quarter, repetido igual para CADA Sales Model
-associado a ele pela ponte.** A relação é N:N: na amostra verificada, `fact_final_dl_cost`
-tem só 19 linhas (todas com pelo menos 1 Sales Model associado), mas uma única linha de
-custo chega a estar ligada a 45 Sales Models diferentes. Consequências práticas:
+associado a ele pela ponte.** A relação é N:N: na amostra verificada em 2026-09-18,
+`fact_final_dl_cost` tem 22 linhas (todas com pelo menos 1 Sales Model associado) e a
+ponte tem 380 linhas — de 1 a 45 Sales Models por custo (mediana 7), e um mesmo Sales
+Model pode aparecer em mais de um custo (68 dos 132 SMs distintos). Em todos os casos
+testados o valor do custo é idêntico entre os SMs do mesmo `final_dl_cost_id` (confirma
+que é o valor do grupo, não um valor por SM). O merge custo × ponte dá 380 linhas para
+apenas 22 custos distintos. Consequências práticas:
 - **NUNCA some `dl_cost_by_cm_usd` agrupado por Sales Model após o merge** — o mesmo
   valor de custo é contado uma vez por Sales Model associado, inflando o total
   artificialmente (fan-out clássico de relação N:N). Se o usuário pedir "custo total

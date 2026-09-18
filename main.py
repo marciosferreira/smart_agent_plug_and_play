@@ -35,6 +35,7 @@ import threading
 from sse_starlette.sse import EventSourceResponse
 from agent_multi import (
     init_multi_agent, invoke_multi_agent, is_multi_agent_ready, stream_multi_agent,
+    begin_run, cancel_run,
     set_chart_snapshot, ns_cleanup_loop, _extract_thinking, _extract_text_content, _TOOL_LABELS,
 )
 from scheduler.daemon import scheduler_loop, _execute_task
@@ -195,6 +196,10 @@ class ChatRequest(BaseModel):
     lang: str = ""
 
 
+class CancelRequest(BaseModel):
+    session_id: str = "default"
+
+
 class ChartSnapshotRequest(BaseModel):
     session_id: str
     snapshot: dict
@@ -269,10 +274,13 @@ async def chat_stream(request: Request, message: str, session_id: str = "default
     async def generate():
         loop = asyncio.get_event_loop()
         queue: asyncio.Queue = asyncio.Queue()
+        # Registrado aqui (e não dentro da thread) para que o disconnect cancele ESTE run
+        # específico — um cancel tardio nunca atinge o run seguinte da mesma sessão.
+        run = begin_run(session_id)
 
         def _run():
             try:
-                for event in stream_multi_agent(message, session_id, user_id, lang):
+                for event in stream_multi_agent(message, session_id, user_id, lang, run=run):
                     if event.get("type") == "reply":
                         event["text"] = _embed_charts(event["text"])
                     asyncio.run_coroutine_threadsafe(queue.put(event), loop)
@@ -285,15 +293,29 @@ async def chat_stream(request: Request, message: str, session_id: str = "default
 
         threading.Thread(target=_run, daemon=True).start()
 
-        while True:
-            if await request.is_disconnected():
-                break
-            event = await queue.get()
-            if event is None:
-                break
-            yield {"data": json.dumps(event)}
+        finished = False
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                event = await queue.get()
+                if event is None:
+                    finished = True
+                    break
+                yield {"data": json.dumps(event)}
+        finally:
+            # Cliente sumiu (botão parar, aba fechada, queda de rede): interrompe o agente
+            # em vez de deixá-lo gastando tokens até o fim sem ninguém ouvindo.
+            if not finished:
+                run.cancel.set()
 
     return EventSourceResponse(generate())
+
+
+@app.post("/chat/cancel")
+async def chat_cancel(req: CancelRequest):
+    """Botão "parar": sinaliza cancelamento cooperativo do run em andamento da sessão."""
+    return {"cancelled": cancel_run(req.session_id)}
 
 
 @app.get("/chat/history")

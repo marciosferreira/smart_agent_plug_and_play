@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Optional
 
 import requests as http_requests
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.errors import GraphRecursionError
@@ -375,6 +375,8 @@ _LABEL_TRANSLATIONS: dict[str, dict[str, str]] = {
     "💾 Salvando código validado": {"en": "💾 Saving validated code", "zh": "💾 正在保存已验证的代码"},
     "🗓️ Iniciando criação de tarefa agendada": {"en": "🗓️ Starting scheduled task creation", "zh": "🗓️ 正在开始创建定时任务"},
     "✏️ Editando código da tarefa": {"en": "✏️ Editing task code", "zh": "✏️ 正在编辑任务代码"},
+    # mensagem gravada no histórico quando o usuário para o run (ver _cancelled_reply)
+    "⏹ Resposta interrompida pelo usuário.": {"en": "⏹ Response stopped by the user.", "zh": "⏹ 用户已停止回复。"},
 }
 
 
@@ -386,10 +388,88 @@ def _lbl(texto_pt: str) -> str:
 
 
 def _push_event(session_id: str, event: dict) -> None:
+    if _cancelled():
+        return  # run interrompido: não polui a queue do run seguinte da mesma sessão
     with _eq_lock:
         q = _event_queues.get(session_id)
     if q is not None:
         q.put(event)
+
+
+# ── Cancelamento cooperativo (botão "parar") ──────────────────────────────────
+# Threads Python não podem ser mortas e um llm.invoke() em andamento não é
+# interrompível, então o cancelamento é cooperativo: cada run de chat tem um
+# _RunHandle com um Event, e os nós dos grafos o consultam antes/depois de cada
+# chamada de LLM. O handle viaja por ContextVar (mesmo caminho do session_id) para
+# que um run "fantasma" continue enxergando o SEU flag mesmo depois que um run
+# novo da mesma sessão tenha sido registrado.
+
+class RunCancelled(Exception):
+    """Lançada nos grafos aninhados (analista/scheduler) quando o usuário parou o run.
+
+    O ToolNode do orquestrador converte a exceção em ToolMessage, então o histórico
+    do checkpoint continua válido (todo tool_call tem resposta).
+    """
+
+
+class RunHandle:
+    def __init__(self, session_id: str, prev: "RunHandle | None" = None):
+        self.session_id = session_id
+        self.cancel = threading.Event()
+        self.done = threading.Event()
+        self.prev = prev  # run anterior da sessão, que precisa terminar antes deste começar
+
+
+_active_runs: dict[str, RunHandle] = {}  # session_id → run mais recente
+_runs_lock = threading.Lock()
+_current_run: contextvars.ContextVar["RunHandle | None"] = contextvars.ContextVar(
+    "mfg_run", default=None
+)
+_PREV_RUN_WAIT_SECONDS = 45
+
+
+def begin_run(session_id: str) -> RunHandle:
+    """Registra um novo run da sessão e sinaliza cancelamento ao anterior (se houver).
+
+    Chamado de forma síncrona pelo endpoint antes de iniciar a thread do agente, para
+    que o handle já exista quando um disconnect/cancel chegar.
+    """
+    with _runs_lock:
+        prev = _active_runs.get(session_id)
+        handle = RunHandle(session_id, prev=prev if prev and not prev.done.is_set() else None)
+        _active_runs[session_id] = handle
+    if handle.prev is not None:
+        handle.prev.cancel.set()
+    return handle
+
+
+def cancel_run(session_id: str) -> bool:
+    """Sinaliza cancelamento do run mais recente da sessão. True se havia run ativo."""
+    with _runs_lock:
+        handle = _active_runs.get(session_id)
+    if handle is None or handle.done.is_set():
+        return False
+    handle.cancel.set()
+    return True
+
+
+def _cancelled() -> bool:
+    handle = _current_run.get()
+    return handle is not None and handle.cancel.is_set()
+
+
+def _raise_if_cancelled() -> None:
+    if _cancelled():
+        raise RunCancelled("Execução interrompida pelo usuário.")
+
+
+def _cancelled_reply() -> dict:
+    """Update de estado que encerra o turno de forma válida para o checkpoint:
+    AIMessage sem tool_calls, marcada para o stream emitir 'cancelled' em vez de 'reply'."""
+    return {"messages": [AIMessage(
+        content=_lbl("⏹ Resposta interrompida pelo usuário."),
+        additional_kwargs={"cancelled": True},
+    )]}
 
 
 # ── Estados compartilhados ────────────────────────────────────────────────────
@@ -1227,10 +1307,19 @@ def analisar_dataframe(script: str) -> str:
     else:
         globals_exec = ns
 
+    # `result` persiste no namespace entre chamadas; sem limpar, um script que não o
+    # reatribua exibiria o resultado da chamada anterior.
+    globals_exec.pop("result", None)
+
     old_stdout = sys.stdout
     sys.stdout = io.StringIO()
     try:
         exec(textwrap.dedent(script).lstrip("\n"), globals_exec)
+        if globals_exec is not ns:
+            # No sandbox o exec roda num dict descartável; grava de volta os DataFrames
+            # criados/reatribuídos para que persistam entre chamadas, como no modo normal.
+            ns.update({k: v for k, v in globals_exec.items()
+                       if isinstance(v, pd.DataFrame) and not k.startswith("_")})
         console = sys.stdout.getvalue().strip()
         result = globals_exec.get("result")
 
@@ -1633,7 +1722,14 @@ def _build_sub_agent(llm):
         "que os pontos são da MESMA entidade (não misture produtos/categorias diferentes como "
         "se fosse uma linha do tempo contínua) e que há mais de 1 ponto em período já "
         "fechado/consolidado — com 0-1 ponto real, responda que não há série suficiente em vez "
-        "de forçar um gráfico.\n\n"
+        "de forçar um gráfico.\n"
+        "- VÁRIOS DATAFRAMES (merge/concat): use uma `chave` DISTINTA por consulta — reutilizar "
+        "uma chave sobrescreve o DataFrame anterior sem aviso. Se as tabelas estão no mesmo "
+        "banco, prefira um JOIN no SQL a trazer duas tabelas e unir em pandas. Ao fazer "
+        "`merge`, confira `len()` antes e depois (ou use `validate='m:1'`): chave duplicada "
+        "multiplica linhas e infla somas/contagens. Selecione as colunas necessárias ou passe "
+        "`suffixes` explícitos para evitar `_x`/`_y`. `concat` só entre DataFrames com o mesmo "
+        "significado de colunas.\n\n"
         "- Formate SEMPRE a resposta final em markdown: tabelas para dados tabulares, "
         "**negrito** para valores relevantes.\n"
         "- LEGENDA DOS GRÁFICOS: NUNCA use `bbox_to_anchor` para posicionar a legenda fora "
@@ -1686,6 +1782,38 @@ def _build_sub_agent(llm):
         "  - Colunas principais: <colunas reais do DataFrame>\n"
         "  - Total: 12.400 | Ocorrências críticas: 8 | Percentual X: 62%\n"
         "  Isso permite ao orquestrador responder follow-ups sobre a planilha sem reprocessar os dados.\n\n"
+        "## Bloco obrigatório: Parâmetros da análise\n"
+        "TODA resposta final que tiver consultado dados (via executar_sql/executar_graphql ou "
+        "qualquer variante, direto ou dentro de analisar_dataframe) termina com um bloco assim, "
+        "logo ANTES de qualquer bloco 'Dados do gráfico/relatório/planilha':\n\n"
+        "  **Parâmetros da análise:**\n"
+        "  - Período: <from_date> a <to_date> (<rótulo de negócio do período, ex: 'Q1,2026 — "
+        "fechado', se o domínio tiver esse conceito>)\n"
+        "  - <Dimensão>: <valor> — uma linha para CADA filtro/agrupamento que realmente entrou "
+        "no WHERE/GROUP BY da consulta (produto, site, sales model, categoria, status etc. — os "
+        "nomes das dimensões variam por domínio, use os reais observados na query)\n\n"
+        "Regras deste bloco:\n"
+        "- Marque com '(assumido — não pedido explicitamente)' qualquer valor que você mesmo "
+        "escolheu por o usuário não ter especificado (ex: período veio de "
+        "calcular_periodo('ultimo quarter') porque a pergunta não mencionou data, ou um filtro "
+        "veio de um padrão do domínio) — é isso que permite ao usuário identificar rápido se um "
+        "default errado explica um resultado estranho.\n"
+        "- QUANDO O PERÍODO ASSUMIDO VEIO DE calcular_periodo('ultimo quarter') (domínio não "
+        "mencionou data), não basta marcar '(assumido)' — explicite a REGRA por extenso na "
+        "própria linha: 'último quarter FECHADO — nunca o quarter em andamento' e nomeie qual é "
+        "o quarter atual (em andamento) que ficou de fora por causa dessa regra. Exemplo:\n"
+        "  - Período: 2026-04-01 a 2026-06-30 (Q1,2026 — assumido, regra: sempre o último "
+        "quarter FECHADO, nunca o em andamento; Q2,2026 está em andamento e não entrou)\n"
+        "  Isso vale mesmo que o usuário tenha digitado literalmente 'último quarter' — a regra "
+        "do domínio é que essa frase também significa o último FECHADO, não o corrente, e isso "
+        "precisa ficar visível na resposta, não só aplicado silenciosamente.\n"
+        "- Liste SÓ o que realmente foi usado na query — nunca inclua uma dimensão que não "
+        "filtrou nem agrupou nada.\n"
+        "- Inclua esse bloco mesmo quando a conclusão for 'não há dado para esse filtro' — "
+        "mostre os parâmetros usados na tentativa.\n"
+        "- Se analisar_dataframe for chamado mais de uma vez na mesma resposta, não repita o "
+        "bloco a cada chamada — só uma vez, no final, refletindo os parâmetros da versão dos "
+        "dados que você de fato apresentou.\n\n"
         "## Modo agendamento [PARA_AGENDAMENTO]\n"
         "Se a mensagem contiver [PARA_AGENDAMENTO], após a análise normal escreva um bloco\n"
         "```task_code com o código Python completo pronto para agendamento:\n\n"
@@ -1736,7 +1864,9 @@ def _build_sub_agent(llm):
             extra = ""
         msgs = [SystemMessage(content=_diretiva_idioma() + SUB_SYSTEM_PROMPT + extra)] + list(state["messages"])
         _tlog("sub_agente", "LLM INVOCADO", mensagens=len(msgs))
+        _raise_if_cancelled()
         response = llm_sub.invoke(msgs)
+        _raise_if_cancelled()
 
         meta = getattr(response, "response_metadata", {})
         finish = meta.get("finish_reason", "")
@@ -1864,6 +1994,8 @@ def consultar_analista(detalhes: str, from_date: str, to_date: str, tipo: str = 
             "para esse filtro específico parecem não existir, e pergunte se ele quer restringir "
             "o pedido (produto/site/período mais específico)."
         )
+    except RunCancelled:
+        return "Análise cancelada pelo usuário. Não tente novamente; aguarde o próximo pedido."
     except Exception as e:
         return (
             f"O sub-agente analista encontrou um erro interno ({type(e).__name__}) e não pôde "
@@ -2087,7 +2219,9 @@ def _build_scheduler_agent(llm):
 
     def no_scheduler(state: State) -> dict:
         msgs = [SystemMessage(content=_diretiva_idioma() + SCH_SYSTEM_PROMPT)] + list(state["messages"])
+        _raise_if_cancelled()
         response = llm_sch.invoke(msgs)
+        _raise_if_cancelled()
         session = _current_session.get()
         _emit_agent_events(response, lambda ev: _push_event(session, ev))
         return {"messages": [response]}
@@ -2181,6 +2315,7 @@ def _build_scheduling_graph(llm):
             "- date_range: preencha quando o pedido especifica período (ano atual→ytd, mês→mtd)\n"
             "- weekly → weekday obrigatório. monthly → day obrigatório.\n"
         )
+        _raise_if_cancelled()
         response = llm.invoke([HumanMessage(content=param_prompt)])
         try:
             raw = response.content.strip()
@@ -2367,6 +2502,7 @@ def _build_scheduling_graph(llm):
             f"{' seguido do bloco ```conditionjson```, se aplicável.' if is_graphql_monitor else '.'}"
         )
 
+        _raise_if_cancelled()
         response = llm.invoke([HumanMessage(content=gen_prompt)])
         code = _extract_code_block(response.content)
         condition_sql_fix = ""
@@ -2419,6 +2555,7 @@ def _build_scheduling_graph(llm):
             f"- Responda com bloco ```python\\n...\\n```"
         )
 
+        _raise_if_cancelled()
         response = llm.invoke([HumanMessage(content=edit_prompt)])
         new_code = _extract_code_block(response.content)
         if not new_code:
@@ -2503,6 +2640,7 @@ def _build_scheduling_graph(llm):
             f"- Responda com bloco ```python\\n...\\n```"
         )
 
+        _raise_if_cancelled()
         response = llm.invoke([HumanMessage(content=fix_prompt)])
         new_code = _extract_code_block(response.content)
         if not new_code:
@@ -2718,7 +2856,8 @@ def criar_tarefa_agendada(instrucao: str, config: RunnableConfig = None) -> str:
             last_state = step_state
         return last_state.get("result", "Tarefa criada.")
     except Exception as exc:
-        logger.exception("[criar_tarefa_agendada] Falha inesperada no pipeline de agendamento")
+        if not isinstance(exc, RunCancelled):
+            logger.exception("[criar_tarefa_agendada] Falha inesperada no pipeline de agendamento")
         task_id = last_state.get("task_id") or ""
         if task_id:
             try:
@@ -2730,6 +2869,8 @@ def criar_tarefa_agendada(instrucao: str, config: RunnableConfig = None) -> str:
                     _conn.commit()
             except Exception:
                 pass
+        if isinstance(exc, RunCancelled):
+            return "Criação da tarefa cancelada pelo usuário; o rascunho foi descartado."
         return f"Não foi possível criar a tarefa — erro inesperado no pipeline de agendamento: {exc}"
 
 
@@ -2997,7 +3138,13 @@ def _build_orchestrator(llm, checkpointer=None):
     def no_orquestrador(state: State) -> dict:
         historico_recente = state["messages"][-(MAX_INTERACOES * 2):]
         msgs = [SystemMessage(content=_diretiva_idioma() + ORQ_SYSTEM_PROMPT)] + historico_recente
-        return {"messages": [llm_orq.invoke(msgs)]}
+        if _cancelled():
+            return _cancelled_reply()
+        response = llm_orq.invoke(msgs)
+        # Descarta a resposta (que poderia trazer tool_calls) se o usuário parou durante a chamada.
+        if _cancelled():
+            return _cancelled_reply()
+        return {"messages": [response]}
 
     def orq_para_onde(state: State) -> str:
         ultima = state["messages"][-1]
@@ -3099,7 +3246,8 @@ def invoke_multi_agent(query: str, session_id: str = "default", user_id: str = "
 
 
 
-def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "", lang: str = ""):
+def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "", lang: str = "",
+                       run: "RunHandle | None" = None):
     """Gerador que yields dicts de eventos SSE enquanto o agente processa.
 
     Tipos de evento:
@@ -3107,6 +3255,7 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
       {"type": "tool",     "name": "...", "label": "..."}  — tool sendo chamada
       {"type": "reply",    "text": "..."}   — resposta final (markdown)
       {"type": "error",    "text": "..."}   — erro irrecuperável
+      {"type": "cancelled"}                 — run interrompido pelo usuário (ver begin_run/cancel_run)
 
     Arquitetura de threading:
       - O orquestrador roda em uma thread separada e coloca eventos numa queue.Queue.
@@ -3115,6 +3264,27 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
     """
     if _orchestrator_graph is None:
         yield {"type": "error", "text": "Agente não inicializado."}
+        return
+
+    # begin_run já foi chamado pelo endpoint quando ele precisa do handle para cancelar
+    # em disconnect; chamadores simples (scripts) deixam a criação para cá.
+    if run is None:
+        run = begin_run(session_id)
+
+    # Serializa runs da mesma sessão: um run parado ainda pode estar finalizando a chamada
+    # de LLM em andamento e gravaria no checkpoint/namespace/queue que este run vai usar.
+    if run.prev is not None:
+        if not run.prev.done.wait(timeout=_PREV_RUN_WAIT_SECONDS):
+            logger.warning("[stream] run anterior da sessão %s não terminou em %ss; seguindo mesmo assim",
+                           session_id, _PREV_RUN_WAIT_SECONDS)
+        run.prev = None
+
+    if run.cancel.is_set():  # parado antes mesmo de começar (ex: disconnect durante a espera)
+        with _runs_lock:
+            if _active_runs.get(session_id) is run:
+                _active_runs.pop(session_id, None)
+        run.done.set()
+        yield {"type": "cancelled"}
         return
 
     _current_session.set(session_id)
@@ -3134,6 +3304,7 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
         # ContextVar não se propaga para threading.Thread — precisa setar explicitamente.
         _current_session.set(session_id)
         _current_user_id.set(user_id)
+        _current_run.set(run)
         db_config.set_lang(lang)
         try:
             for chunk in _orchestrator_graph.stream(
@@ -3154,9 +3325,13 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
                             fc = getattr(msg, "additional_kwargs", {}).get("function_call")
                             has_tool = bool(tool_calls or fc)
                             text = _extract_text_content(msg)
-                            if text and not has_tool:
+                            if getattr(msg, "additional_kwargs", {}).get("cancelled"):
+                                event_queue.put({"type": "cancelled"})
+                            elif text and not has_tool:
                                 event_queue.put({"type": "reply", "text": text})
 
+        except RunCancelled:
+            event_queue.put({"type": "cancelled"})
         except Exception as e:
             import traceback as _tb
             import sys
@@ -3165,6 +3340,10 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
             event_queue.put({"type": "error", "text": f"Erro interno: {e}"})
         finally:
             event_queue.put(None)  # sentinel — sinaliza fim do stream
+            with _runs_lock:
+                if _active_runs.get(session_id) is run:
+                    _active_runs.pop(session_id, None)
+            run.done.set()
 
     orchestrator_thread = threading.Thread(target=_run_orchestrator, daemon=True)
     orchestrator_thread.start()
@@ -3177,7 +3356,8 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
             yield event
     finally:
         with _eq_lock:
-            _event_queues.pop(session_id, None)
+            if _event_queues.get(session_id) is event_queue:
+                _event_queues.pop(session_id, None)
 
 
 def is_multi_agent_ready() -> bool:

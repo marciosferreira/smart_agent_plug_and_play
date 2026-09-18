@@ -62,6 +62,17 @@ rows_agg = ctx.graphql_aggregate(
 
 > `ctx.api()` existe no namespace mas serve apenas para o endpoint `/alerts` (sino de notificações) — não use em tasks de dados.
 
+### Vários DataFrames (merge / concat)
+
+Dentro do `run()`, crie um DataFrame por consulta (`df_a`, `df_b`, ...) e una com
+`pd.merge`/`pd.concat` normalmente — tudo é variável local da função. Cuidado com chave
+duplicada no `merge` (multiplica linhas): confira `len()` antes e depois ou use
+`validate='m:1'`.
+
+Na exploração (`analisar_dataframe`), DataFrames criados num script (ex: `base = a.merge(b, ...)`)
+ficam disponíveis nas chamadas seguintes pelo mesmo nome. Outros tipos de variável (listas,
+números, dicts) NÃO persistem entre chamadas.
+
 ---
 
 ## Variáveis pré-injetadas no namespace

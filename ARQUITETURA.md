@@ -212,6 +212,8 @@ O frontend não espera a resposta final. Cada etapa do processo chega em tempo r
 
 O desafio aqui é que o sub-agente roda dentro de um `@tool` do orquestrador — fora do stream principal do LangGraph. A solução é um **side-channel por sessão**: uma `queue.Queue` por `session_id` captura os eventos do sub-agente em tempo real e os entrega ao gerador SSE que está servindo o frontend.
 
+**Parar a resposta.** Threads Python não podem ser mortas e um `llm.invoke()` em andamento não é interrompível, então o cancelamento é cooperativo. Cada run de chat tem um `RunHandle` (`begin_run`) com um `threading.Event`, propagado por `ContextVar`; os nós do orquestrador, analista e scheduler o consultam antes e depois de cada chamada de LLM. No orquestrador, cancelar devolve um `AIMessage` sem `tool_calls` (evento SSE `cancelled`), o que mantém o histórico do checkpoint válido; nos grafos aninhados, lança `RunCancelled`, que o `ToolNode` converte em `ToolMessage`. O front dispara o cancel fechando o `EventSource` e chamando `POST /chat/cancel`; o disconnect do SSE também cancela o run, como rede de segurança. Um novo run da mesma sessão espera o anterior terminar (até 45s) antes de tocar no checkpoint, no namespace de DataFrames e na queue. Limite conhecido: a chamada de LLM ou o script `analisar_dataframe` em andamento termina antes de o cancelamento surtir efeito.
+
 **Importante: SSE é só para o chat.** O resto do dashboard não é push-based — não há WebSocket nem um segundo canal SSE. O sino de alertas 🔔 e o badge da agenda fazem **polling simples via `setInterval` a cada 15s** (`AlertsService`/`AgendaService`, Angular, GET em `/alerts` e `/tasks`). Os gráficos e KPIs principais do dashboard (produção, OEE, etc.) carregam uma vez no load da página e não se auto-atualizam sozinhos. Um novo desenvolvedor que for adicionar "tempo real" em outra parte do dashboard deve decidir entre reaproveitar esse padrão de polling (simples, já testado) ou abrir um canal push novo — hoje não existe abstração compartilhada para isso além da SSE do chat.
 
 ---
@@ -355,6 +357,7 @@ Toda a API vive num único `FastAPI` (`main.py`), sem prefixo/versionamento (`/c
 | --- | --- | --- |
 | `/chat` | POST | Envia uma mensagem e espera a resposta completa (sem streaming) — `{message, session_id, user_id}` |
 | `/chat/stream` | GET (SSE) | Mesma coisa, mas via Server-Sent Events — thinking/tool/reply em tempo real. É o que o frontend usa de fato |
+| `/chat/cancel` | POST | Botão "parar": sinaliza cancelamento cooperativo do run em andamento — `{session_id}` |
 | `/chat/history` | GET | Histórico de mensagens (Human/AI) de um `session_id` |
 | `/chat/sessions` | GET | Lista as conversas de um `user_id` (título + contagem de mensagens), filtradas pelo domínio ativo |
 | `/chat/sessions/{session_id}` | DELETE | Apaga uma conversa e os artefatos (charts/pdfs/excels) associados a ela |
