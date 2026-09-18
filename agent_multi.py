@@ -33,6 +33,7 @@ import sqlite3
 import sys
 import textwrap
 import threading
+import time as _time
 import traceback as tb
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -186,7 +187,10 @@ async def ns_cleanup_loop():
             logger.info("Namespaces expirados removidos: %s", expired)
 
 
-_MAX_RESULT_ROWS = 200  # acima disso, resultado de DataFrame é descrito, não exibido completo
+# Acima disso, `result` DataFrame é descrito, não exibido completo. Baixo de propósito: o
+# retorno da tool é reenviado ao LLM em TODAS as chamadas seguintes, então tabelas grandes
+# inflam o contexto (e a latência). A tabela final da resposta já é limitada a ~20 linhas.
+_MAX_RESULT_ROWS = 100
 
 
 def _df_describe(df: pd.DataFrame, nome: str = "result") -> str:
@@ -196,7 +200,9 @@ def _df_describe(df: pd.DataFrame, nome: str = "result") -> str:
     return (
         f"`{nome}` — DataFrame com {len(df)} linhas e {len(df.columns)} colunas\n"
         f"Colunas e tipos: {dtypes}\n"
-        f"Primeira linha de exemplo:\n{sample}"
+        f"Primeira linha de exemplo:\n{sample}\n"
+        f"(Linhas omitidas para poupar contexto — o DataFrame completo segue no ambiente. "
+        f"Para ver valores, agregue/filtre para poucas linhas ou use print(df.head(N)).)"
     )
 
 
@@ -1020,14 +1026,14 @@ def get_dashboard_charts() -> str:
 
 @tool
 def read_skill(filename: str) -> str:
-    """Lê as instruções completas de uma skill antes de executar qualquer análise.
+    """Lê as instruções completas de uma skill do catálogo do system prompt.
 
-    OBRIGATÓRIO: chame esta tool SEMPRE como primeiro passo de qualquer análise,
-    antes de executar_sql/executar_graphql ou analisar_dataframe. A skill define
-    quais tabelas usar, quais colunas existem e como processar os dados.
+    A skill 'dominio.md' (tabelas, colunas e como processar os dados) já vem carregada
+    no system prompt — NÃO chame esta tool para ela, salvo se a seção
+    '## Skill dominio.md' estiver ausente. Use para as demais skills do catálogo.
 
     Args:
-        filename: Nome do arquivo .md da skill (ex: 'dominio.md').
+        filename: Nome do arquivo .md da skill.
                   Consulte o catálogo no system prompt para ver os arquivos disponíveis.
     """
     _tlog("read_skill", "CHAMADA", filename=filename)
@@ -1313,8 +1319,10 @@ def analisar_dataframe(script: str) -> str:
 
     old_stdout = sys.stdout
     sys.stdout = io.StringIO()
+    _t0 = _time.perf_counter()
     try:
         exec(textwrap.dedent(script).lstrip("\n"), globals_exec)
+        _t_exec = _time.perf_counter() - _t0
         if globals_exec is not ns:
             # No sandbox o exec roda num dict descartável; grava de volta os DataFrames
             # criados/reatribuídos para que persistam entre chamadas, como no modo normal.
@@ -1358,10 +1366,13 @@ def analisar_dataframe(script: str) -> str:
 
         parts.append(_ns_summary(ns))
         saida = "\n\n".join(parts)
+        logger.info("[TIMING] analisar_dataframe exec=%.2fs render=%.2fs saida=%d chars",
+                    _t_exec, _time.perf_counter() - _t0 - _t_exec, len(saida))
         _tlog("analisar_dataframe", "RETORNO", status="OK", saida=saida)
         return saida
 
     except Exception as e:
+        logger.info("[TIMING] analisar_dataframe ERRO após %.2fs", _time.perf_counter() - _t0)
         msg = f"Erro:\n{type(e).__name__}: {e}\n\n{tb.format_exc()}"
         msg += _ns_summary(ns)
         _tlog("analisar_dataframe", "RETORNO", status="ERRO", erro=str(e))
@@ -1605,7 +1616,10 @@ def _montar_catalogo_skills() -> str:
 
     linhas = ["Skills disponíveis (use read_skill para ver as instruções completas):\n"]
     if db_config.is_configured():
-        linhas.append(f"  Arquivo: dominio.md\n{db_config.skill_dominio_header().strip()}\n")
+        linhas.append(
+            f"  Arquivo: dominio.md (JÁ CARREGADA no prompt — não use read_skill)\n"
+            f"{db_config.skill_dominio_header().strip()}\n"
+        )
     for arq in arquivos:
         caminho = SKILLS_FOLDER / arq
         with open(caminho, encoding="utf-8") as f:
@@ -1653,14 +1667,28 @@ def _build_sub_agent(llm):
         f"{ident['nome']} — {ident['descricao']}\n\n"
         "## Fluxo OBRIGATÓRIO — sem exceção\n"
         "Para QUALQUER pedido de análise, siga exatamente estes passos:\n\n"
-        f"  1. ⛔ PRIMEIRO E OBRIGATÓRIO: chame read_skill('dominio.md').\n"
-        f"     NUNCA chame {nome_tool_dados} ou analisar_dataframe antes de ler a skill.\n"
+        "  1. ⛔ A skill 'dominio.md' JÁ VEM CARREGADA no fim deste prompt, na seção "
+        "'## Skill dominio.md'. NÃO chame read_skill('dominio.md') — só faça isso se essa "
+        "seção estiver ausente.\n"
+        f"     NUNCA chame {nome_tool_dados} ou analisar_dataframe sem se basear nela.\n"
         "     Motivo: a skill é a única fonte dos nomes reais de tabelas e colunas do banco.\n"
-        f"     Sem lê-la, você inventará nomes que não existem e a consulta vai falhar.\n\n"
-        f"  2. Após ler a skill, siga o fluxo que ela define ({nome_tool_dados}).\n\n"
+        f"     Sem segui-la, você inventará nomes que não existem e a consulta vai falhar.\n"
+        "     Use read_skill apenas para OUTRAS skills do catálogo.\n\n"
+        f"  2. Siga o fluxo que a skill define ({nome_tool_dados}).\n\n"
         "  3. Chame analisar_dataframe() para processar os dados e obter o resultado.\n"
         "     - Você pode chamar analisar_dataframe() várias vezes para análises em etapas.\n"
-        "     - Variáveis criadas em chamadas anteriores continuam disponíveis.\n\n"
+        "     - Variáveis criadas em chamadas anteriores continuam disponíveis.\n"
+        "     - Cada chamada custa uma rodada inteira do modelo (segundos): junte cálculo, "
+        "ordenação/formatação e a atribuição de `result` num ÚNICO script sempre que possível. "
+        "Só divida em etapas se precisar VER o resultado intermediário para decidir o próximo "
+        "passo (ex: conferir se há linhas, validar a chave de um merge). NÃO gaste uma chamada "
+        "só para 'formatar a tabela final' ou renomear colunas.\n"
+        f"     - CONSULTAS INDEPENDENTES EM PARALELO: se precisar de várias consultas de dados "
+        f"que NÃO dependem umas das outras (ex: tabelas diferentes, cujos filtros você já "
+        f"conhece), emita TODAS as chamadas de {nome_tool_dados} na MESMA resposta, cada uma "
+        "com uma `chave` distinta — elas rodam juntas e poupam rodadas. Só faça em sequência "
+        "quando uma consulta precisar do RESULTADO da anterior (ex: um ID descoberto). "
+        "Vale só para consultas de dados: chamadas de analisar_dataframe são sempre uma por vez.\n\n"
         "  4. Só então redija a resposta final.\n\n"
         "## Modificação de gráfico ou análise já feita\n"
         "Se o usuário pedir para alterar algo em um gráfico ou análise anterior "
@@ -1862,11 +1890,30 @@ def _build_sub_agent(llm):
             extra = "\n".join(lines)
         else:
             extra = ""
-        msgs = [SystemMessage(content=_diretiva_idioma() + SUB_SYSTEM_PROMPT + extra)] + list(state["messages"])
+        # dominio.md vai no system prompt (não via read_skill) para economizar uma rodada do
+        # LLM por análise. Lido a cada chamada: db_config.get_lang() é por-requisição e o
+        # arquivo é recarregado por mtime. Fica ANTES de `extra` para manter o prefixo estável.
+        dominio_txt = db_config.skill_dominio_texto()
+        bloco_dominio = (
+            f"\n\n## Skill dominio.md (já carregada — não chame read_skill para ela)\n{dominio_txt}"
+            if dominio_txt and db_config.is_configured() else ""
+        )
+        msgs = [SystemMessage(
+            content=_diretiva_idioma() + SUB_SYSTEM_PROMPT + bloco_dominio + extra
+        )] + list(state["messages"])
         _tlog("sub_agente", "LLM INVOCADO", mensagens=len(msgs))
         _raise_if_cancelled()
+        _t_llm = _time.perf_counter()
         response = llm_sub.invoke(msgs)
         _raise_if_cancelled()
+
+        _ctx_chars = sum(len(str(getattr(m, "content", ""))) for m in msgs)
+        _usage = getattr(response, "usage_metadata", None) or {}
+        # usage completo (não só input/output): pode incluir output_token_details com os
+        # tokens de raciocínio, que explicam passos lentos com pouca saída visível.
+        logger.info("[TIMING] sub_agente llm=%.2fs msgs=%d contexto=%d chars usage=%s tool_calls=%s",
+                    _time.perf_counter() - _t_llm, len(msgs), _ctx_chars, dict(_usage),
+                    [tc.get("name") for tc in (getattr(response, "tool_calls", None) or [])])
 
         meta = getattr(response, "response_metadata", {})
         finish = meta.get("finish_reason", "")
@@ -2405,7 +2452,8 @@ def _build_scheduling_graph(llm):
             f"Pedido do usuário: {state['user_request']}\n\n"
             f"{resolucao_entidade}"
             f"Sua tarefa nesta fase:\n"
-            f"1. Chame read_skill() para identificar a skill correta para este pedido.\n"
+            f"1. Use a skill dominio.md, já carregada no seu prompt (não chame read_skill para ela; "
+            f"só use read_skill se precisar de OUTRA skill do catálogo).\n"
             f"2. Chame {nome_tool_dados}() para buscar dados reais do período acima.\n"
             f"3. Chame analisar_dataframe() para observar colunas e valores.\n"
             f"4. Retorne um relatório de contexto com EXATAMENTE este formato:\n\n"
@@ -3140,7 +3188,13 @@ def _build_orchestrator(llm, checkpointer=None):
         msgs = [SystemMessage(content=_diretiva_idioma() + ORQ_SYSTEM_PROMPT)] + historico_recente
         if _cancelled():
             return _cancelled_reply()
+        _t_llm = _time.perf_counter()
         response = llm_orq.invoke(msgs)
+        _usage = getattr(response, "usage_metadata", None) or {}
+        logger.info("[TIMING] orquestrador llm=%.2fs msgs=%d contexto=%d chars usage=%s tool_calls=%s",
+                    _time.perf_counter() - _t_llm, len(msgs),
+                    sum(len(str(getattr(m, "content", ""))) for m in msgs), dict(_usage),
+                    [tc.get("name") for tc in (getattr(response, "tool_calls", None) or [])])
         # Descarta a resposta (que poderia trazer tool_calls) se o usuário parou durante a chamada.
         if _cancelled():
             return _cancelled_reply()
@@ -3178,12 +3232,26 @@ def init_multi_agent(project: str, location: str, model_name: str, credentials=N
         # achava resultado, chamadas GraphQL com JSON malformado, e variação de 13 a 68
         # passos pra responder a MESMA pergunta. O orquestrador lida com tom de conversa,
         # então mantém uma temperatura um pouco maior.
+        # Orçamento de raciocínio (thinking) por papel, opcional via env. Os logs [TIMING]
+        # mostram que ~metade do tempo de cada chamada é raciocínio (output_token_details.
+        # reasoning), até em decisões triviais como escolher a próxima tool. Sem a variável,
+        # nada muda (o modelo decide sozinho). 0 desliga o raciocínio; -1 = dinâmico; N = teto
+        # em tokens. Testar valores baixos (ex: 128-512) e conferir a qualidade das respostas.
+        def _thinking_kwargs(env_var: str) -> dict:
+            raw = os.getenv(env_var, "").strip()
+            try:
+                return {"thinking_budget": int(raw)} if raw else {}
+            except ValueError:
+                logger.warning("%s inválido (%r) — ignorado", env_var, raw)
+                return {}
+
         llm_analitico = ChatVertexAI(
             model_name=model_name,
             project=project,
             location=location,
             credentials=credentials,
             temperature=0.15,
+            **_thinking_kwargs("THINKING_BUDGET_ANALISTA"),
         )
         llm_orquestrador = ChatVertexAI(
             model_name=model_name,
@@ -3191,6 +3259,7 @@ def init_multi_agent(project: str, location: str, model_name: str, credentials=N
             location=location,
             credentials=credentials,
             temperature=0.4,
+            **_thinking_kwargs("THINKING_BUDGET_ORQUESTRADOR"),
         )
 
         # Conexão persistente para o checkpointer (check_same_thread=False pois
