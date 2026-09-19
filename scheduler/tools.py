@@ -3,6 +3,7 @@ LangChain tools do scheduler — usam SQLite via db.get_db().
 """
 
 import logging
+import os
 import re as _re
 import traceback
 from datetime import datetime
@@ -18,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 _DOMINIO_CLAUSE = "(dominio = ? OR dominio IS NULL)"
 
-_MIN_INTERVAL_MINUTES = 5
+# Padrão 5 min. Para demo, MIN_MONITOR_INTERVAL_MINUTES=1 permite 'every_1m'.
+_MIN_INTERVAL_MINUTES = max(1, int(os.getenv("MIN_MONITOR_INTERVAL_MINUTES", "5")))
 
 
 def _validate_frequency(frequency: str) -> str | None:
@@ -714,14 +716,14 @@ def save_task_code(task_id: str, code: str) -> str:
     try:
         with get_db() as conn:
             row = conn.execute(
-                f"SELECT name, task_code, condition_sql FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}",
+                f"SELECT name, task_code, condition_sql, status FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}",
                 (task_id, db_config.dominio_filename()),
             ).fetchone()
             if not row:
                 return f"Tarefa '{task_id}' não encontrada."
 
             # Bloqueia ctx.notify() no código de tarefas com condition_sql
-            if "ctx.notify" in code and row.get("condition_sql"):
+            if "ctx.notify" in code and row["condition_sql"]:
                 return (
                     "❌ **Código recusado:** esta tarefa tem `condition_sql` definido — "
                     "a condição e a notificação são gerenciadas automaticamente pelo daemon.\n\n"
@@ -730,7 +732,7 @@ def save_task_code(task_id: str, code: str) -> str:
                 )
 
             # Prepara aviso se ctx.notify() está no código sem condition_sql (salva mesmo assim)
-            if "ctx.notify" in code and not row.get("condition_sql"):
+            if "ctx.notify" in code and not row["condition_sql"]:
                 _notify_warning = (
                     "\n\n⚠️ **Atenção:** o código usa `ctx.notify()`, mas a tarefa não tem "
                     "`condition_sql` definido. Para alertas baseados em threshold, use "
@@ -750,10 +752,19 @@ def save_task_code(task_id: str, code: str) -> str:
                     (task_id, version, row['task_code'], now),
                 )
 
-            conn.execute(
-                "UPDATE scheduled_tasks SET task_code = ?, status = 'active' WHERE id = ?",
-                (code, task_id),
-            )
+            if row["status"] == "draft" and row["condition_sql"]:
+                # Monitor recém-criado (o registro fica 'draft' até este save): a 1ª checagem
+                # roda no próximo tick do daemon em vez de esperar um intervalo inteiro — se a
+                # condição já estiver atingida, o alerta aparece em segundos.
+                conn.execute(
+                    "UPDATE scheduled_tasks SET task_code = ?, status = 'active', next_run = ? WHERE id = ?",
+                    (code, now, task_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE scheduled_tasks SET task_code = ?, status = 'active' WHERE id = ?",
+                    (code, task_id),
+                )
             conn.commit()
 
     except Exception as exc:

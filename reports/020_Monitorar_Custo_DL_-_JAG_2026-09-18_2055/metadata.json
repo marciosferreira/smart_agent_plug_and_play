@@ -1,0 +1,14 @@
+{
+  "task_id": "020",
+  "task_name": "Monitorar Custo DL - JAG",
+  "run_at": "2026-09-18T20:55:58.722439",
+  "status": "pending_send",
+  "pdf_urls": [],
+  "email": null,
+  "schedule": {
+    "frequency": "every_5m",
+    "weekday": null,
+    "day": null,
+    "time": null
+  }
+}

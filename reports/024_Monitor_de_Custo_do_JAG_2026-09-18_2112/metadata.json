@@ -1,0 +1,14 @@
+{
+  "task_id": "024",
+  "task_name": "Monitor de Custo do JAG",
+  "run_at": "2026-09-18T21:12:32.516084",
+  "status": "pending_send",
+  "pdf_urls": [],
+  "email": null,
+  "schedule": {
+    "frequency": "every_5m",
+    "weekday": null,
+    "day": null,
+    "time": null
+  }
+}

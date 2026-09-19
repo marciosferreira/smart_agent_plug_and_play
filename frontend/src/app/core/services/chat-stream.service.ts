@@ -15,8 +15,17 @@ export class ChatStreamService {
         '/chat/stream?' +
         new URLSearchParams({ message, session_id: sessionId, user_id: userId, lang }).toString();
       const es = new EventSource(url);
+      // Diagnóstico de latência: compare com as linhas "[TIMING]" do log do servidor.
+      const stamp = () => new Date().toISOString().slice(11, 23);
+      console.info('[chat-timing] EventSource criado', stamp());
+      es.onopen = () => console.info('[chat-timing] SSE conectado (headers recebidos)', stamp());
+      let firstEvent = true;
 
       es.onmessage = (e) => {
+        if (firstEvent) {
+          firstEvent = false;
+          console.info('[chat-timing] 1º evento recebido', stamp());
+        }
         try {
           subscriber.next(JSON.parse(e.data) as ChatStreamEvent);
         } catch (err) {

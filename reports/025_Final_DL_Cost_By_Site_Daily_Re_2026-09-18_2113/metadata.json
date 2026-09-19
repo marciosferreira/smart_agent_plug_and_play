@@ -1,0 +1,16 @@
+{
+  "task_id": "025",
+  "task_name": "Final DL Cost By Site Daily Report",
+  "run_at": "2026-09-18T21:13:48.682608",
+  "status": "pending_send",
+  "pdf_urls": [
+    "http://localhost:8000/pdf/83f867b3-fca0-4a1c-94a2-51b2a9bdbb94"
+  ],
+  "email": null,
+  "schedule": {
+    "frequency": "daily",
+    "weekday": null,
+    "day": null,
+    "time": "08:00"
+  }
+}

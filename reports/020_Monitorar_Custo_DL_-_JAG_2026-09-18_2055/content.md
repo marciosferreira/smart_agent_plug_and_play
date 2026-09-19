@@ -1,0 +1,1 @@
+Custo DL (AFFINITY): USD 100.00

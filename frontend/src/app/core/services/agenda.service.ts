@@ -2,9 +2,10 @@ import { Injectable, computed, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
 import { UserSessionService } from './user-session.service';
+import { AlertsService } from './alerts.service';
 import { ScheduledTask } from '../models/task.model';
 
-const POLL_MS = 15000;
+const POLL_MS = 5000;
 const SEEN_IDS_KEY = 'agendaSeenIds';
 
 function readSeenIds(): string[] {
@@ -22,6 +23,7 @@ function readSeenIds(): string[] {
 export class AgendaService {
   private readonly http = inject(HttpClient);
   private readonly userSession = inject(UserSessionService);
+  private readonly alerts = inject(AlertsService);
 
   private readonly _tasks = signal<ScheduledTask[]>([]);
   readonly loading = signal(false);
@@ -86,6 +88,7 @@ export class AgendaService {
           params: { user_id: this.userSession.userId },
         }),
       );
+      this.alerts.pollFast();
       setTimeout(() => {
         this.refresh();
         this.pollTaskUntilDone(id);

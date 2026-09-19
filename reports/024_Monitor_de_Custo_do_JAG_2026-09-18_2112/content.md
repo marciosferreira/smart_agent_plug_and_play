@@ -1,0 +1,1 @@
+Custo JAG atual: 100.00 USD (limite: 50)

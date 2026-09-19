@@ -7,6 +7,7 @@ import { LocaleService } from './locale.service';
 import { ChatStreamService } from './chat-stream.service';
 import { ScreenshotService } from './screenshot.service';
 import { WidgetsService } from './widgets.service';
+import { AlertsService } from './alerts.service';
 import { TranslateService } from './translate.service';
 import {
   ArtifactChatMessage,
@@ -49,6 +50,7 @@ export class ChatService {
   private readonly stream = inject(ChatStreamService);
   private readonly screenshot = inject(ScreenshotService);
   private readonly widgets = inject(WidgetsService);
+  private readonly alerts = inject(AlertsService);
   private readonly translate = inject(TranslateService);
 
   private welcomeMsg(): string {
@@ -229,7 +231,10 @@ export class ChatService {
     this.sending.set(true);
     const runToken = ++this.runSeq;
 
+    const tSend = performance.now();
+    console.info('[chat-timing] envio clicado', new Date().toISOString().slice(11, 23));
     await this.postChartSnapshot();
+    console.info(`[chat-timing] snapshot concluído em ${Math.round(performance.now() - tSend)} ms`);
     this.screenshot.clear();
     if (this.runSeq !== runToken) return; // parado pelo usuário antes de abrir o stream
 
@@ -335,6 +340,7 @@ export class ChatService {
             break;
           case 'reply':
             subscription.unsubscribe();
+            this.alerts.pollFast(); // monitor recém-criado: 1ª checagem no próximo tick do daemon
             finalizeThinking();
             this.pushText('assistant', marked.parse(ev.text) as string);
             finishSending();

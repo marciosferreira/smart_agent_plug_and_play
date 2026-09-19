@@ -1,0 +1,1 @@
+Custo DL atual (JAG): USD 272.00

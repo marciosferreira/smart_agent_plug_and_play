@@ -1397,9 +1397,10 @@ def analisar_dataframe(script: str) -> str:
 def calcular_periodo(periodo: str) -> str:
     """Converte um período em linguagem natural para from_date e to_date em YYYY-MM-DD.
 
-    OBRIGATÓRIO: chame esta tool ANTES de consultar_analista. O resultado fornece
-    os parâmetros from_date e to_date exigidos por consultar_analista — sem eles
-    a consulta ao sub-agente analista não pode ser realizada.
+    Para consultar_analista NÃO é necessário chamar esta tool: passe o período em
+    linguagem natural direto no parâmetro `periodo` dela (ela usa esta mesma lógica).
+    Use esta tool só quando precisar das datas explícitas antes de agir (ex: fluxos de
+    painel/dashboard e agendamento).
 
     Períodos específicos do domínio (quarters, mês corrente dos dados, rótulos como
     'FQ1') são resolvidos pela seção '## Períodos' do pack de configuração — refletem
@@ -1703,6 +1704,18 @@ def _build_sub_agent(llm):
         "(SELECT DISTINCT ou GROUP BY) — nunca liste a mesma combinação repetida por "
         "mês/semana. Tabelas na resposta final devem ter NO MÁXIMO ~20 linhas; se houver "
         "mais, agregue num nível acima ou mostre o top-N e informe o total restante.\n\n"
+        "## Resposta final CONCISA — quem a lê é o orquestrador\n"
+        "Fora do modo PARA_AGENDAMENTO, sua resposta final NÃO vai direto ao usuário: o "
+        "orquestrador a reescreve. Entregue só os fatos, sem prosa: sem saudação, sem "
+        "introdução, sem repetir a pergunta, sem recomendações ou próximos passos não pedidos "
+        "e sem parágrafos de contexto. Estrutura:\n"
+        "  1. 2 a 6 bullets com os achados-chave e os números exatos.\n"
+        "  2. A tabela, SE o tipo de saída pedir tabela (máx ~20 linhas).\n"
+        "  3. O token [chart:uuid], em linha própria, se houver gráfico.\n"
+        "  4. Os blocos obrigatórios abaixo (Parâmetros da análise, Dados do gráfico/relatório/"
+        "planilha), compactos.\n"
+        "Ressalvas que limitam ou invalidam uma conclusão continuam OBRIGATÓRIAS — uma linha "
+        "cada, nunca omitidas para encurtar. Meta: até ~250 palavras, fora a tabela.\n\n"
         "## Regras\n"
         "- NUNCA invente dados — use apenas resultados de analisar_dataframe.\n"
         "  Isso vale mesmo DENTRO do script passado para analisar_dataframe: nunca escreva um "
@@ -1966,19 +1979,24 @@ def _build_sub_agent(llm):
 # ── Tool do orquestrador que dispara o sub-agente ────────────────────────────
 
 @tool
-def consultar_analista(detalhes: str, from_date: str, to_date: str, tipo: str = "grafico", para_agendamento: bool = False) -> str:
+def consultar_analista(detalhes: str, from_date: str = "", to_date: str = "", tipo: str = "grafico", para_agendamento: bool = False, periodo: str = "") -> str:
     """Delega a análise ao sub-agente analista de dados.
 
     O sub-agente irá ler a skill de domínio (dominio.md), consultar o banco
     configurado via SQL e retornar uma análise baseada nos dados reais.
 
-    IMPORTANTE: Sempre chame calcular_periodo() antes para obter from_date e to_date.
+    PERÍODO: informe `periodo` em linguagem natural (ex: 'ultimo quarter', 'este mes',
+    'ultimos 30 dias', 'maio de 2026', 'todo o periodo') — a tool resolve as datas
+    internamente, NÃO chame calcular_periodo() antes. Só passe from_date e to_date se
+    já tiver as datas exatas em YYYY-MM-DD; nesse caso elas têm prioridade sobre `periodo`.
 
     Args:
         detalhes: O que o usuário quer analisar (ex: "total por categoria este mês",
                   "itens em estado crítico", "ranking por volume", "comparação entre períodos").
-        from_date: Data inicial no formato YYYY-MM-DD. Obter via calcular_periodo().
-        to_date: Data final no formato YYYY-MM-DD. Obter via calcular_periodo().
+        from_date: Opcional. Data inicial em YYYY-MM-DD (use junto com to_date).
+        to_date: Opcional. Data final em YYYY-MM-DD (use junto com from_date).
+        periodo: Período em linguagem natural — mesmos valores aceitos por calcular_periodo().
+              Obrigatório quando from_date/to_date não forem informados.
         tipo: Tipo de saída desejado. Use EXATAMENTE um dos valores abaixo:
               - "grafico"  → o sub-agente DEVE gerar um gráfico matplotlib (result = fig).
                              Use quando o usuário usou palavras como "gráfico", "chart",
@@ -1997,6 +2015,21 @@ def consultar_analista(detalhes: str, from_date: str, to_date: str, tipo: str = 
     """
     if _sub_agent_graph is None:
         return "Sub-agente analista não inicializado."
+
+    # Resolve o período aqui em vez de exigir uma rodada extra do orquestrador só para
+    # chamar calcular_periodo (a conta é local e instantânea; a rodada custa segundos).
+    if not (from_date and to_date):
+        if not periodo.strip():
+            return (
+                "Informe `periodo` em linguagem natural (ex: 'ultimo quarter', 'este mes') "
+                "ou from_date e to_date em YYYY-MM-DD."
+            )
+        resolvido = calcular_periodo.invoke({"periodo": periodo})
+        m_per = _re.search(r"from=(\d{4}-\d{2}-\d{2})&to=(\d{4}-\d{2}-\d{2})", resolvido)
+        if not m_per:
+            return resolvido  # mensagem de "período não reconhecido" — o orquestrador corrige
+        from_date, to_date = m_per.group(1), m_per.group(2)
+
     ns = _ns_get()
     ns["_current_query"] = detalhes
     flags = f"[TIPO DE SAÍDA OBRIGATÓRIO: {tipo.upper()}]\n[PERÍODO: from={from_date} to={to_date}]"
@@ -2301,6 +2334,21 @@ def _build_scheduling_graph(llm):
     _MAX_RETRIES = 3
     _sandbox_skill = _sandbox_skill_texto()
 
+    # Frequência dita explicitamente no pedido (pt/en/zh). Sem isso, um monitor usa o padrão
+    # every_5m — o prompt de extração já manda isso, mas o LLM às vezes escolhe "daily" por
+    # conta própria (a task 019 nasceu diária), então o padrão é imposto em código.
+    _FREQ_EXPLICITA = _re_sg.compile(
+        r"daily|weekly|monthly|hourly|every_\d+[mhd]"
+        r"|every\s+\d+\s*(?:m|min\w*|h|hours?|d|days?|weeks?|months?)\b"
+        r"|every\s+(?:minute|hour|day|week|month)\b|each\s+(?:day|week|month|hour)\b"
+        r"|once\s+(?:a|per)\s+(?:day|week|month)|\bat\s+\d{1,2}(?::\d{2}|\s*[ap]m)\b"
+        r"|diari\w*|semanal\w*|mensal\w*|\ba\s+cada\b|por\s+hora\b"
+        r"|\btod[oa]s?\s+(?:os\s+|as\s+)?(?:dias?|semanas?|m[eê]s|meses|horas?|"
+        r"segunda|ter[cç]a|quarta|quinta|sexta|s[aá]bado|domingo)\b"
+        r"|\b[àa]s\s+\d{1,2}(?::\d{2}|\s*h)\b|每",
+        _re_sg.IGNORECASE,
+    )
+
     def _extract_code_block(text: str) -> str:
         """Extrai bloco ```task_code``` ou ```python``` que contenha def run."""
         for marker in ("task_code", "python"):
@@ -2336,6 +2384,23 @@ def _build_scheduling_graph(llm):
         from scheduler.condition import describe_condition_format
         condition_format_hint = describe_condition_format()
 
+        # Aqui o LLM NÃO consulta dados, então não conhece o ID (uuid) de uma entidade citada
+        # pelo nome. Sem esta orientação ele inventa um campo de nome (ex: `site_name`) que não
+        # existe na tabela de fatos, a validação de schedule_monitor rejeita, e o pipeline
+        # inteiro aborta. Com o nome no campo de FK a validação passa (0 linhas) e a condição
+        # é corrigida com o ID real em salvar_codigo (condition_sql_fix).
+        provisional_hint = ""
+        if db_config.modo_acesso() == "graphql":
+            provisional_hint = (
+                "- ⚠️ Neste passo você NÃO consulta dados, então ainda não conhece o ID (uuid) de "
+                "entidades citadas pelo NOME (site, produto etc.) — ele é resolvido e esta "
+                "condição é corrigida logo depois. Para esta condição PROVISÓRIA, filtre a "
+                "entidade pelo campo de ID/FK da tabela de fatos usando o NOME digitado como "
+                'valor (ex: {"field": "site_id", "op": "EQ", "value": "JAG"}). NUNCA use um '
+                "campo de nome que não exista na tabela de fatos (ex: site_name) — a validação "
+                "rejeita. Nesta etapa, ignore a orientação de 'resolver o id via dim_site antes'.\n"
+            )
+
         param_prompt = (
             "Extraia os parâmetros de agendamento da instrução abaixo. "
             "Responda APENAS com JSON válido, sem explicação nem marcação markdown.\n\n"
@@ -2356,9 +2421,12 @@ def _build_scheduling_graph(llm):
             "REGRAS:\n"
             "- task_type=monitor se o pedido menciona: alerte/avise/notifique/monitore/caso X>N/threshold\n"
             "- task_type=report para relatórios, gráficos, planilhas recorrentes\n"
-            "- monitor: frequency=every_5m por padrão, time=null; preencha condition_sql/operator/threshold\n"
+            "- monitor: frequency=every_5m SEMPRE, time=null — a menos que a instrução peça "
+            "EXPLICITAMENTE outra frequência (ex: 'a cada hora', 'diariamente'); NUNCA use daily "
+            "por conta própria. Preencha condition_sql/operator/threshold\n"
             f"- {condition_format_hint}\n"
             f"- {db_config.get_secao('Dica para condition_sql') or 'consulte o schema em config/dominio.md'}\n"
+            f"{provisional_hint}"
             "- date_range: preencha quando o pedido especifica período (ano atual→ytd, mês→mtd)\n"
             "- weekly → weekday obrigatório. monthly → day obrigatório.\n"
         )
@@ -2372,6 +2440,10 @@ def _build_scheduling_graph(llm):
             return {"error": f"Erro ao interpretar parâmetros de agendamento: {e}", "task_id": "", "task_name": ""}
 
         is_monitor = params.get("task_type") == "monitor"
+        if is_monitor and not _FREQ_EXPLICITA.search(state["user_request"]):
+            # Monitor sem frequência pedida: padrão é checar a cada 5 minutos, não 1x/dia.
+            params["frequency"] = "every_5m"
+            params["weekday"] = params["day"] = params["time"] = None
         base_params: dict = {
             "name": params.get("name", "Nova Tarefa"),
             "description": params.get("description", ""),
@@ -2399,6 +2471,34 @@ def _build_scheduling_graph(llm):
                 except (TypeError, ValueError):
                     pass
             result = schedule_monitor.invoke(base_params)
+            # Rede de segurança: se a validação rejeitar a condição (ex: campo inexistente),
+            # devolve o erro ao LLM para corrigir em vez de abortar o pipeline inteiro.
+            for _ in range(2):
+                if not (result.startswith("❌") and "condition_sql" in result):
+                    break
+                _raise_if_cancelled()
+                retry_resp = llm.invoke([HumanMessage(content=(
+                    f"{param_prompt}\n\n"
+                    f"⚠️ A condição que você gerou foi REJEITADA pela validação:\n{result}\n\n"
+                    f"Condição rejeitada: {base_params['condition_sql']}\n\n"
+                    "Corrija e responda APENAS com o JSON completo, no mesmo formato. Use somente "
+                    "campos que existam na tabela indicada e siga a regra da condição provisória."
+                ))])
+                try:
+                    raw = _re_sg.sub(r'^```[^\n]*\n?', '', retry_resp.content.strip()).rstrip('`').strip()
+                    fixed = _json.loads(raw)
+                except Exception:
+                    break
+                if not (fixed.get("condition_sql") and fixed.get("condition_operator")):
+                    break
+                base_params["condition_sql"] = fixed["condition_sql"]
+                base_params["condition_operator"] = fixed["condition_operator"]
+                if fixed.get("condition_threshold") is not None:
+                    try:
+                        base_params["condition_threshold"] = float(fixed["condition_threshold"])
+                    except (TypeError, ValueError):
+                        pass
+                result = schedule_monitor.invoke(base_params)
         else:
             result = schedule_task.invoke(base_params)
 
@@ -2754,6 +2854,21 @@ def _build_scheduling_graph(llm):
                 f"**Último erro:**\n```\n{err[:500]}\n```\n\n"
                 f"Tente novamente ou reformule o pedido com mais detalhes."
             )
+        elif (state.get("result") or "").startswith("❌"):
+            # save_task_code devolve "❌ ..." em vez de lançar exceção — sem esta checagem o
+            # agente anunciava "criada e agendada" mesmo com o registro preso em 'draft'.
+            if state.get("mode") == "create" and tid and tid != "?":
+                try:
+                    from db import get_db as _get_db
+                    with _get_db() as _conn:
+                        _conn.execute("DELETE FROM scheduled_tasks WHERE id = ? AND status = 'draft'", (tid,))
+                        _conn.commit()
+                except Exception:
+                    pass
+            msg = (
+                f"A tarefa [{tid}] NÃO foi salva — falha ao gravar o código:\n\n"
+                f"{state['result'][:500]}\n\nTente criar novamente."
+            )
         elif state["mode"] == "create":
             msg = (
                 f"Tarefa **[{tid}]** criada e agendada com código determinístico.\n\n"
@@ -2992,7 +3107,10 @@ def _build_orchestrator(llm, checkpointer=None):
         "     Palavras-chave: 'me diga', 'mostre', 'qual é', 'quanto', 'quantos', 'como está',\n"
         "     'gráfico de', 'análise de', 'compare', 'relatório de',\n"
         f"     e termos do domínio: {ident['palavras_chave']}.\n"
-        "     → Chame calcular_periodo() + consultar_analista(). NÃO envolva gerenciar_agenda.\n"
+        "     → Chame APENAS consultar_analista(), passando o período em linguagem natural em "
+        "`periodo` (ex: 'ultimo quarter', 'este mes'). NÃO chame calcular_periodo antes — "
+        "uma referência a 'calcular_periodo(X)' nas regras do domínio significa passar "
+        "periodo=X. NÃO envolva gerenciar_agenda.\n"
         "     REGRA: qualquer pergunta sobre volumes, contagens ou dados do sistema é categoria A.\n"
         "     ⚠️ Se consultar_analista voltar com uma mensagem de erro interno/limite excedido, NÃO "
         "     chame consultar_analista de novo para a mesma pergunta mais de UMA vez — se a segunda "
@@ -3056,6 +3174,20 @@ def _build_orchestrator(llm, checkpointer=None):
         "o pedido original completo E a modificação solicitada. Exemplo: 'Gráfico de produção "
         "diária agregada por dia — mesmos dados e período, mas com paleta de cores cinza/preto.'\n"
         "O UUID está no histórico no formato [chart:UUID].\n\n"
+        "## Como redigir a resposta após consultar_analista\n"
+        "O retorno de consultar_analista é um relatório técnico e conciso, sem prosa — VOCÊ "
+        "escreve a resposta final ao usuário, no idioma dele, em markdown, com tom natural e "
+        "direto (comece com 2 a 4 frases de resumo, depois os detalhes). Regras:\n"
+        "- Use SOMENTE números, nomes e fatos presentes no retorno; nunca invente, some ou "
+        "recalcule valores.\n"
+        "- Preserve TODAS as ressalvas e limitações apontadas (período em andamento, dado "
+        "ausente, comparação inválida, valor assumido) — não as suavize nem as omita.\n"
+        "- Copie LITERALMENTE os tokens [chart:uuid], [excel:uuid] e [pdf:uuid] — sem eles o "
+        "artefato não aparece.\n"
+        "- Mantenha a tabela do analista, se houver, e os blocos **Parâmetros da análise:** e "
+        "**Dados do gráfico/relatório/planilha:** ao final, sem alterá-los (servem para "
+        "responder follow-ups).\n"
+        "- Não acrescente análise além do que o retorno sustenta.\n\n"
         "REGRA CRÍTICA: na dúvida entre A e C, escolha A. Nunca inicie um fluxo de agendamento\n"
         "a menos que o usuário tenha usado explicitamente palavras de agendamento (categoria C).\n\n"
         "## Agendamento de tarefas — CRIAR nova tarefa\n"
@@ -3067,6 +3199,8 @@ def _build_orchestrator(llm, checkpointer=None):
         "é executado automaticamente dentro do tool. NUNCA faça esse fluxo manualmente.\n"
         "NUNCA peça ao usuário nome ou descrição — infira do contexto.\n"
         "Inclua na instrução: o que a tarefa faz, a frequência e (se mencionado) o horário.\n"
+        "Para MONITOR/alerta em que o usuário NÃO disse a frequência, NÃO invente uma "
+        "(nunca 'diário'): escreva 'verificar a cada 5 minutos' (padrão dos monitores).\n"
         "Exemplos de instrucao:\n"
         "  'Relatório semanal de <métrica> por <dimensão> toda segunda às 8h'\n"
         "  'Monitor a cada 5 minutos, alerta se <métrica> passar de <N>'\n"
@@ -3335,6 +3469,8 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
         yield {"type": "error", "text": "Agente não inicializado."}
         return
 
+    _t_req = _time.perf_counter()
+
     # begin_run já foi chamado pelo endpoint quando ele precisa do handle para cancelar
     # em disconnect; chamadores simples (scripts) deixam a criação para cá.
     if run is None:
@@ -3368,6 +3504,8 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 50}
 
     human_message = _build_human_message(query, session_id)
+    _t_setup = _time.perf_counter() - _t_req
+    _n_imgs = len(human_message.content) - 1 if isinstance(human_message.content, list) else 0
 
     def _run_orchestrator():
         # ContextVar não se propaga para threading.Thread — precisa setar explicitamente.
@@ -3375,12 +3513,21 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
         _current_user_id.set(user_id)
         _current_run.set(run)
         db_config.set_lang(lang)
+        _t_graph = _time.perf_counter()
+        _first_chunk = True
         try:
             for chunk in _orchestrator_graph.stream(
                 {"messages": [human_message]},
                 config=config,
                 stream_mode="updates",
             ):
+                if _first_chunk:
+                    _first_chunk = False
+                    # Tempo até o 1º evento visível na UI (a mensagem "Starting" some aqui):
+                    # setup = espera do run anterior + tag no banco + montar a mensagem;
+                    # grafo = checkpoint + 1ª chamada do LLM do orquestrador (ver [TIMING] orquestrador).
+                    logger.info("[TIMING] chat 1º evento: setup=%.2fs grafo=%.2fs imagens_anexas=%d",
+                                _t_setup, _time.perf_counter() - _t_graph, _n_imgs)
                 for node_name, update in chunk.items():
                     messages = update.get("messages", [])
                     if not isinstance(messages, list):

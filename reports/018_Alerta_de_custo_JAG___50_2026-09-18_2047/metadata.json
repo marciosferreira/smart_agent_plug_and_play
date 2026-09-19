@@ -1,0 +1,14 @@
+{
+  "task_id": "018",
+  "task_name": "Alerta de custo JAG > 50",
+  "run_at": "2026-09-18T20:47:53.136228",
+  "status": "pending_send",
+  "pdf_urls": [],
+  "email": null,
+  "schedule": {
+    "frequency": "every_5m",
+    "weekday": null,
+    "day": null,
+    "time": null
+  }
+}

@@ -272,6 +272,12 @@ async def chat_stream(request: Request, message: str, session_id: str = "default
         return EventSourceResponse(_err())
 
     async def generate():
+        import time as _t
+        # Relógio de parede (HH:MM:SS.mmm) para comparar com o console do navegador
+        # ([chat-timing]) — ambos na mesma máquina.
+        _wall = lambda: _t.strftime("%H:%M:%S", _t.localtime()) + f".{int((_t.time() % 1) * 1000):03d}"  # noqa: E731
+        logger.info("[TIMING] /chat/stream recebido às %s", _wall())
+        _first_sent = False
         loop = asyncio.get_event_loop()
         queue: asyncio.Queue = asyncio.Queue()
         # Registrado aqui (e não dentro da thread) para que o disconnect cancele ESTE run
@@ -302,6 +308,9 @@ async def chat_stream(request: Request, message: str, session_id: str = "default
                 if event is None:
                     finished = True
                     break
+                if not _first_sent:
+                    _first_sent = True
+                    logger.info("[TIMING] 1º evento (%s) enviado ao cliente às %s", event.get("type"), _wall())
                 yield {"data": json.dumps(event)}
         finally:
             # Cliente sumiu (botão parar, aba fechada, queda de rede): interrompe o agente

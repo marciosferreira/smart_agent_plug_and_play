@@ -22,8 +22,12 @@ import os
 REPORTS_DIR = Path(__file__).parent.parent / "reports"
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
-_CHECK_INTERVAL_SECONDS = 60
+# Tick do daemon: com 60s um monitor podia atrasar quase 1 min só esperando o próximo
+# ciclo. check_due_tasks só lê o SQLite e avalia tarefas vencidas — 5s é barato.
+_CHECK_INTERVAL_SECONDS = int(os.getenv("SCHEDULER_TICK_SECONDS", "5"))
 _TASK_TIMEOUT_SECONDS   = 600          # 10 min — mata execuções travadas
+_DRAFT_MAX_AGE_MINUTES  = 30           # draft mais velho que isso é órfão (ver cleanup_stale_drafts)
+_DRAFT_SWEEP_SECONDS    = 600          # a cada 10 min varre drafts órfãos
 _RETRY_BACKOFF_MINUTES  = [5, 15, 60]  # espera entre tentativas (1ª, 2ª, 3ª)
 
 _PDF_TOKEN = re.compile(r'\[pdf:([a-f0-9\-]{36})\]')
@@ -412,12 +416,36 @@ def check_due_tasks() -> None:
         _execute_task(task)
 
 
+def cleanup_stale_drafts(max_age_minutes: int = _DRAFT_MAX_AGE_MINUTES) -> int:
+    """Apaga tarefas 'draft' abandonadas (pipeline de criação que caiu, servidor reiniciado
+    no meio, etc.). Um draft legítimo dura o tempo do pipeline (minutos), então qualquer
+    um mais velho que max_age_minutes é órfão. Retorna quantos foram removidos."""
+    cutoff = (datetime.now() - timedelta(minutes=max_age_minutes)).strftime('%Y-%m-%d %H:%M:%S')
+    with get_db() as conn:
+        ids = [r['id'] for r in conn.execute(
+            "SELECT id FROM scheduled_tasks WHERE status = 'draft' AND created_at < ?", (cutoff,)
+        ).fetchall()]
+        for tid in ids:
+            conn.execute("DELETE FROM scheduled_tasks WHERE id = ? AND status = 'draft'", (tid,))
+            conn.execute("DELETE FROM task_runs WHERE task_id = ?", (tid,))
+            conn.execute("DELETE FROM task_code_versions WHERE task_id = ?", (tid,))
+        conn.commit()
+    if ids:
+        logger.info("[daemon] %d rascunho(s) órfão(s) removido(s): %s", len(ids), ", ".join(ids))
+    return len(ids)
+
+
 async def scheduler_loop() -> None:
     REPORTS_DIR.mkdir(exist_ok=True)
     logger.info("[daemon] Scheduler iniciado — intervalo: %ds", _CHECK_INTERVAL_SECONDS)
+    ticks_per_sweep = max(1, _DRAFT_SWEEP_SECONDS // max(1, _CHECK_INTERVAL_SECONDS))
+    tick = 0
     while True:
         try:
             await asyncio.to_thread(check_due_tasks)
+            if tick % ticks_per_sweep == 0:  # na subida (tick 0) e depois periodicamente
+                await asyncio.to_thread(cleanup_stale_drafts)
         except Exception:
             logger.exception("[daemon] Erro no loop do scheduler")
+        tick += 1
         await asyncio.sleep(_CHECK_INTERVAL_SECONDS)

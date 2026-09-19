@@ -4,7 +4,7 @@ import { firstValueFrom } from 'rxjs';
 import { UserSessionService } from './user-session.service';
 import { AppAlert } from '../models/alert.model';
 
-const POLL_MS = 15000;
+const POLL_MS = 3000;
 
 /**
  * Porta o painel de Alertas de dashboard.html:807-824,3227-3345.
@@ -21,6 +21,21 @@ export class AlertsService {
   constructor() {
     this.updateBadge();
     setInterval(() => this.updateBadge(), POLL_MS);
+  }
+
+  private fastTimer?: ReturnType<typeof setInterval>;
+
+  /**
+   * Rajada de checagens (1,5s por 30s) para depois de uma ação que deve gerar alerta em
+   * segundos — monitor recém-criado, ▶ manual — sem esperar o próximo ciclo do polling.
+   */
+  pollFast(durationMs = 30000, everyMs = 1500): void {
+    clearInterval(this.fastTimer);
+    const end = Date.now() + durationMs;
+    this.fastTimer = setInterval(() => {
+      this.updateBadge();
+      if (Date.now() >= end) clearInterval(this.fastTimer);
+    }, everyMs);
   }
 
   async loadAlerts(): Promise<void> {
