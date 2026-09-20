@@ -1,0 +1,16 @@
+{
+  "task_id": "040",
+  "task_name": "Relatório Final DL Cost por Site",
+  "run_at": "2026-09-20T17:50:20.754436",
+  "status": "pending_send",
+  "pdf_urls": [
+    "http://localhost:8000/pdf/5f9df6a5-05e9-4ce2-8cd6-7a767354bbbe"
+  ],
+  "email": null,
+  "schedule": {
+    "frequency": "daily",
+    "weekday": null,
+    "day": null,
+    "time": "08:00"
+  }
+}

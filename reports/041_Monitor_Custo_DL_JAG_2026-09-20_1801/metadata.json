@@ -1,0 +1,14 @@
+{
+  "task_id": "041",
+  "task_name": "Monitor Custo DL JAG",
+  "run_at": "2026-09-20T18:01:24.105332",
+  "status": "pending_send",
+  "pdf_urls": [],
+  "email": null,
+  "schedule": {
+    "frequency": "every_5m",
+    "weekday": null,
+    "day": null,
+    "time": null
+  }
+}

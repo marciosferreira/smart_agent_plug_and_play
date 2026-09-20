@@ -11,7 +11,10 @@ import db_config
 
 
 class TaskContext:
-    def __init__(self, session_id: str, backend_url: str = "http://localhost:8000", user_id: str | None = None, is_test: bool = False, notify_enabled: bool = True, task_name: str = ""):
+    # Teto de chamadas ao LLM por execução de tarefa (ctx.analisar) — protege contra loops.
+    _MAX_ANALISES = 3
+
+    def __init__(self, session_id: str, backend_url: str = "http://localhost:8000", user_id: str | None = None, is_test: bool = False, notify_enabled: bool = True, task_name: str = "", lang: str = ""):
         self.session_id = session_id
         self.user_id    = user_id
         self._backend_url = backend_url.rstrip("/")
@@ -19,6 +22,8 @@ class TaskContext:
         self._is_test = is_test
         self._notify_enabled = notify_enabled
         self._task_name = task_name
+        self._lang = lang
+        self._analises = 0
         self._notify_called = False
         self._test_alerts: list[dict] = []  # alertas capturados durante teste (não persistidos)
 
@@ -134,6 +139,42 @@ class TaskContext:
         end   = date.today()
         start = end - timedelta(days=days - 1)
         return start, end
+
+    # ── Análise narrativa (LLM) ───────────────────────────────────────────────
+
+    def analisar(self, fatos, foco: str = "", fallback: str = "") -> str:
+        """Pede ao LLM uma análise em texto (markdown) a partir de fatos JÁ CALCULADOS.
+
+        O código calcula os números (totais, participação, ranking, variações, contagens…);
+        o LLM só os interpreta: resumo, achados, padrões, anomalias e limitações. Ele é
+        instruído a usar apenas os números fornecidos, e o texto devolvido é conferido — todo
+        número citado precisa constar nos `fatos`.
+
+        Args:
+            fatos: o que analisar — str, dict/list (JSON), DataFrame, ou um dict
+                   {'Seção': str|dict|DataFrame}. Inclua percentuais, razões e variações
+                   já calculados; o LLM não deve calcular números novos.
+            foco: (opcional) o que o usuário quer enfatizar (ex: 'concentração de custo').
+            fallback: texto usado se o LLM falhar, exceder o teto de chamadas ou citar números
+                      que não estão nos fatos — o relatório sai mesmo assim. Passe a análise
+                      determinística (bullets calculados no código).
+
+        Returns:
+            Markdown com títulos '## ' e listas '- ', pronto para o `conteudo` de generate_pdf().
+        """
+        import logging
+        log = logging.getLogger(__name__)
+        if self._analises >= self._MAX_ANALISES:
+            log.warning("[ctx.analisar] teto de %d chamadas por execução atingido — usando fallback", self._MAX_ANALISES)
+            return fallback
+        self._analises += 1
+        try:
+            from agent_multi import gerar_analise_relatorio
+            texto = gerar_analise_relatorio(fatos, foco=foco, lang=self._lang)
+        except Exception as e:  # o relatório não pode deixar de sair por falha do LLM
+            log.warning("[ctx.analisar] falhou (%s: %s) — usando fallback", type(e).__name__, e)
+            return fallback
+        return texto or fallback
 
     # ── Gerar artifacts (reutilizam funções existentes do agente) ─────────────
 

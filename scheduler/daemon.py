@@ -289,7 +289,7 @@ def _execute_task(task: dict, manual: bool = False) -> None:
             tokens = run_task_code(
                 task["task_code"], from_date, to_date, session_id,
                 user_id=user_id, notify_enabled=notify_enabled,
-                task_name=task_name,
+                task_name=task_name, lang=task.get("lang") or "",
             )
             return " ".join(tokens)
 

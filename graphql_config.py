@@ -7,11 +7,26 @@ feitos no Postgres, com join de um salto via `expand` se o campo de agrupamento
 for FK — formato de `expand` diferente do de reportTable) e reportSchema (schema
 real do domínio ativo — tabelas e colunas). Ver ARQUITETURA.md.
 """
+import json
+from datetime import date
+
 import requests
 
 import db_config
 
 _TIMEOUT = 30
+
+
+def _json_default(o):
+    """Serializa tipos que o `json` padrão recusa. Principal caso: `from_date`/`to_date` do
+    task_code são objetos `date` e o exemplo do dominio.md os passa direto no `where`
+    (`"value": to_date`) — sem isso a 1ª execução de todo relatório falhava com
+    "Object of type date is not JSON serializable" e gastava uma rodada de correção."""
+    if isinstance(o, date):  # inclui datetime
+        return o.isoformat()
+    if hasattr(o, "item"):  # escalar numpy/pandas (np.int64, Timestamp não — cai no TypeError)
+        return o.item()
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 _QUERY_TABLE = """
 query ReportTable($table: String!, $where: [FilterInput!], $orderBy: SortInput, $limit: Int, $offset: Int, $expand: [ExpandInput!]) {
@@ -66,7 +81,7 @@ def _post(query: str, variables: dict) -> dict:
     resp = requests.post(
         cfg["url"],
         headers=headers,
-        json={"query": query, "variables": variables},
+        data=json.dumps({"query": query, "variables": variables}, default=_json_default),
         timeout=_TIMEOUT,
     )
     resp.raise_for_status()
@@ -148,7 +163,15 @@ def run_aggregate(
         input_obj["limit"] = limit
 
     data = _post(_QUERY_AGGREGATE, {"input": input_obj})
-    return data["reportAggregate"]
+    rows = data["reportAggregate"]
+    # O servidor devolve o valor do group_by como "groupKey" — não como coluna com o nome do
+    # group_by. Quem escreve o código (LLM) tende a esperar `df["site_id"]` depois de agregar
+    # por site_id e quebrava com KeyError, o erro mais frequente na 1ª execução de relatórios.
+    # Acrescenta o alias (sem remover "groupKey", e sem sobrescrever uma coluna do expand).
+    for r in rows:
+        if isinstance(r, dict) and group_by not in r and "groupKey" in r:
+            r[group_by] = r["groupKey"]
+    return rows
 
 
 def run_schema() -> "list[dict]":

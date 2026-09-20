@@ -668,7 +668,7 @@ def test_task_code(task_id: str, code: str, from_date: str = "", to_date: str = 
 
     session_id = f"test_{task_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     try:
-        tokens, ctx = run_task_code(code, from_date, to_date, session_id, user_id=_current_user_id(), is_test=True)
+        tokens, ctx = run_task_code(code, from_date, to_date, session_id, user_id=_current_user_id(), is_test=True, lang=_current_lang())
         _push_artifacts("artifact_preview", tokens, task_id, session_id_override=session_id_override)
 
         alert_lines = []

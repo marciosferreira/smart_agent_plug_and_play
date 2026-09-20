@@ -79,6 +79,7 @@ _orchestrator_graph = None
 _sub_agent_graph = None
 _scheduler_agent_graph = None
 _scheduling_graph = None
+_llm_relatorio = None  # modelo da análise narrativa dos relatórios agendados (ctx.analisar)
 _checkpointer = None
 
 # Propaga o session_id através das fronteiras de thread do ToolNode.
@@ -378,6 +379,7 @@ _LABEL_TRANSLATIONS: dict[str, dict[str, str]] = {
     "✏️ Aplicando modificação ao código": {"en": "✏️ Applying change to code", "zh": "✏️ 正在对代码应用修改"},
     "🧪 Testando código": {"en": "🧪 Testing code", "zh": "🧪 正在测试代码"},
     "🔧 Corrigindo erro no código": {"en": "🔧 Fixing error in code", "zh": "🔧 正在修复代码错误"},
+    "🧠 Incluindo a análise no relatório": {"en": "🧠 Adding the requested analysis to the report", "zh": "🧠 正在为报告添加所需的分析"},
     "💾 Salvando código validado": {"en": "💾 Saving validated code", "zh": "💾 正在保存已验证的代码"},
     "🗓️ Iniciando criação de tarefa agendada": {"en": "🗓️ Starting scheduled task creation", "zh": "🗓️ 正在开始创建定时任务"},
     "✏️ Editando código da tarefa": {"en": "✏️ Editing task code", "zh": "✏️ 正在编辑任务代码"},
@@ -496,6 +498,8 @@ class SchedulingState(TypedDict):
     condition_sql_fix: str  # condition_sql corrigida com IDs reais (monitor GraphQL, opcional)
     error: str         # last test error; empty on success
     retries: int       # correction attempts so far
+    analise_ausente: bool    # pedido cita análise, mas o código não chama ctx.analisar
+    analise_tentativas: int  # vezes que pedimos ao LLM para incluir a análise
     result: str        # final output message
 
 
@@ -505,6 +509,26 @@ import re as _re
 import base64 as _b64
 
 _CHART_TOKEN_RE = _re.compile(r'\[chart:([a-f0-9\-]{36})\]')
+
+# O pedido de uma tarefa agendada cita análise? (pt/en/zh). Só termos inequívocos: "padrões" ou
+# "conclusões" soltos aparecem em outros contextos e forçariam uma análise que ninguém pediu.
+_PEDE_ANALISE_RE = _re.compile(
+    r"\b(analys[ie]s|analy[sz]e[sd]?|insights?|an[áa]lises?|analis[ae]r?)\b|分析|洞察",
+    _re.IGNORECASE,
+)
+_NEGA_ANALISE_RE = _re.compile(
+    r"(without|no|skip|sem|dispens\w*|n[ãa]o\s+(?:quero|preciso))\s+(?:an?\s+|the\s+|uma?\s+|qualquer\s+)?$",
+    _re.IGNORECASE,
+)
+
+
+def _pede_analise(texto: str) -> bool:
+    """True se o pedido pede análise/insights ('analysis', 'insights', 'análise'…), ignorando
+    negações como 'without analysis' ou 'sem análise'."""
+    for m in _PEDE_ANALISE_RE.finditer(texto or ""):
+        if not _NEGA_ANALISE_RE.search(texto[max(0, m.start() - 24):m.start()]):
+            return True
+    return False
 
 
 _PDF_CHAR_SUBS = {
@@ -526,6 +550,21 @@ def _safe(text: str) -> str:
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
+# Paleta do PDF: texto escuro sobre página branca (a página nunca é preenchida, então a
+# paleta clara do tema escuro do dashboard deixava títulos e corpo quase invisíveis).
+_PDF_TEXT = (30, 41, 59)
+_PDF_HEADING = (15, 23, 42)
+_PDF_ACCENT = (3, 105, 161)
+_PDF_RULE = (203, 213, 225)
+_PDF_TH_FILL = (30, 41, 59)
+_PDF_TH_TEXT = (255, 255, 255)
+_PDF_ROW_FILLS = ((255, 255, 255), (241, 245, 249))
+_PDF_ROW_H = 5.5
+# Espaço mínimo (mm) que um título precisa ter abaixo dele antes de quebrar a página —
+# evita título órfão no fim da página com o conteúdo na seguinte.
+_PDF_HEADING_KEEP = 30
+
+
 def _pdf_render_table(pdf, rows: list[list[str]]) -> None:
     if not rows:
         return
@@ -536,23 +575,36 @@ def _pdf_render_table(pdf, rows: list[list[str]]) -> None:
     max_cols = max(1, int(185 / 20))
     col_n = min(col_n, max_cols)
     col_w = 185 / col_n
-    for i, row in enumerate(rows):
-        if i == 0:
+
+    def draw_row(row: list[str], header: bool, parity: int) -> None:
+        if header:
             pdf.set_font("Helvetica", "B", 8)
-            pdf.set_fill_color(20, 28, 39)
-            pdf.set_text_color(226, 232, 240)
+            pdf.set_fill_color(*_PDF_TH_FILL)
+            pdf.set_text_color(*_PDF_TH_TEXT)
         else:
             pdf.set_font("Helvetica", "", 8)
-            fill = (10, 14, 20) if i % 2 == 0 else (14, 20, 30)
-            pdf.set_fill_color(*fill)
-            pdf.set_text_color(148, 163, 184)
+            pdf.set_fill_color(*_PDF_ROW_FILLS[parity % 2])
+            pdf.set_text_color(*_PDF_TEXT)
+        pdf.set_draw_color(*_PDF_RULE)
         pdf.set_x(pdf.l_margin)
         for cell in row[:col_n]:
             text = _safe(cell)
             while text and pdf.get_string_width(text) > col_w - 1:
                 text = text[:-1]
-            pdf.cell(col_w, 5.5, text, border=1, fill=True)
+            pdf.cell(col_w, _PDF_ROW_H, text, border=1, fill=True)
         pdf.ln()
+
+    # Cabeçalho + primeiras linhas ficam juntos; tabela curta cabe inteira ou vai para a
+    # próxima página (nunca só o cabeçalho no fim da página).
+    keep = _PDF_ROW_H * (len(rows) if len(rows) <= 8 else 3)
+    if pdf.will_page_break(keep):
+        pdf.add_page()
+    for i, row in enumerate(rows):
+        # Tabela longa que atravessa a página: repete o cabeçalho na página nova.
+        if i > 0 and pdf.will_page_break(_PDF_ROW_H):
+            pdf.add_page()
+            draw_row(rows[0], True, 0)
+        draw_row(row, i == 0, i)
     pdf.set_x(pdf.l_margin)
     pdf.ln(3)
 
@@ -614,33 +666,36 @@ def _pdf_render_text(pdf, text: str) -> None:
 
         flush_table()
 
+        if s.startswith(("### ", "## ", "# ")):
+            if pdf.will_page_break(_PDF_HEADING_KEEP):
+                pdf.add_page()
         if s.startswith("### "):
             pdf.set_font("Helvetica", "B", 11)
-            pdf.set_text_color(226, 232, 240)
+            pdf.set_text_color(*_PDF_HEADING)
             _pdf_safe_multicell(pdf, 6, s[4:])
             pdf.ln(1)
         elif s.startswith("## "):
             pdf.set_font("Helvetica", "B", 13)
-            pdf.set_text_color(56, 189, 248)
+            pdf.set_text_color(*_PDF_ACCENT)
             _pdf_safe_multicell(pdf, 7, s[3:])
             pdf.ln(2)
         elif s.startswith("# "):
             pdf.set_font("Helvetica", "B", 15)
-            pdf.set_text_color(56, 189, 248)
+            pdf.set_text_color(*_PDF_ACCENT)
             _pdf_safe_multicell(pdf, 8, s[2:])
             pdf.ln(3)
         elif s.startswith(("- ", "* ")):
             clean = _re.sub(r'\*\*(.*?)\*\*', r'\1', s[2:])
             clean = _re.sub(r'`(.*?)`', r'\1', clean)
             pdf.set_font("Helvetica", "", 9)
-            pdf.set_text_color(148, 163, 184)
+            pdf.set_text_color(*_PDF_TEXT)
             _pdf_safe_multicell(pdf, 5, f"  • {clean}")
         else:
             clean = _re.sub(r'\*\*(.*?)\*\*', r'\1', s)
             clean = _re.sub(r'\*(.*?)\*', r'\1', clean)
             clean = _re.sub(r'`(.*?)`', r'\1', clean)
             pdf.set_font("Helvetica", "", 9)
-            pdf.set_text_color(148, 163, 184)
+            pdf.set_text_color(*_PDF_TEXT)
             _pdf_safe_multicell(pdf, 5, clean)
 
     flush_table()
@@ -655,10 +710,10 @@ def _build_pdf(titulo: str, conteudo: str, session_id: str, user_id: str | None 
 
     # Cabeçalho
     pdf.set_font("Helvetica", "B", 18)
-    pdf.set_text_color(56, 189, 248)
+    pdf.set_text_color(*_PDF_ACCENT)
     _pdf_safe_multicell(pdf, 10, titulo)
     pdf.ln(2)
-    pdf.set_draw_color(30, 45, 61)
+    pdf.set_draw_color(*_PDF_RULE)
     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
     pdf.ln(5)
 
@@ -681,7 +736,7 @@ def _build_pdf(titulo: str, conteudo: str, session_id: str, user_id: str | None 
         # Fallback: página limpa com mensagem de erro de layout
         pdf.add_page()
         pdf.set_font("Helvetica", "", 10)
-        pdf.set_text_color(148, 163, 184)
+        pdf.set_text_color(*_PDF_TEXT)
         pdf.set_x(pdf.l_margin)
         pdf.multi_cell(0, 6, _safe("Erro ao renderizar conteudo formatado. Verifique o conteudo gerado."))
 
@@ -703,6 +758,15 @@ _DIRETIVA_IDIOMA = {
 }
 
 
+_IDIOMA_NOME = {"pt-BR": "português do Brasil", "en": "inglês (English)", "zh": "chinês (中文)"}
+
+
+def _idioma_nome(lang: str) -> str:
+    """Nome do idioma para instruir o gerador de task_code (o idioma da tarefa, não o da
+    instrução que o orquestrador repassou, que pode ter sido traduzida)."""
+    return _IDIOMA_NOME.get(lang) or _IDIOMA_NOME[db_config.idioma_default()]
+
+
 def _diretiva_idioma() -> str:
     """Linha injetada no topo de cada system prompt (orquestrador/sub-agente/scheduler)
     dizendo em que idioma responder. As instruções do prompt em si continuam só em
@@ -712,6 +776,143 @@ def _diretiva_idioma() -> str:
     lang = db_config.get_lang()
     texto = _DIRETIVA_IDIOMA.get(lang, _DIRETIVA_IDIOMA[db_config.idioma_default()])
     return f"## IDIOMA DA RESPOSTA\n{texto}\n\n"
+
+
+# ── Análise narrativa dos relatórios agendados (ctx.analisar) ─────────────────
+# O task_code roda no daemon sem LLM: ele calcula os números e chama ctx.analisar(), que cai
+# aqui. O LLM só interpreta fatos já calculados — e todo número que ele citar é conferido
+# contra os fatos, para a análise não inventar dado num relatório que ninguém está vendo.
+
+_ANALISE_MAX_CHARS = 30_000
+_ANALISE_TIMEOUT_S = 150
+
+_ANALISE_SYSTEM = (
+    "Você é um analista sênior de dados escrevendo a seção de ANÁLISE de um relatório "
+    "periódico. Você recebe FATOS já calculados por código e os interpreta para um leitor "
+    "executivo.\n\n"
+    "## Regras\n"
+    "- Use SOMENTE os fatos fornecidos. Todo número que você citar deve constar nos fatos "
+    "(pode arredondar para o inteiro mais próximo ou 2 casas — nunca truncar). NÃO calcule "
+    "números novos: nem somas, diferenças, razões ou percentuais que não estejam nos fatos "
+    "(ex: não some duas participações para falar da 'cauda' e não subtraia dois valores para "
+    "falar da 'diferença'). Para comparar, cite os dois números dos fatos lado a lado. Não "
+    "projete nem extrapole.\n"
+    "- NÃO invente causas nem motivos de negócio (contratos, encerramento de operações, "
+    "faturamento compartilhado etc.): os fatos não os sustentam. Em vez de explicar o porquê, "
+    "diga o que VERIFICAR ('vale checar o tipo de despesa de X'), sem afirmar a causa.\n"
+    "- Se os dados forem escassos (poucos grupos ou períodos), diga isso e não conclua "
+    "tendência.\n"
+    "- Cada achado deve ter um número E uma comparação (contra o total, o maior/menor, o "
+    "período anterior ou a média), quando os fatos permitirem.\n"
+    "- Procure: concentração, ranking e distância entre extremos, empates, outliers, "
+    "caudas irrelevantes, variação contra o período anterior, e lacunas ou inconsistências "
+    "nos dados.\n\n"
+    "## Formato (markdown simples, será convertido em PDF)\n"
+    "Use apenas: títulos '## ', listas '- ' e parágrafos. Sem tabelas, sem emojis, sem "
+    "blocos de código. TRADUZA os títulos das seções para o idioma da resposta. Seções "
+    "(omita as que não tiverem conteúdo):\n"
+    "## Resumo executivo (2 a 3 frases)\n"
+    "## Principais achados (4 a 7 itens)\n"
+    "## Padrões e anomalias\n"
+    "## Limitações dos dados\n"
+    "## Pontos de atenção (o que acompanhar nas próximas execuções)\n"
+)
+
+
+def _fmt_fatos(x) -> str:
+    """Converte fatos (str, dict, list, DataFrame ou dict de seções) em texto para o prompt."""
+    import json as _json
+    try:
+        import pandas as pd
+    except ImportError:  # pragma: no cover
+        pd = None
+    if pd is not None and isinstance(x, pd.DataFrame):
+        return x.head(40).to_markdown(index=False)
+    if pd is not None and isinstance(x, pd.Series):
+        return x.head(40).to_frame().to_markdown()
+    if isinstance(x, dict) and any(not isinstance(v, (int, float, str, bool, type(None))) for v in x.values()):
+        return "\n\n".join(f"### {k}\n{_fmt_fatos(v)}" for k, v in x.items())
+    if isinstance(x, (dict, list, tuple)):
+        return _json.dumps(x, ensure_ascii=False, indent=1, default=str)
+    return str(x)
+
+
+_NUM_TOKEN_RE = _re.compile(r"\d[\d.,]*\d|\d")
+
+
+def _parse_num(raw: str) -> "tuple[float, int] | None":
+    """Interpreta '1,077.83', '1.077,83', '84.07', '84,07' → (valor, casas decimais)."""
+    s = raw
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".") if s.rfind(",") > s.rfind(".") else s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", "") if _re.fullmatch(r"\d{1,3}(,\d{3})+", s) else s.replace(",", ".")
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    return v, (len(s.split(".")[1]) if "." in s else 0)
+
+
+def _numeros_fora_dos_fatos(texto: str, fatos: str) -> "list[str]":
+    """Números citados em `texto` que não constam em `fatos` (tolerando arredondamento).
+    Ignora inteiros pequenos (contagens, numeração de itens) e anos."""
+    base = [p[0] for p in (_parse_num(m.group(0)) for m in _NUM_TOKEN_RE.finditer(fatos)) if p]
+    fora: list[str] = []
+    for m in _NUM_TOKEN_RE.finditer(texto):
+        p = _parse_num(m.group(0))
+        if not p:
+            continue
+        v, dec = p
+        eh_percentual = texto[m.end():m.end() + 2].lstrip()[:1] == "%"
+        if dec == 0 and not eh_percentual and (abs(v) <= 12 or 1900 <= v <= 2100):
+            continue
+        tol = 0.5 * 10 ** (-dec) + 1e-9
+        if not any(abs(abs(v) - abs(f)) <= tol for f in base):
+            fora.append(m.group(0))
+    return list(dict.fromkeys(fora))
+
+
+def gerar_analise_relatorio(fatos, foco: str = "", lang: str = "") -> str:
+    """Análise narrativa (markdown) a partir de fatos já calculados. Lança exceção em qualquer
+    falha (sem modelo, timeout, resposta vazia, números fora dos fatos) — o chamador
+    (TaskContext.analisar) cai no texto determinístico."""
+    import concurrent.futures as _cf
+    if _llm_relatorio is None:
+        raise RuntimeError("modelo de análise de relatórios não inicializado")
+    texto_fatos = _fmt_fatos(fatos)
+    if len(texto_fatos) > _ANALISE_MAX_CHARS:
+        texto_fatos = texto_fatos[:_ANALISE_MAX_CHARS] + "\n[... fatos truncados ...]"
+    diretriz = _DIRETIVA_IDIOMA.get(lang) or _DIRETIVA_IDIOMA[db_config.idioma_default()]
+    user = (
+        (f"FOCO PEDIDO PELO USUÁRIO: {foco}\n\n" if foco else "")
+        + f"FATOS:\n{texto_fatos}"
+    )
+    msgs: list = [SystemMessage(content=f"## IDIOMA DA RESPOSTA\n{diretriz}\n\n{_ANALISE_SYSTEM}"),
+                  HumanMessage(content=user)]
+    fora: list[str] = []
+    for tentativa in (1, 2):
+        t0 = _time.perf_counter()
+        ex = _cf.ThreadPoolExecutor(max_workers=1)
+        try:
+            resp = ex.submit(_llm_relatorio.invoke, msgs).result(timeout=_ANALISE_TIMEOUT_S)
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+        texto = (_extract_text_content(resp) or "").strip()
+        logger.info("[TIMING] relatorio.analisar tentativa=%d llm=%.2fs fatos=%d chars saida=%d chars usage=%s",
+                    tentativa, _time.perf_counter() - t0, len(texto_fatos), len(texto),
+                    dict(getattr(resp, "usage_metadata", None) or {}))
+        if not texto:
+            raise RuntimeError("resposta vazia")
+        fora = _numeros_fora_dos_fatos(texto, texto_fatos)
+        if not fora:
+            return texto
+        logger.info("[relatorio.analisar] tentativa=%d números fora dos fatos: %s", tentativa, fora)
+        msgs = msgs + [AIMessage(content=texto), HumanMessage(content=(
+            "Estes números do seu texto NÃO constam nos fatos: " + ", ".join(fora) +
+            ". Reescreva a análise inteira usando somente números presentes nos fatos "
+            "(sem calcular valores novos)."))]
+    raise RuntimeError(f"a análise citou números que não constam nos fatos: {fora}")
 
 
 def _rag_path(filename: str) -> Path:
@@ -2090,7 +2291,8 @@ def consultar_analista(detalhes: str, from_date: str = "", to_date: str = "", ti
             f"O sub-agente analista encontrou um erro interno ({type(e).__name__}) e não pôde "
             "completar a análise. Informe o usuário e sugira reformular a pergunta."
         )
-    content = resultado["messages"][-1].content
+    # O Gemini pode devolver o conteúdo em partes (lista) — normaliza para texto.
+    content = _extract_text_content(resultado["messages"][-1])
     if not content or not content.strip():
         return (
             "O sub-agente analista não retornou nenhuma resposta. "
@@ -2341,6 +2543,7 @@ def _build_scheduling_graph(llm):
     import re as _re_sg
 
     _MAX_RETRIES = 3
+    _MAX_ANALISE_TENTATIVAS = 2  # vezes que pedimos ao LLM para incluir a análise faltante
     _sandbox_skill = _sandbox_skill_texto()
 
     # Frequência dita explicitamente no pedido (pt/en/zh). Sem isso, um monitor usa o padrão
@@ -2442,7 +2645,7 @@ def _build_scheduling_graph(llm):
         _raise_if_cancelled()
         response = llm.invoke([HumanMessage(content=param_prompt)])
         try:
-            raw = response.content.strip()
+            raw = _extract_text_content(response).strip()
             raw = _re_sg.sub(r'^```[^\n]*\n?', '', raw).rstrip('`').strip()
             params = _json.loads(raw)
         except Exception as e:
@@ -2494,7 +2697,7 @@ def _build_scheduling_graph(llm):
                     "campos que existam na tabela indicada e siga a regra da condição provisória."
                 ))])
                 try:
-                    raw = _re_sg.sub(r'^```[^\n]*\n?', '', retry_resp.content.strip()).rstrip('`').strip()
+                    raw = _re_sg.sub(r'^```[^\n]*\n?', '', _extract_text_content(retry_resp).strip()).rstrip('`').strip()
                     fixed = _json.loads(raw)
                 except Exception:
                     break
@@ -2590,7 +2793,7 @@ def _build_scheduling_graph(llm):
         finally:
             _sandbox_mode.set(False)
             _sandbox_task_id.set("")
-        response_text = resultado["messages"][-1].content
+        response_text = _extract_text_content(resultado["messages"][-1])
 
         if not response_text or len(response_text.strip()) < 20:
             return {"error": "Analista não retornou contexto de dados.", "analista_context": ""}
@@ -2647,8 +2850,21 @@ def _build_scheduling_graph(llm):
             f"- Escreva a função `def run(from_date, to_date, ctx)` usando a query e colunas acima.\n"
             f"{query_instrucao}"
             f"- Use EXATAMENTE os nomes de colunas informados em COLUNAS.\n"
+            f"- FILTRO DE PERÍODO OBRIGATÓRIO: from_date/to_date NÃO filtram sozinhos. A consulta "
+            f"DEVE aplicar o período pelas colunas de período do domínio (ex: intervalo "
+            f"start_month/end_month — veja 'Exemplos task_code' nas regras do sandbox e reproduza "
+            f"o MESMO `where`). NUNCA busque todas as linhas e apenas escreva o período no título: "
+            f"isso rotula dados de todos os períodos com o período errado. Quando o relatório "
+            f"agrupa por uma dimensão, prefira ctx.graphql_aggregate (domínios graphql) com o "
+            f"`where` do exemplo do domínio.\n"
+            f"- Escreva títulos, rótulos, cabeçalhos de tabela, título do gráfico e o texto de "
+            f"fallback em {_idioma_nome(db_config.get_lang())}, o idioma desta tarefa — mesmo que a "
+            f"instrução do usuário acima esteja em outro idioma.\n"
             f"- Siga o template canônico correspondente ao TIPO_SAIDA:\n"
-            f"    PDF_COM_GRAFICO → salve gráfico com ctx.save_chart(fig) e gere PDF com ctx.generate_pdf()\n"
+            f"    PDF_COM_GRAFICO → salve gráfico com ctx.save_chart(fig) e gere PDF com ctx.generate_pdf().\n"
+            f"        Se o pedido incluir análise/insights/analyses, siga a seção 'Relatório com análise' "
+            f"das regras do sandbox: calcule os fatos no código e use ctx.analisar(fatos, fallback=...) "
+            f"— não escreva a análise como frases fixas. Títulos e rótulos no idioma do pedido.\n"
             f"    GRAFICO         → retorne apenas ctx.save_chart(fig)\n"
             f"    EXCEL           → retorne ctx.generate_excel(df, 'nome')\n"
             f"    MONITOR         → NÃO use ctx.notify() (a notificação já é automática pela "
@@ -2661,10 +2877,11 @@ def _build_scheduling_graph(llm):
 
         _raise_if_cancelled()
         response = llm.invoke([HumanMessage(content=gen_prompt)])
-        code = _extract_code_block(response.content)
+        resposta_txt = _extract_text_content(response)
+        code = _extract_code_block(resposta_txt)
         condition_sql_fix = ""
         if is_graphql_monitor:
-            fix_obj = _extract_json_block(response.content, "conditionjson")
+            fix_obj = _extract_json_block(resposta_txt, "conditionjson")
             if fix_obj:
                 condition_sql_fix = _json.dumps(fix_obj)
 
@@ -2672,7 +2889,7 @@ def _build_scheduling_graph(llm):
             return {
                 "error": (
                     "LLM não gerou bloco task_code válido. "
-                    f"Resposta (primeiros 400 chars): {response.content[:400]}"
+                    f"Resposta (primeiros 400 chars): {resposta_txt[:400]}"
                 ),
                 "task_code": "",
             }
@@ -2714,9 +2931,10 @@ def _build_scheduling_graph(llm):
 
         _raise_if_cancelled()
         response = llm.invoke([HumanMessage(content=edit_prompt)])
-        new_code = _extract_code_block(response.content)
+        resposta_txt = _extract_text_content(response)
+        new_code = _extract_code_block(resposta_txt)
         if not new_code:
-            return {"error": f"LLM não retornou código válido: {response.content[:300]}", "task_code": current_code}
+            return {"error": f"LLM não retornou código válido: {resposta_txt[:300]}", "task_code": current_code}
 
         return {"task_code": new_code, "error": ""}
 
@@ -2799,7 +3017,7 @@ def _build_scheduling_graph(llm):
 
         _raise_if_cancelled()
         response = llm.invoke([HumanMessage(content=fix_prompt)])
-        new_code = _extract_code_block(response.content)
+        new_code = _extract_code_block(_extract_text_content(response))
         if not new_code:
             return {}  # keep existing task_code, will fail again on next test
 
@@ -2811,6 +3029,52 @@ def _build_scheduling_graph(llm):
         new_code = "\n".join(stripped_lines)
 
         return {"task_code": new_code}
+
+    # ── Nodes: verificar_analise / incluir_analise ───────────────────────────
+    # Se o pedido cita análise mas o código não chama ctx.analisar, o relatório sairia sem a
+    # análise pedida. Não é um erro de execução (o código roda), é uma entrega que falta —
+    # por isso tem passo próprio, que diz isso ao LLM, e não passa pelo contador de correções.
+
+    def node_verificar_analise(state: SchedulingState) -> dict:
+        faltando = (
+            not state.get("is_monitor")
+            and _pede_analise(state.get("user_request") or "")
+            and "ctx.analisar" not in (state.get("task_code") or "")
+        )
+        return {"analise_ausente": bool(faltando)}
+
+    def node_incluir_analise(state: SchedulingState) -> dict:
+        _push({"type": "tool", "name": "test_task_code", "label": _lbl("🧠 Incluindo a análise no relatório")})
+        include_prompt = (
+            "ANÁLISE AUSENTE NO CÓDIGO — isto NÃO é um erro de execução: é uma entrega que falta.\n\n"
+            f"O usuário pediu análise/insights no relatório:\n{state['user_request']}\n\n"
+            "O código abaixo roda, mas NÃO chama ctx.analisar(), então o relatório sairia SEM a "
+            "análise pedida. A análise precisa ser incluída.\n\n"
+            f"CÓDIGO ATUAL:\n```python\n{state['task_code']}\n```\n\n"
+            f"REGRAS DO SANDBOX (veja a seção 'Relatório com análise'):\n{_sandbox_skill}\n\n"
+            "INSTRUÇÕES:\n"
+            "- Mantenha TODO o resto do código inalterado (consulta, filtro de período, tabela, gráfico).\n"
+            "- Calcule no código os fatos numéricos (totais, participação, ranking, razão maior/segundo, "
+            "concentração etc.) e passe-os a ctx.analisar(fatos, foco=..., fallback=...) — o LLM só "
+            "interpreta, não calcula.\n"
+            "- Passe sempre um fallback determinístico (bullets calculados no código).\n"
+            "- Insira o texto retornado por ctx.analisar no conteúdo do relatório (o `conteudo` de "
+            "ctx.generate_pdf).\n"
+            f"- Escreva títulos, rótulos e o fallback em {_idioma_nome(db_config.get_lang())}.\n"
+            "- NÃO inclua NENHUM import — pd, np, plt, date, datetime, timedelta etc já estão disponíveis.\n"
+            "- Retorne APENAS o código Python completo (com def run), em bloco ```python\\n...\\n```"
+        )
+        _raise_if_cancelled()
+        response = llm.invoke([HumanMessage(content=include_prompt)])
+        new_code = _extract_code_block(_extract_text_content(response))
+        tentativas = state.get("analise_tentativas", 0) + 1
+        if not new_code:
+            return {"analise_tentativas": tentativas}  # mantém o código atual
+        new_code = "\n".join(
+            ln for ln in new_code.splitlines()
+            if not _re_sg.match(r'\s*(import |from \S+ import )', ln)
+        )
+        return {"task_code": new_code, "analise_tentativas": tentativas}
 
     # ── Node: salvar_codigo ──────────────────────────────────────────────────
 
@@ -2889,6 +3153,14 @@ def _build_scheduling_graph(llm):
                 f"Para novos ajustes: **editar tarefa {tid}**"
             )
 
+        # Análise pedida mas que não entrou no código mesmo após as tentativas: avisa, em vez
+        # de anunciar um relatório completo que sairá sem ela.
+        if state.get("analise_ausente") and not err and not (state.get("result") or "").startswith("❌"):
+            msg += (
+                f"\n\n⚠️ **Análise não incluída:** o pedido citava análise, mas o código da tarefa "
+                f"não gera a análise automática. Peça: **editar tarefa {tid}** e solicite a análise."
+            )
+
         return {"result": msg}
 
     # ── Routing ──────────────────────────────────────────────────────────────
@@ -2903,10 +3175,15 @@ def _build_scheduling_graph(llm):
 
     def route_after_test(state: SchedulingState) -> str:
         if not state.get("error"):
-            return "salvar_codigo"
+            return "verificar_analise"
         if state.get("retries", 0) < _MAX_RETRIES:
             return "corrigir_codigo"
         return "responder"
+
+    def route_after_verificar(state: SchedulingState) -> str:
+        if state.get("analise_ausente") and state.get("analise_tentativas", 0) < _MAX_ANALISE_TENTATIVAS:
+            return "incluir_analise"
+        return "salvar_codigo"
 
     # ── Build ────────────────────────────────────────────────────────────────
 
@@ -2922,6 +3199,8 @@ def _build_scheduling_graph(llm):
     builder.add_node("editar_codigo",   node_editar_codigo)
     builder.add_node("testar_codigo",   node_testar_codigo)
     builder.add_node("corrigir_codigo", node_corrigir_codigo)
+    builder.add_node("verificar_analise", node_verificar_analise)
+    builder.add_node("incluir_analise", node_incluir_analise)
     builder.add_node("salvar_codigo",   node_salvar_codigo)
     builder.add_node("responder",       node_responder)
 
@@ -2940,10 +3219,15 @@ def _build_scheduling_graph(llm):
     builder.add_edge("gerar_codigo",  "testar_codigo")
     builder.add_edge("editar_codigo", "testar_codigo")
     builder.add_conditional_edges("testar_codigo", route_after_test, {
-        "salvar_codigo":  "salvar_codigo",
+        "verificar_analise": "verificar_analise",
         "corrigir_codigo": "corrigir_codigo",
         "responder":      "responder",
     })
+    builder.add_conditional_edges("verificar_analise", route_after_verificar, {
+        "incluir_analise": "incluir_analise",
+        "salvar_codigo":   "salvar_codigo",
+    })
+    builder.add_edge("incluir_analise", "testar_codigo")
     builder.add_edge("corrigir_codigo", "testar_codigo")
     builder.add_edge("salvar_codigo",   "responder")
     builder.add_edge("responder",       END)
@@ -2974,7 +3258,7 @@ def gerenciar_agenda(instrucao: str) -> str:
         {"messages": [HumanMessage(content=instrucao)]},
         config={"configurable": {"thread_id": _current_session.get()}, "recursion_limit": 15},
     )
-    return resultado["messages"][-1].content
+    return _extract_text_content(resultado["messages"][-1])
 
 
 @tool
@@ -3295,8 +3579,11 @@ def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
         "   (ex: \"últimos 30 dias\" → range_unit='days', range_value=30; \"últimos 3 meses\"\n"
         "   → range_unit='months', range_value=3). Se o usuário não especificar período,\n"
         "   use o padrão range_unit='days', range_value=7.\n\n"
-        "6. Responda: 'Painel **[título]** adicionado ao dashboard. "
-        "Ele aparece em primeiro na seção de painéis, e a tela atualiza sozinha.'\n\n"
+        "6. Confirme ao usuário, NO IDIOMA DA RESPOSTA (o definido em '## IDIOMA DA RESPOSTA', "
+        "não o desta instrução), que o painel **[título]** foi adicionado ao dashboard, que ele "
+        "aparece em primeiro na seção de painéis e que a tela atualiza sozinha. "
+        "Exemplo em português: 'Painel **[título]** adicionado ao dashboard. Ele aparece em "
+        "primeiro na seção de painéis, e a tela atualiza sozinha.' — traduza, não copie o exemplo.\n\n"
         "## Painéis customizados — listar, editar e remover\n"
         "- Para LISTAR painéis: chame list_dashboard_widgets().\n"
         "- Para LER o código de um painel: chame get_widget_code(widget_id=ID).\n"
@@ -3431,7 +3718,7 @@ def _chat_vertex_with_thinking_level():
 
 def init_multi_agent(project: str, location: str, model_name: str, credentials=None) -> None:
     """Inicializa orquestrador e sub-agente. Chamado no startup do FastAPI."""
-    global _orchestrator_graph, _sub_agent_graph, _scheduler_agent_graph, _scheduling_graph, _checkpointer
+    global _orchestrator_graph, _sub_agent_graph, _scheduler_agent_graph, _scheduling_graph, _checkpointer, _llm_relatorio
     try:
         from langgraph.checkpoint.sqlite import SqliteSaver
 
@@ -3484,6 +3771,16 @@ def init_multi_agent(project: str, location: str, model_name: str, credentials=N
             temperature=0.4,
             **kw_rot,
         ) if kw_rot else None
+        # Análise narrativa dos relatórios agendados (ctx.analisar): roda no daemon, sem ninguém
+        # esperando, então usa mais raciocínio que o chat (padrão medium).
+        _llm_relatorio = ChatVertexAI(
+            model_name=model_name,
+            project=project,
+            location=location,
+            credentials=credentials,
+            temperature=0.4,
+            **(_thinking_kwargs("THINKING_LEVEL_RELATORIO") or {"thinking_level": "medium"}),
+        )
 
         # Conexão persistente para o checkpointer (check_same_thread=False pois
         # o FastAPI despacha requests em threads diferentes)
@@ -3534,7 +3831,7 @@ def invoke_multi_agent(query: str, session_id: str = "default", user_id: str = "
         {"messages": [_build_human_message(query, session_id)]},
         config={"configurable": {"thread_id": session_id}, "recursion_limit": 50},
     )
-    return resultado["messages"][-1].content
+    return _extract_text_content(resultado["messages"][-1])
 
 
 

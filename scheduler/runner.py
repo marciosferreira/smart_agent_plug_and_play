@@ -125,14 +125,17 @@ class TaskCodeError(Exception):
     """Erro de validação ou execução do task_code."""
 
 
-def run_task_code(code: str, from_date: str, to_date: str, session_id: str, user_id: str | None = None, is_test: bool = False, notify_enabled: bool = True, task_name: str = ""):
+def run_task_code(code: str, from_date: str, to_date: str, session_id: str, user_id: str | None = None, is_test: bool = False, notify_enabled: bool = True, task_name: str = "", lang: str = ""):
     """Compila e executa task_code.
 
     Retorna list[str] de tokens em modo normal.
     Retorna (list[str], TaskContext) em modo teste para inspeção de alertas capturados.
     Lança TaskCodeError com mensagem amigável em caso de falha.
+
+    `lang` é o idioma da tarefa (gravado na criação); usado por ctx.analisar() para escrever
+    a análise no idioma certo, já que o daemon roda sem requisição ativa.
     """
-    ctx = TaskContext(session_id, user_id=user_id, is_test=is_test, notify_enabled=notify_enabled, task_name=task_name)
+    ctx = TaskContext(session_id, user_id=user_id, is_test=is_test, notify_enabled=notify_enabled, task_name=task_name, lang=lang)
     g   = _build_globals(ctx, from_date, to_date)
 
     # 1a. Rejeita imports antes de compilar, exceto módulos já pré-injetados no namespace.

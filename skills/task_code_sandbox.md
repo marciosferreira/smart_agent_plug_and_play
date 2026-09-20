@@ -62,6 +62,18 @@ rows_agg = ctx.graphql_aggregate(
 
 > `ctx.api()` existe no namespace mas serve apenas para o endpoint `/alerts` (sino de notificações) — não use em tasks de dados.
 
+### Colunas do resultado (modo graphql) — não confunda os dois formatos
+
+- `ctx.graphql_aggregate(group_by="site_id", metric_field=..., expand=["name", "company"])` →
+  colunas **`groupKey`** (valor de `site_id`, também disponível como `site_id`), **`name`**,
+  **`company`** (as do `expand`, com o nome puro) e **`metricValue`** (vem como TEXTO — use
+  `pd.to_numeric(df['metricValue'], errors='coerce')`). Exemplo: `df['name']`, `df['metricValue']`.
+- `ctx.graphql_table(..., expand=[{"viaColumn": "site_id", "columns": ["name"]}])` → colunas
+  da tabela (incluindo `site_id`, um uuid) e as expandidas como **`site_id__name`** (prefixo
+  `<viaColumn>__`). NÃO existe `df['name']` nesse formato.
+- Antes de acessar uma coluna que você não tem certeza que existe, confira `df.columns` ou use
+  `df.get('coluna')`; nunca assuma o nome — o `KeyError` derruba o relatório inteiro.
+
 ### Vários DataFrames (merge / concat)
 
 Dentro do `run()`, crie um DataFrame por consulta (`df_a`, `df_b`, ...) e una com
@@ -108,6 +120,81 @@ números, dicts) NÃO persistem entre chamadas.
 | `ctx.generate_excel({'Aba1': df1, 'Aba2': df2}, 'nome_arquivo')` | token `[excel:uuid]` — múltiplas abas |
 | `ctx.generate_pdf('Título', 'conteudo')` | token `[pdf:uuid]` |
 | `ctx.notify(msg, value=None, threshold=None)` | dispara notificação no dashboard |
+| `ctx.analisar(fatos, foco='', fallback='')` | texto markdown de **análise escrita pelo LLM** a partir de fatos que o código já calculou (ver seção "Relatório com análise"). Se o LLM falhar, devolve `fallback` |
+
+---
+
+## Relatório com análise (use quando o pedido citar análise, insights, padrões, "analyses")
+
+O daemon executa o `task_code` **sem LLM** — mas `ctx.analisar()` chama o LLM na hora de rodar.
+Divisão de trabalho: **o código calcula todos os números; o LLM só interpreta**. O LLM não
+calcula nada e todo número que ele citar é conferido contra os `fatos` — por isso os fatos
+precisam trazer as métricas **já calculadas** (percentuais, razões, diferenças, variações).
+
+Passos: (1) buscar dados, (2) calcular fatos, (3) gráfico, (4) `ctx.analisar(..., fallback=...)`,
+(5) montar o markdown e chamar `ctx.generate_pdf`. Escreva títulos e rótulos no **idioma do
+pedido do usuário**; o texto de `ctx.analisar` já sai no idioma da tarefa.
+
+```python
+def run(from_date, to_date, ctx):
+    # 1) dados — use a query/colunas reais do contexto do analista
+    df = pd.DataFrame(ctx.graphql_aggregate(...))          # ou ctx.sql(...) em domínios sql
+    df = df.sort_values('valor', ascending=False).reset_index(drop=True)
+    total = df['valor'].sum()
+    df['participacao_pct'] = (df['valor'] / total * 100).round(2)
+
+    # 2) fatos JÁ CALCULADOS (nada de deixar o LLM calcular)
+    fatos = {
+        'Período': f'{from_date} a {to_date}',
+        'Consolidação': df,
+        'Métricas': {
+            'total': round(total, 2), 'n_grupos': len(df),
+            'maior_grupo': df.loc[0, 'grupo'], 'maior_grupo_pct': df.loc[0, 'participacao_pct'],
+            'razao_maior_sobre_segundo': round(df.loc[0, 'valor'] / df.loc[1, 'valor'], 2) if len(df) > 1 else None,
+            'soma_top3_pct': round(df['participacao_pct'].head(3).sum(), 2),
+            'indice_concentracao_hhi': round(((df['valor'] / total) ** 2).sum(), 2),
+        },
+    }
+
+    # 3) gráfico (regras de pizza abaixo)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ...
+    token_grafico = ctx.save_chart(fig)
+
+    # 4) análise — SEMPRE com fallback determinístico, para o relatório sair mesmo se o LLM falhar
+    fallback = f"## Análise\n- Total: {total:,.2f}. Maior grupo: {df.loc[0, 'grupo']} ({df.loc[0, 'participacao_pct']}%)."
+    analise = ctx.analisar(fatos, foco='<o que o usuário pediu para enfatizar>', fallback=fallback)
+
+    # 5) conteúdo do PDF (tabela em markdown, token do gráfico em linha própria)
+    tabela = df.to_markdown(index=False)
+    conteudo = f"## Consolidação\n{tabela}\n\n{token_grafico}\n\n{analise}"
+    return ctx.generate_pdf('Título do relatório', conteudo)
+```
+
+Regras de `ctx.analisar`:
+- Máximo 3 chamadas por execução; passe **todos** os fatos numa só chamada.
+- Não é para monitores nem para tarefas que só geram gráfico/Excel sem pedido de análise.
+- `foco` é opcional e curto (ex: 'concentração de custo entre sites').
+
+### Checklist de métricas a calcular antes de chamar `ctx.analisar` (as que fizerem sentido nos dados)
+
+- **Concentração**: participação de cada grupo (%), do maior grupo, soma dos 3 maiores, índice HHI.
+- **Ranking e distância**: razão maior/segundo, diferença entre extremos (valor e %), empates ou quase empates.
+- **Cauda**: soma dos menores grupos (%) — se irrelevante, dizer.
+- **Dispersão**: média, mediana, desvio padrão / coeficiente de variação, outliers (fora de 1,5×IQR).
+- **Comparação temporal** (se houver série): variação contra o período anterior (valor e %), mês a mês, tendência (sinal da variação).
+- **Qualidade do dado**: nº de registros por grupo, meses/grupos sem dado, filtros aplicados (ex: só APPROVED).
+
+Com poucos pontos (2 a 3 períodos, 2 a 5 grupos) o LLM deve declarar a limitação em vez de concluir tendência.
+
+### Gráfico de pizza (só quando o usuário pedir pizza)
+
+Pizza com fatias muito pequenas fica ilegível (rótulos sobrepostos). Sempre:
+- agrupe fatias abaixo de 3% em uma única fatia "Outros" (e mostre o detalhe na tabela);
+- não desenhe rótulos em cima das fatias: use `ax.legend(...)` com o valor e o percentual de cada fatia
+  (ex: `f"{grupo} — ${valor:,.0f} ({pct:.1f}%)"`), e `autopct` só para fatias ≥ 5%;
+- se uma fatia passar de ~80%, mantenha a pizza (foi pedida) mas destaque o valor na legenda e cite a
+  concentração na análise.
 
 ---
 
