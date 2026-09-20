@@ -30,7 +30,7 @@ function escHtml(s: string): string {
 }
 
 function nowLabel(lang: string): string {
-  return new Date().toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' });
+  return new Date().toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 let _msgSeq = 0;

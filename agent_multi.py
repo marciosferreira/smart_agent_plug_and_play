@@ -798,7 +798,8 @@ def gerar_pdf(titulo: str, conteudo: str) -> str:
     Deve ser chamado APÓS consultar_analista ter retornado a análise completa.
 
     Fluxo correto:
-      1. Chame consultar_analista() para obter a análise com gráficos.
+      1. Chame consultar_analista(tipo='grafico') para obter a análise com gráficos
+         (um PDF leva gráficos por padrão, mesmo sem o usuário pedi-los à parte).
       2. Chame gerar_pdf() passando o resultado completo como conteudo.
       3. Responda ao usuário incluindo o token [pdf:uuid] retornado — ele será
          automaticamente convertido em link de download.
@@ -1771,8 +1772,9 @@ def _build_sub_agent(llm):
         "multiplica linhas e infla somas/contagens. Selecione as colunas necessárias ou passe "
         "`suffixes` explícitos para evitar `_x`/`_y`. `concat` só entre DataFrames com o mesmo "
         "significado de colunas.\n\n"
-        "- Formate SEMPRE a resposta final em markdown: tabelas para dados tabulares, "
-        "**negrito** para valores relevantes.\n"
+        "- Formate SEMPRE a resposta final em markdown, com **negrito** para valores relevantes. "
+        "Tabela e gráfico seguem EXCLUSIVAMENTE o TIPO DE SAÍDA abaixo — não inclua tabela "
+        "quando o tipo for GRAFICO, nem gráfico quando for TABELA.\n"
         "- LEGENDA DOS GRÁFICOS: NUNCA use `bbox_to_anchor` para posicionar a legenda fora "
         "dos eixos — isso gera figuras extremamente largas com a legenda separada do gráfico. "
         "Use sempre `ax.legend(loc='best')` ou outra posição interna (upper right, lower left, etc). "
@@ -1786,10 +1788,12 @@ def _build_sub_agent(llm):
         "  não trouxe nenhuma linha real para o filtro pedido, essa regra de formato deixa de valer: "
         "  responda em texto explicando a ausência de dado, não force um gráfico ou tabela fictícia.\n"
         "  - GRAFICO → `result = fig` (figura matplotlib). NUNCA retorne tabela quando tipo=GRAFICO.\n"
-        "  - TABELA  → `result = df`. Mencione na resposta final o nome da variável DataFrame\n"
+        "  - TABELA  → `result = df`. NUNCA gere gráfico quando tipo=TABELA. Mencione na resposta\n"
+        "    final o nome da variável DataFrame\n"
         "    ex: 'DataFrame `producao` disponível no namespace com 30 linhas.'\n"
+        "    Se a resposta for um ÚNICO valor (ou uma só linha), responda em texto, sem tabela.\n"
         "  - AMBOS   → gráfico em uma chamada de analisar_dataframe, tabela em outra.\n"
-        "  Se não houver prefixo, padrão é GRAFICO.\n"
+        "  Se não houver prefixo, padrão é TABELA.\n"
         "- PRINT ANTES DO GRÁFICO: no script que gera um gráfico, sempre faça print() dos "
         "valores agregados principais ANTES de atribuir `result = fig`. Exemplo:\n"
         "    print(df_grouped.to_string())  # ou print(f'Total: {total}')\n"
@@ -1876,9 +1880,10 @@ def _build_sub_agent(llm):
         "- NÃO use df.to_markdown() no conteúdo do PDF — use apenas bullet points e tokens [chart:uuid]\n\n"
         f"## Skills disponíveis\n{catalogo}\n\n"
         "## RACIOCÍNIO OBRIGATÓRIO\n"
-        "SEMPRE que for chamar uma tool, inclua na mesma resposta um texto curto explicando "
-        "o que vai fazer e por quê, ANTES do bloco de função. "
-        "NUNCA emita uma tool call sem texto explicativo."
+        "SEMPRE que for chamar uma tool, inclua na mesma resposta UMA frase curta (até 20 "
+        "palavras) dizendo o que vai fazer, ANTES do bloco de função. Nessa frase não repita "
+        "regras de negócio, não justifique e não planeje várias etapas. "
+        "NUNCA emita uma tool call sem essa frase."
     )
 
     sub_tools = [read_skill, tool_dados, *tools_extras, analisar_dataframe, gerar_pdf, gerar_excel]
@@ -1979,7 +1984,7 @@ def _build_sub_agent(llm):
 # ── Tool do orquestrador que dispara o sub-agente ────────────────────────────
 
 @tool
-def consultar_analista(detalhes: str, from_date: str = "", to_date: str = "", tipo: str = "grafico", para_agendamento: bool = False, periodo: str = "") -> str:
+def consultar_analista(detalhes: str, from_date: str = "", to_date: str = "", tipo: str = "tabela", para_agendamento: bool = False, periodo: str = "") -> str:
     """Delega a análise ao sub-agente analista de dados.
 
     O sub-agente irá ler a skill de domínio (dominio.md), consultar o banco
@@ -1998,17 +2003,21 @@ def consultar_analista(detalhes: str, from_date: str = "", to_date: str = "", ti
         periodo: Período em linguagem natural — mesmos valores aceitos por calcular_periodo().
               Obrigatório quando from_date/to_date não forem informados.
         tipo: Tipo de saída desejado. Use EXATAMENTE um dos valores abaixo:
+              - "tabela"   → PADRÃO. O sub-agente retorna os dados (tabela quando houver
+                             comparação, ranking ou lista; só texto se a resposta for um único
+                             valor). Use em toda pergunta de dados que NÃO peça gráfico —
+                             inclusive "mostre", "show me", "compare", "qual é o maior/menor",
+                             "ranking", "liste". Também use como pré-passo quando gerar_excel
+                             for chamado na sequência.
               - "grafico"  → o sub-agente DEVE gerar um gráfico matplotlib (result = fig).
-                             Use quando o usuário usou palavras como "gráfico", "chart",
-                             "plot", "visualize", "visualização", "mostre", "desenhe".
-              - "tabela"   → o sub-agente retorna os dados como tabela exibida na tela.
-                             Use quando o usuário pediu "tabela", "lista", "dados", "números"
-                             ou qualquer exibição tabular na resposta.
-                             Também use como pré-passo quando gerar_excel for chamado na sequência.
+                             Use SOMENTE quando o usuário pediu explicitamente um gráfico:
+                             "gráfico", "chart", "plot", "graph", "visualização/visualize",
+                             "desenhe", "图表", "图", "可视化". Verbos genéricos como "mostre",
+                             "exiba", "show me" ou "display" NÃO são pedido de gráfico.
               - "ambos"    → gráfico E tabela juntos. Use apenas quando o usuário pediu
-                             explicitamente visualização gráfica E dados numéricos ao mesmo tempo.
+                             explicitamente o gráfico E também a tabela/os números.
                              NÃO use "ambos" para pedidos de PDF ou Excel.
-              Padrão: "grafico". Em caso de dúvida, prefira "grafico".
+              Padrão: "tabela". Em caso de dúvida, use "tabela" — nunca assuma gráfico.
         para_agendamento: Se True, o sub-agente inclui na resposta um bloco técnico
               ```task_context``` com endpoint real, colunas reais e código pandas executado.
               Use SEMPRE que a análise for para criar ou editar um task_code agendado.
@@ -3084,7 +3093,11 @@ def editar_tarefa_agendada(task_id: str, modificacao: str, config: RunnableConfi
 MAX_INTERACOES = int(os.getenv("MAX_INTERACOES", "10"))
 
 
-def _build_orchestrator(llm, checkpointer=None):
+def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
+    """`llm_roteamento` (opcional) atende as chamadas logo após uma mensagem do usuário —
+    decidir a tool ou responder direto —, que raciocinam pouco; `llm` atende as chamadas
+    após resultado de tool, onde o orquestrador interpreta dados e redige a resposta.
+    Sem `llm_roteamento`, `llm` atende todas."""
     ident = db_config.identidade()
     regras_orq = db_config.get_secao("Regras do orquestrador")
     bloco_regras_orq = (
@@ -3112,6 +3125,9 @@ def _build_orchestrator(llm, checkpointer=None):
         "uma referência a 'calcular_periodo(X)' nas regras do domínio significa passar "
         "periodo=X. NÃO envolva gerenciar_agenda.\n"
         "     REGRA: qualquer pergunta sobre volumes, contagens ou dados do sistema é categoria A.\n"
+        "     FORMATO: use tipo='tabela' (padrão). Só passe tipo='grafico' (ou 'ambos') se o "
+        "usuário pediu EXPLICITAMENTE um gráfico/chart/plot/visualização — 'mostre', 'show me', "
+        "'compare' e 'ranking' NÃO são pedido de gráfico.\n"
         "     ⚠️ Se consultar_analista voltar com uma mensagem de erro interno/limite excedido, NÃO "
         "     chame consultar_analista de novo para a mesma pergunta mais de UMA vez — se a segunda "
         "     tentativa também falhar ou vier vaga, repasse a limitação ao usuário (ex: 'não consegui "
@@ -3295,11 +3311,13 @@ def _build_orchestrator(llm, checkpointer=None):
         "  NÃO delete e recrie — use update_widget para editar in-place.\n"
         "- Para REMOVER um painel: chame delete_dashboard_widget(widget_id=ID).\n\n"
         "## RACIOCÍNIO OBRIGATÓRIO\n"
-        "SEMPRE que for chamar uma tool, você DEVE incluir na mesma resposta um texto curto "
-        "em linguagem natural explicando o que vai fazer e por quê, ANTES do bloco de função. "
+        "SEMPRE que for chamar uma tool, você DEVE incluir na mesma resposta UMA frase curta "
+        "(até 20 palavras) em linguagem natural dizendo o que vai fazer, ANTES do bloco de "
+        "função. Nessa frase não repita regras de negócio, não justifique e não planeje "
+        "várias etapas. "
         "Exemplo: 'Vou calcular o período solicitado para obter as datas exatas.' "
-        "O texto e a chamada de tool devem vir juntos na mesma resposta. "
-        "NUNCA emita uma tool call sem texto explicativo."
+        "A frase e a chamada de tool devem vir juntas na mesma resposta. "
+        "NUNCA emita uma tool call sem essa frase."
     )
 
     orq_tools = [
@@ -3315,6 +3333,7 @@ def _build_orchestrator(llm, checkpointer=None):
         get_widget_code, update_widget,
     ]
     llm_orq = llm.bind_tools(orq_tools)
+    llm_orq_rot = llm_roteamento.bind_tools(orq_tools) if llm_roteamento is not None else llm_orq
     no_orq_tools = ToolNode(orq_tools)
 
     def no_orquestrador(state: State) -> dict:
@@ -3322,11 +3341,14 @@ def _build_orchestrator(llm, checkpointer=None):
         msgs = [SystemMessage(content=_diretiva_idioma() + ORQ_SYSTEM_PROMPT)] + historico_recente
         if _cancelled():
             return _cancelled_reply()
+        # Última mensagem do usuário => 1ª chamada do turno (rotear ou responder direto).
+        # Última mensagem de tool => interpretar o resultado e redigir a resposta.
+        roteando = isinstance(state["messages"][-1], HumanMessage)
         _t_llm = _time.perf_counter()
-        response = llm_orq.invoke(msgs)
+        response = (llm_orq_rot if roteando else llm_orq).invoke(msgs)
         _usage = getattr(response, "usage_metadata", None) or {}
-        logger.info("[TIMING] orquestrador llm=%.2fs msgs=%d contexto=%d chars usage=%s tool_calls=%s",
-                    _time.perf_counter() - _t_llm, len(msgs),
+        logger.info("[TIMING] orquestrador(%s) llm=%.2fs msgs=%d contexto=%d chars usage=%s tool_calls=%s",
+                    "roteamento" if roteando else "resposta", _time.perf_counter() - _t_llm, len(msgs),
                     sum(len(str(getattr(m, "content", ""))) for m in msgs), dict(_usage),
                     [tc.get("name") for tc in (getattr(response, "tool_calls", None) or [])])
         # Descarta a resposta (que poderia trazer tool_calls) se o usuário parou durante a chamada.
@@ -3451,6 +3473,17 @@ def init_multi_agent(project: str, location: str, model_name: str, credentials=N
             temperature=0.4,
             **_thinking_kwargs("THINKING_LEVEL_ORQUESTRADOR"),
         )
+        # Opcional: nível menor só para a chamada que decide a tool após a mensagem do usuário.
+        # Sem a variável, o orquestrador usa THINKING_LEVEL_ORQUESTRADOR em todas as chamadas.
+        kw_rot = _thinking_kwargs("THINKING_LEVEL_ORQUESTRADOR_ROTEAMENTO")
+        llm_orq_roteamento = ChatVertexAI(
+            model_name=model_name,
+            project=project,
+            location=location,
+            credentials=credentials,
+            temperature=0.4,
+            **kw_rot,
+        ) if kw_rot else None
 
         # Conexão persistente para o checkpointer (check_same_thread=False pois
         # o FastAPI despacha requests em threads diferentes)
@@ -3461,7 +3494,7 @@ def init_multi_agent(project: str, location: str, model_name: str, credentials=N
         _sub_agent_graph = _build_sub_agent(llm_analitico)
         _scheduler_agent_graph = _build_scheduler_agent(llm_analitico)
         _scheduling_graph = _build_scheduling_graph(llm_analitico)
-        _orchestrator_graph = _build_orchestrator(llm_orquestrador, _checkpointer)
+        _orchestrator_graph = _build_orchestrator(llm_orquestrador, _checkpointer, llm_orq_roteamento)
         logger.info("Multi-agente inicializado: orquestrador + analista + scheduler + scheduling_graph")
     except Exception:
         import traceback

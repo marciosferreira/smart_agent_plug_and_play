@@ -74,7 +74,6 @@ const ARTIFACT_LABEL_KEYS: Record<string, string> = { pdf: 'artifacts.typePdf', 
               </div>
             </div>
           </div>
-          <div class="msg-time">{{ asThinking.time }}</div>
         </div>
       }
     }
