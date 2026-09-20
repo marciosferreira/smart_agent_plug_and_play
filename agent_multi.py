@@ -3350,13 +3350,67 @@ def _build_orchestrator(llm, checkpointer=None):
     return builder.compile(checkpointer=checkpointer)
 
 
+_THINKING_LEVELS = ("low", "medium", "high")
+
+
+def _chat_vertex_with_thinking_level():
+    """ChatVertexAI com suporte a `thinking_level` (low | medium | high).
+
+    A versão instalada do langchain-google-vertexai só conhece `thinking_budget`, que o
+    Gemini 3 não usa mais. O endpoint padrão do wrapper (v1beta1) também não tem o campo
+    no SDK atual, então forçamos o v1, que já tem `ThinkingConfig.thinking_level`.
+
+    Só que, ao converter o histórico para o v1, o wrapper descarta a `thought_signature`
+    das chamadas de função, e o Gemini 3 responde 400 ("Function call is missing a
+    thought_signature") na chamada seguinte a qualquer tool call. O wrapper guarda as
+    assinaturas em `additional_kwargs`, então as reinserimos no request depois de montado.
+    """
+    import base64
+    from typing import Optional
+    from langchain_core.messages import AIMessage
+    from langchain_google_vertexai import ChatVertexAI
+
+    sigs_key = "__gemini_function_call_thought_signatures__"
+
+    class ChatVertexAIThinkingLevel(ChatVertexAI):
+        thinking_level: Optional[str] = None
+        endpoint_version: str = "v1"
+
+        def _prepare_params(self, stop=None, stream=False, **kwargs) -> dict:
+            params = super()._prepare_params(stop=stop, stream=stream, **kwargs)
+            if self.thinking_level:
+                params.setdefault("thinking_config", {})["thinking_level"] = self.thinking_level.upper()
+            return params
+
+        def _prepare_request_gemini(self, messages, *args, **kwargs):
+            request = super()._prepare_request_gemini(messages, *args, **kwargs)
+            if self.endpoint_version != "v1":
+                return request
+            # As function_call do request seguem a ordem dos tool_calls nas AIMessages.
+            signatures = [
+                (m.additional_kwargs.get(sigs_key) or {}).get(tc.get("id"))
+                for m in messages if isinstance(m, AIMessage)
+                for tc in m.tool_calls
+            ]
+            pendentes = iter(signatures)
+            for content in request.contents:
+                for part in content.parts:
+                    if "function_call" not in part:
+                        continue
+                    sig = next(pendentes, None)
+                    if sig:
+                        part.thought_signature = base64.b64decode(sig) if isinstance(sig, str) else sig
+            return request
+
+    return ChatVertexAIThinkingLevel
+
+
 # ── API pública ───────────────────────────────────────────────────────────────
 
 def init_multi_agent(project: str, location: str, model_name: str, credentials=None) -> None:
     """Inicializa orquestrador e sub-agente. Chamado no startup do FastAPI."""
     global _orchestrator_graph, _sub_agent_graph, _scheduler_agent_graph, _scheduling_graph, _checkpointer
     try:
-        from langchain_google_vertexai import ChatVertexAI
         from langgraph.checkpoint.sqlite import SqliteSaver
 
         # Temperatura separada por papel — analista/scheduler fazem trabalho mecânico
@@ -3366,26 +3420,28 @@ def init_multi_agent(project: str, location: str, model_name: str, credentials=N
         # achava resultado, chamadas GraphQL com JSON malformado, e variação de 13 a 68
         # passos pra responder a MESMA pergunta. O orquestrador lida com tom de conversa,
         # então mantém uma temperatura um pouco maior.
-        # Orçamento de raciocínio (thinking) por papel, opcional via env. Os logs [TIMING]
-        # mostram que ~metade do tempo de cada chamada é raciocínio (output_token_details.
-        # reasoning), até em decisões triviais como escolher a próxima tool. Sem a variável,
-        # nada muda (o modelo decide sozinho). 0 desliga o raciocínio; -1 = dinâmico; N = teto
-        # em tokens. Testar valores baixos (ex: 128-512) e conferir a qualidade das respostas.
+        # Nível de raciocínio (thinking) por papel, opcional via env: low | medium | high.
+        # Os logs [TIMING] mostram que ~metade do tempo de cada chamada é raciocínio
+        # (output_token_details.reasoning), até em decisões triviais como escolher a próxima
+        # tool. Sem a variável, o modelo usa o padrão (medium no gemini-3.8-flash).
+        # O 3.8 Flash não aceita "minimal" nem thinking_budget: só esses três níveis.
         def _thinking_kwargs(env_var: str) -> dict:
-            raw = os.getenv(env_var, "").strip()
-            try:
-                return {"thinking_budget": int(raw)} if raw else {}
-            except ValueError:
-                logger.warning("%s inválido (%r) — ignorado", env_var, raw)
+            raw = os.getenv(env_var, "").strip().lower()
+            if not raw:
                 return {}
+            if raw not in _THINKING_LEVELS:
+                logger.warning("%s inválido (%r) — use low, medium ou high; ignorado", env_var, raw)
+                return {}
+            return {"thinking_level": raw}
 
+        ChatVertexAI = _chat_vertex_with_thinking_level()
         llm_analitico = ChatVertexAI(
             model_name=model_name,
             project=project,
             location=location,
             credentials=credentials,
             temperature=0.15,
-            **_thinking_kwargs("THINKING_BUDGET_ANALISTA"),
+            **_thinking_kwargs("THINKING_LEVEL_ANALISTA"),
         )
         llm_orquestrador = ChatVertexAI(
             model_name=model_name,
@@ -3393,7 +3449,7 @@ def init_multi_agent(project: str, location: str, model_name: str, credentials=N
             location=location,
             credentials=credentials,
             temperature=0.4,
-            **_thinking_kwargs("THINKING_BUDGET_ORQUESTRADOR"),
+            **_thinking_kwargs("THINKING_LEVEL_ORQUESTRADOR"),
         )
 
         # Conexão persistente para o checkpointer (check_same_thread=False pois

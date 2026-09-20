@@ -491,8 +491,12 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             genai_types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
             genai_types.Part.from_text(text="Transcreva literalmente o áudio. Regras: (1) copie palavra por palavra o que foi dito, sem corrigir, resumir, interpretar ou adicionar nada; (2) retorne apenas o texto transcrito, sem introduções, aspas ou comentários; (3) se não houver fala, retorne uma string vazia."),
         ])
+        # Transcrição literal não precisa de raciocínio: nível mínimo aceito pelo 3.8 Flash.
+        config = genai_types.GenerateContentConfig(
+            thinking_config=genai_types.ThinkingConfig(thinking_level="LOW"),
+        )
         response = await asyncio.to_thread(
-            lambda: client.models.generate_content(model=model_name, contents=contents)
+            lambda: client.models.generate_content(model=model_name, contents=contents, config=config)
         )
         transcript = (getattr(response, "text", None) or "").strip()
     except Exception as e:

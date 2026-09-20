@@ -1,0 +1,1 @@
+Custo máximo no site JAG: $172.00. Itens acima de $50: ARUBA21 (Q3,2026): $172.00, AFFINITY (Q1,2026): $100.00
