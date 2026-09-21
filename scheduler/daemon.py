@@ -155,6 +155,12 @@ def _finish_run(run_id: int, status: str, output: str = None, error: str = None)
         conn.commit()
 
 
+def _is_code_monitor(task: dict) -> bool:
+    """True para monitor de condição composta: sem condition_sql, com a condição descrita em
+    condition_description e avaliada pelo próprio task_code (ctx.alert)."""
+    return bool(task.get("condition_description")) and not task.get("condition_sql")
+
+
 def _evaluate_condition(task: dict) -> tuple[bool, str]:
     """Avalia condition_sql antes de executar a tarefa.
 
@@ -285,11 +291,19 @@ def _execute_task(task: dict, manual: bool = False) -> None:
         # aconteceu de verdade.
         notify_enabled = bool(task.get("notify", 0)) and condition_met
 
+        # Monitor de condição composta (sem condition_sql): o task_code avalia a condição e
+        # sinaliza via ctx.alert(). Execução manual ignora o estado anterior (sempre notifica
+        # se atingida), igual ao caminho com condition_sql.
+        alert_mode = _is_code_monitor(task)
+        alert_prev_state = 0 if manual else int(task.get("condition_state") or 0)
+        run_info: dict = {}
+
         def _run_code():
             tokens = run_task_code(
                 task["task_code"], from_date, to_date, session_id,
                 user_id=user_id, notify_enabled=notify_enabled,
                 task_name=task_name, lang=task.get("lang") or "",
+                alert_mode=alert_mode, alert_prev_state=alert_prev_state, run_info=run_info,
             )
             return " ".join(tokens)
 
@@ -333,6 +347,8 @@ def _execute_task(task: dict, manual: bool = False) -> None:
             # mantém o estado em 0, senão suprimiria a notificação real seguinte.
             if task.get("condition_sql"):
                 new_cond_state = 1 if condition_met else 0
+            elif alert_mode:
+                new_cond_state = 1 if run_info.get("triggered") else 0
             else:
                 new_cond_state = int(task.get("condition_state") or 0)
             with get_db() as conn:

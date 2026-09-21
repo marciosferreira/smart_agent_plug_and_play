@@ -74,6 +74,10 @@ export class TaskCardComponent {
 
   conditionLabel(): string {
     const t = this.task;
+    // Condição composta (AND/OR): sem operador/threshold, avaliada pelo próprio task_code
+    if (!t.condition_sql && t.condition_description) {
+      return this.translate.t('taskCard.condComposite', { description: t.condition_description });
+    }
     if (t.condition_operator === 'is_empty') return this.translate.t('taskCard.condIsEmpty');
     if (t.condition_operator === 'is_not_empty') return this.translate.t('taskCard.condIsNotEmpty');
     return this.translate.t('taskCard.condCompare', { op: t.condition_operator ?? '', threshold: t.condition_threshold ?? '' });
@@ -109,18 +113,20 @@ export class TaskCardComponent {
   async togglePause(): Promise<void> {
     this.pauseBusy.set(true);
     const res = await this.agenda.togglePause(this.task.id);
+    // O card é reaproveitado entre refreshes (track por id) — o flag precisa ser liberado
+    // também no sucesso, senão o botão fica desabilitado e não dá para retomar a tarefa.
+    this.pauseBusy.set(false);
     if (!res.ok) {
       alert(res.message || this.translate.t('taskCard.pauseError'));
-      this.pauseBusy.set(false);
     }
   }
 
   async toggleNotify(): Promise<void> {
     this.notifyBusy.set(true);
     const res = await this.agenda.toggleNotify(this.task.id);
+    this.notifyBusy.set(false);
     if (!res.ok) {
       alert(res.message || this.translate.t('taskCard.notifyError'));
-      this.notifyBusy.set(false);
     }
   }
 

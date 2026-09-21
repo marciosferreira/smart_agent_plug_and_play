@@ -1,0 +1,1 @@
+Status: NORMAL | JAG: $136.00 (Threshold > 50), BPL: $180.39 (Threshold < 10), MAN: $22.64 (Threshold > 40)

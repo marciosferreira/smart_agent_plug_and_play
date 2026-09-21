@@ -31,6 +31,10 @@ def migrate_db():
             "ALTER TABLE scheduled_tasks ADD COLUMN condition_sql TEXT",
             "ALTER TABLE scheduled_tasks ADD COLUMN condition_operator TEXT",
             "ALTER TABLE scheduled_tasks ADD COLUMN condition_threshold REAL",
+            # monitor de condição composta (AND/OR/várias métricas): sem condition_sql — o próprio
+            # task_code avalia a condição e sinaliza via ctx.alert(). Este texto legível é o
+            # marcador desse modo e o que o card da tarefa exibe.
+            "ALTER TABLE scheduled_tasks ADD COLUMN condition_description TEXT",
             "ALTER TABLE scheduled_tasks ADD COLUMN dominio TEXT",
             # idioma no momento da criação — o daemon roda sem sessão de chat ativa
             # (sem user_id/lang de requisição), então precisa ficar gravado na própria

@@ -36,7 +36,7 @@ from sse_starlette.sse import EventSourceResponse
 from agent_multi import (
     init_multi_agent, invoke_multi_agent, is_multi_agent_ready, stream_multi_agent,
     begin_run, cancel_run,
-    set_chart_snapshot, ns_cleanup_loop, _extract_thinking, _extract_text_content, _TOOL_LABELS,
+    set_chart_snapshot, ns_cleanup_loop, _extract_thinking, _extract_text_content, _TOOL_LABELS, _lbl,
 )
 from scheduler.daemon import scheduler_loop, _execute_task
 import chart_store as cs
@@ -48,18 +48,32 @@ _EXCEL_RE = re.compile(r'\[excel:([a-f0-9\-]{36})\]')
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 
+# Textos que o backend injeta na resposta (alt da imagem, artefato ausente), por idioma.
+_ARTIFACT_TEXT = {
+    "chart":            {"pt-BR": "gráfico",              "en": "chart",             "zh": "图表"},
+    "chart_missing":    {"pt-BR": "[gráfico indisponível]", "en": "[chart unavailable]", "zh": "[图表不可用]"},
+    "pdf_missing":      {"pt-BR": "[PDF indisponível]",    "en": "[PDF unavailable]",   "zh": "[PDF不可用]"},
+    "excel_missing":    {"pt-BR": "[Excel indisponível]",  "en": "[Excel unavailable]", "zh": "[Excel不可用]"},
+}
+
+
+def _at(key: str) -> str:
+    d = _ARTIFACT_TEXT[key]
+    return d.get(db_config.get_lang()) or d["pt-BR"]
+
+
 def _embed_charts(text: str) -> str:
     def _chart(m: re.Match) -> str:
         chart_id = m.group(1)
         if not cs.get_chart_b64(chart_id):
-            return "[gráfico indisponível]"
-        return f"![grafico](/chart/{chart_id})"
+            return _at("chart_missing")
+        return f"![{_at('chart')}](/chart/{chart_id})"
 
     def _pdf(m: re.Match) -> str:
         pdf_id = m.group(1)
         row = cs.get_pdf(pdf_id)
         if not row:
-            return "[PDF indisponível]"
+            return _at("pdf_missing")
         _, filename = row
         return f"[📥 {filename}](/pdf/{pdf_id})"
 
@@ -67,7 +81,7 @@ def _embed_charts(text: str) -> str:
         excel_id = m.group(1)
         row = cs.get_excel(excel_id)
         if not row:
-            return "[Excel indisponível]"
+            return _at("excel_missing")
         _, filename = row
         return f"[📥 {filename}](/excel/{excel_id})"
 
@@ -370,7 +384,7 @@ async def chat_history(session_id: str = "default"):
                         pending_thinking.append({"text": pre_text, "isTool": False})
                     for tc in tool_calls:
                         name = tc.get("name", "")
-                        label = _TOOL_LABELS.get(name, f"⚙ {name}")
+                        label = _lbl(_TOOL_LABELS.get(name, f"⚙ {name}"))
                         pending_thinking.append({"text": label, "isTool": True})
                     continue
 
@@ -536,7 +550,7 @@ def get_tasks(user_id: str = Query(default=None)):
     with get_db() as conn:
         tasks = conn.execute(
             "SELECT id, name, description, frequency, time, weekday, day, email, notify, "
-            "date_range, condition_sql, condition_operator, condition_threshold, condition_state, "
+            "date_range, condition_sql, condition_operator, condition_threshold, condition_state, condition_description, "
             "status, next_run, last_run, created_at, retry_count, max_retries "
             f"FROM scheduled_tasks WHERE {_USER_CLAUSE} AND {_DOMINIO_CLAUSE} ORDER BY id DESC",
             (user_id, dominio),
@@ -663,7 +677,7 @@ def toggle_pause_task(task_id: str, user_id: str = Query(default=None)):
     dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            f"SELECT id, status FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE} AND {_USER_CLAUSE}",
+            f"SELECT id, status, frequency, time, weekday, day, next_run FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE} AND {_USER_CLAUSE}",
             (task_id, dominio, user_id),
         ).fetchone()
         if not row:
@@ -672,7 +686,16 @@ def toggle_pause_task(task_id: str, user_id: str = Query(default=None)):
         if current not in ("active", "paused"):
             return JSONResponse(status_code=409, content={"error": True, "message": f"Não é possível pausar/retomar task com status '{current}'."})
         new_status = "paused" if current == "active" else "active"
-        conn.execute("UPDATE scheduled_tasks SET status=? WHERE id=?", (new_status, task_id))
+        if new_status == "active" and row["frequency"] not in ("once", "on_demand"):
+            # next_run ficou parado no passado durante a pausa — sem recalcular, a tarefa
+            # dispararia imediatamente ao ser retomada em vez de seguir sua agenda.
+            from scheduler.md_parser import calculate_next_run
+            conn.execute(
+                "UPDATE scheduled_tasks SET status=?, next_run=? WHERE id=?",
+                (new_status, calculate_next_run(row["frequency"], row["time"], row["weekday"], row["day"]), task_id),
+            )
+        else:
+            conn.execute("UPDATE scheduled_tasks SET status=? WHERE id=?", (new_status, task_id))
         conn.commit()
     return {"ok": True, "task_id": task_id, "status": new_status}
 
@@ -683,12 +706,12 @@ def toggle_notify_task(task_id: str, user_id: str = Query(default=None)):
     dominio = db_config.dominio_filename()
     with get_db() as conn:
         row = conn.execute(
-            f"SELECT id, notify, condition_sql FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE} AND {_USER_CLAUSE}",
+            f"SELECT id, notify, condition_sql, condition_description FROM scheduled_tasks WHERE id=? AND {_DOMINIO_CLAUSE} AND {_USER_CLAUSE}",
             (task_id, dominio, user_id),
         ).fetchone()
         if not row:
             return JSONResponse(status_code=404, content={"error": True, "message": f"Task {task_id} não encontrada."})
-        if row["condition_sql"]:
+        if row["condition_sql"] or row["condition_description"]:
             return JSONResponse(status_code=409, content={"error": True, "message": "Notificações não podem ser desativadas em tarefas com condição de threshold."})
         new_notify = 0 if row["notify"] else 1
         conn.execute("UPDATE scheduled_tasks SET notify=? WHERE id=?", (new_notify, task_id))

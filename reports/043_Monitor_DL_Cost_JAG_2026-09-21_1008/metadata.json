@@ -1,0 +1,14 @@
+{
+  "task_id": "043",
+  "task_name": "Monitor DL Cost JAG",
+  "run_at": "2026-09-21T10:08:38.265012",
+  "status": "pending_send",
+  "pdf_urls": [],
+  "email": null,
+  "schedule": {
+    "frequency": "every_5m",
+    "weekday": null,
+    "day": null,
+    "time": null
+  }
+}

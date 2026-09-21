@@ -33,14 +33,24 @@
           {{ runBusy() ? '…' : runDone() ? '✓' : '▶' }}
         </button>
       }
-      @if (task.status === 'active' || task.status === 'paused') {
+      @if (task.status === 'active') {
         <button
           (click)="togglePause()"
           [disabled]="pauseBusy()"
-          [title]="(task.status === 'paused' ? 'taskCard.resumeTask' : 'taskCard.pauseTask') | translate"
+          [title]="'taskCard.pauseTask' | translate"
           style="background:none;border:1px solid #3f3f46;border-radius:6px;color:#71717a;padding:3px 7px;font-size:12px;cursor:pointer;"
         >
-          {{ task.status === 'paused' ? '▶' : '⏸' }}
+          ⏸
+        </button>
+      } @else if (task.status === 'paused') {
+        <!-- Pausada: o ▶ de "executar agora" some; no lugar entra um botão explícito de retomar -->
+        <button
+          (click)="togglePause()"
+          [disabled]="pauseBusy()"
+          [title]="'taskCard.resumeTask' | translate"
+          style="background:#ede9fe;border:1px solid #7c3aed;border-radius:6px;color:#7c3aed;padding:3px 9px;font-size:11px;font-weight:600;cursor:pointer;"
+        >
+          {{ pauseBusy() ? '…' : ('taskCard.resume' | translate) }}
         </button>
       }
       <button (click)="openCode()" [title]="'taskCard.viewCode' | translate" style="background:none;border:1px solid #3f3f46;border-radius:6px;color:#71717a;padding:3px 7px;font-size:12px;cursor:pointer;font-family:'JetBrains Mono',monospace;">&lt;/&gt;</button>
@@ -68,7 +78,7 @@
     }
     <div>
       <div style="font-size:9px;color:#475569;font-family:'JetBrains Mono',monospace;letter-spacing:.1em;margin-bottom:2px;">{{ 'taskCard.notifications' | translate }}</div>
-      @if (task.condition_sql) {
+      @if (task.condition_sql || task.condition_description) {
         <span [title]="'taskCard.alwaysNotifyTitle' | translate" style="font-size:12px;color:#fbbf24;cursor:default;">{{ 'taskCard.notifyYes' | translate }}</span>
       } @else {
         <button
@@ -82,7 +92,7 @@
         </button>
       }
     </div>
-    @if (task.condition_sql) {
+    @if (task.condition_sql || task.condition_description) {
       <div style="grid-column:1/-1;">
         <div style="font-size:9px;color:#475569;font-family:'JetBrains Mono',monospace;letter-spacing:.1em;margin-bottom:2px;">{{ 'taskCard.condition' | translate }}</div>
         <div style="display:flex;align-items:center;gap:8px;">

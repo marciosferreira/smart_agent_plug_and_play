@@ -1,0 +1,1 @@
+Status: OK | JAG Cost: 0.00 (Threshold: >50), BPL Cost: 236.00 (Threshold: <10), MAN Cost: 86.33 (Threshold: >40)

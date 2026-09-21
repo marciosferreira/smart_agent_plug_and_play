@@ -1,0 +1,1 @@
+Status: TRIGGERED | JAG: 100.00 (threshold > 50) | BPL: 1,077.83 (threshold < 2,000,000) | MAN: 99.78 (threshold > 40)

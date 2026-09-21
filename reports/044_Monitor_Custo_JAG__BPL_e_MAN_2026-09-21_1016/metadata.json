@@ -1,0 +1,14 @@
+{
+  "task_id": "044",
+  "task_name": "Monitor Custo JAG, BPL e MAN",
+  "run_at": "2026-09-21T10:16:20.401521",
+  "status": "pending_send",
+  "pdf_urls": [],
+  "email": null,
+  "schedule": {
+    "frequency": "every_5m",
+    "weekday": null,
+    "day": null,
+    "time": null
+  }
+}

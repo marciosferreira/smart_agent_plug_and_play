@@ -1,0 +1,14 @@
+{
+  "task_id": "048",
+  "task_name": "Monitor JAG, BPL e MAN costs",
+  "run_at": "2026-09-21T16:16:21.160909",
+  "status": "pending_send",
+  "pdf_urls": [],
+  "email": null,
+  "schedule": {
+    "frequency": "every_5m",
+    "weekday": null,
+    "day": null,
+    "time": null
+  }
+}

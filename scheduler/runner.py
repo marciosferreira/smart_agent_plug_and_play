@@ -125,7 +125,7 @@ class TaskCodeError(Exception):
     """Erro de validação ou execução do task_code."""
 
 
-def run_task_code(code: str, from_date: str, to_date: str, session_id: str, user_id: str | None = None, is_test: bool = False, notify_enabled: bool = True, task_name: str = "", lang: str = ""):
+def run_task_code(code: str, from_date: str, to_date: str, session_id: str, user_id: str | None = None, is_test: bool = False, notify_enabled: bool = True, task_name: str = "", lang: str = "", alert_mode: bool = False, alert_prev_state: int = 0, run_info: dict | None = None):
     """Compila e executa task_code.
 
     Retorna list[str] de tokens em modo normal.
@@ -134,8 +134,13 @@ def run_task_code(code: str, from_date: str, to_date: str, session_id: str, user
 
     `lang` é o idioma da tarefa (gravado na criação); usado por ctx.analisar() para escrever
     a análise no idioma certo, já que o daemon roda sem requisição ativa.
+
+    `alert_mode` indica monitor de condição composta: o código DEVE chamar ctx.alert(); a
+    notificação só sai na transição 0→1 (`alert_prev_state` é o condition_state anterior) e o
+    resultado da condição é devolvido em `run_info["triggered"]` para o daemon atualizar o estado.
     """
     ctx = TaskContext(session_id, user_id=user_id, is_test=is_test, notify_enabled=notify_enabled, task_name=task_name, lang=lang)
+    ctx._alert_prev_state = alert_prev_state
     g   = _build_globals(ctx, from_date, to_date)
 
     # 1a. Rejeita imports antes de compilar, exceto módulos já pré-injetados no namespace.
@@ -188,6 +193,18 @@ def run_task_code(code: str, from_date: str, to_date: str, session_id: str, user
         raise TaskCodeError(
             f"Erro durante a execução de run():\n{traceback.format_exc(limit=12)}"
         ) from e
+
+    # 4a. Monitor de condição composta: sem ctx.alert() não há como saber se a condição foi
+    # atingida — falhar aqui (em vez de assumir) evita alerta falso ou monitor mudo.
+    if alert_mode:
+        if ctx._alert_triggered is None:
+            raise TaskCodeError(
+                "Este monitor tem condição composta: run() deve chamar "
+                "ctx.alert(triggered, message) exatamente uma vez, com o resultado booleano "
+                "da condição completa (ex: ctx.alert(a > 50 and b < 10, 'mensagem'))."
+            )
+        if run_info is not None:
+            run_info["triggered"] = ctx._alert_triggered
 
     # 4b. Auto-notificação: se notify estava habilitado e o código não chamou ctx.notify(),
     # dispara automaticamente com o nome da tarefa — sem depender do LLM escrever ctx.notify().

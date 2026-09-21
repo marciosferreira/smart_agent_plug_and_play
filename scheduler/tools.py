@@ -264,13 +264,14 @@ def schedule_monitor(
     name: str,
     description: str,
     frequency: str,
-    condition_sql: str,
-    condition_operator: str,
+    condition_sql: Optional[str] = None,
+    condition_operator: Optional[str] = None,
     condition_threshold: Optional[float] = None,
     date_range: Optional[str] = None,
     time: Optional[str] = None,
     weekday: Optional[str] = None,
     day: Optional[str] = None,
+    condition_description: Optional[str] = None,
 ) -> str:
     """Cria um monitor de threshold — executa e notifica SOMENTE quando a condição for atingida.
 
@@ -278,7 +279,14 @@ def schedule_monitor(
     "monitore Z e avise quando passar de N".
 
     Notificações são sempre ativas (não precisam de notify=True — é automático).
-    O task_code deve apenas retornar o valor atual — sem lógica condicional.
+
+    Dois modos, conforme a condição pedida:
+    - CONDIÇÃO SIMPLES (uma métrica, uma comparação): passe condition_sql + condition_operator
+      (+ condition_threshold). O task_code deve apenas retornar o valor atual — sem lógica
+      condicional; o daemon avalia a condição e notifica.
+    - CONDIÇÃO COMPOSTA (AND/OR, várias métricas, comparação entre entidades): NÃO passe
+      condition_sql/operator/threshold — passe condition_description. O task_code avalia a
+      condição inteira e a sinaliza com ctx.alert(triggered, message).
 
     Args:
         name: Nome do monitor (ex: "Monitor de Pedidos").
@@ -307,10 +315,25 @@ def schedule_monitor(
         time: Hora "HH:MM" (opcional).
         weekday: Dia da semana se frequency="weekly".
         day: Dia do mês se frequency="monthly".
+        condition_description: Só para condição composta — a condição completa em linguagem
+                               natural, curta, como será exibida no card (ex: "JAG > 50 E BPL < 10
+                               E MAN > 40"). Não use junto com condition_sql.
     """
     err = _validate_frequency(frequency)
     if err:
         return err
+
+    if condition_description and not condition_sql:
+        return _create_monitor(
+            name, description, frequency, None, None, None, date_range, time, weekday, day,
+            condition_description=condition_description,
+        )
+
+    if not condition_sql or not condition_operator:
+        return (
+            "❌ Informe condition_sql + condition_operator (condição simples) ou, para condição "
+            "composta (AND/OR/várias métricas), condition_description."
+        )
 
     if condition_operator not in (">", ">=", "<", "<=", "==", "!=", "is_empty", "is_not_empty"):
         return f"❌ condition_operator inválido: '{condition_operator}'. Use: > >= < <= == != is_empty is_not_empty"
@@ -338,12 +361,34 @@ def schedule_monitor(
             f"Dica: {dica}"
         )
 
+    return _create_monitor(
+        name, description, frequency, condition_sql, condition_operator, condition_threshold,
+        date_range, time, weekday, day,
+    )
+
+
+_COMPOSITE_PLACEHOLDER_CODE = (
+    "def run(from_date, to_date, ctx):\n"
+    "    # Placeholder até o código real ser salvo com save_task_code — nunca dispara.\n"
+    "    ctx.alert(False, '')\n"
+    "    return 'Monitor sem código — aguardando task_code'\n"
+)
+
+
+def _create_monitor(
+    name, description, frequency, condition_sql, condition_operator, condition_threshold,
+    date_range, time, weekday, day, condition_description=None,
+) -> str:
+    """Insere o monitor (simples: com condition_sql; composto: com condition_description)."""
     effective_date_range = date_range or "today"
 
     # task_code padrão: repete a leitura de condition_sql e retorna o valor atual como
     # string. Suficiente para qualquer monitor simples — pode ser substituído depois
-    # via save_task_code.
-    default_code = _default_monitor_code(name, condition_sql)
+    # via save_task_code. Monitor composto só ganha um placeholder inerte (o código real
+    # precisa avaliar a condição).
+    default_code = (
+        _default_monitor_code(name, condition_sql) if condition_sql else _COMPOSITE_PLACEHOLDER_CODE
+    )
 
     try:
         task_id = _next_id()
@@ -355,11 +400,13 @@ def schedule_monitor(
                 """INSERT INTO scheduled_tasks
                    (id, name, description, task_code, frequency, time, weekday, day,
                     notify, date_range, condition_sql, condition_operator, condition_threshold,
+                    condition_description,
                     status, next_run, last_run, created_at, user_id, dominio, lang)
-                   VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?,'active',?,NULL,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?,?,'active',?,NULL,?,?,?,?)""",
                 (task_id, name, description, default_code, frequency, time, weekday, day,
                  effective_date_range, condition_sql, condition_operator, condition_threshold,
-                 next_run, now, user_id, db_config.dominio_filename(), _current_lang()),
+                 condition_description, next_run, now, user_id, db_config.dominio_filename(),
+                 _current_lang()),
             )
             conn.commit()
     except Exception as exc:
@@ -367,15 +414,25 @@ def schedule_monitor(
         return f"❌ Erro interno ao criar monitor: {exc}"
 
     tasks = _all_tasks(user_id)
-    op_desc = (
-        f"executa se sem resultados" if condition_operator == "is_empty" else
-        f"executa se houver resultados" if condition_operator == "is_not_empty" else
-        f"executa se valor {condition_operator} {condition_threshold}"
-    )
+    if condition_description and not condition_sql:
+        op_desc = f"executa se {condition_description}"
+        code_hint = (
+            "O task_code precisa avaliar a condição inteira e chamar ctx.alert(triggered, message) "
+            "— use test_task_code e save_task_code para ativá-lo."
+        )
+    else:
+        op_desc = (
+            f"executa se sem resultados" if condition_operator == "is_empty" else
+            f"executa se houver resultados" if condition_operator == "is_not_empty" else
+            f"executa se valor {condition_operator} {condition_threshold}"
+        )
+        code_hint = (
+            "O monitor já tem task_code padrão (retorna valor atual). "
+            "Para personalizar o relatório gerado quando a condição for atingida, use save_task_code."
+        )
     return (
         f"Monitor **[{task_id}]** criado e ativo. Condição: {op_desc}. Próxima verificação: {next_run}\n\n"
-        f"O monitor já tem task_code padrão (retorna valor atual). "
-        f"Para personalizar o relatório gerado quando a condição for atingida, use save_task_code.\n\n"
+        f"{code_hint}\n\n"
         + _format_list(tasks)
     )
 
@@ -666,9 +723,16 @@ def test_task_code(task_id: str, code: str, from_date: str = "", to_date: str = 
         else:
             from_date, to_date = default_test_range()
 
+    with get_db() as conn:
+        cm_row = conn.execute(
+            f"SELECT condition_sql, condition_description FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}",
+            (task_id, db_config.dominio_filename()),
+        ).fetchone()
+    alert_mode = bool(cm_row and cm_row["condition_description"] and not cm_row["condition_sql"])
+
     session_id = f"test_{task_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     try:
-        tokens, ctx = run_task_code(code, from_date, to_date, session_id, user_id=_current_user_id(), is_test=True, lang=_current_lang())
+        tokens, ctx = run_task_code(code, from_date, to_date, session_id, user_id=_current_user_id(), is_test=True, lang=_current_lang(), alert_mode=alert_mode)
         _push_artifacts("artifact_preview", tokens, task_id, session_id_override=session_id_override)
 
         alert_lines = []
@@ -684,6 +748,11 @@ def test_task_code(task_id: str, code: str, from_date: str = "", to_date: str = 
             "\n\n**Notificações que seriam disparadas:**\n" + "\n".join(alert_lines)
             if alert_lines else ""
         )
+        if alert_mode:
+            alert_section = (
+                f"\n\nCondição composta agora: {'ATINGIDA' if ctx._alert_triggered else 'NÃO atingida'}"
+                + alert_section
+            )
 
         return (
             f"✅ **Teste bem-sucedido!** Período: {from_date} → {to_date}\n"
@@ -716,7 +785,7 @@ def save_task_code(task_id: str, code: str) -> str:
     try:
         with get_db() as conn:
             row = conn.execute(
-                f"SELECT name, task_code, condition_sql, status FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}",
+                f"SELECT name, task_code, condition_sql, condition_description, status FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}",
                 (task_id, db_config.dominio_filename()),
             ).fetchone()
             if not row:
@@ -729,6 +798,28 @@ def save_task_code(task_id: str, code: str) -> str:
                     "a condição e a notificação são gerenciadas automaticamente pelo daemon.\n\n"
                     "Remova qualquer chamada a `ctx.notify()` do código. "
                     "O task_code deve apenas coletar dados e gerar o relatório/gráfico."
+                )
+
+            # Monitor de condição composta: a condição é avaliada pelo código e sinalizada com
+            # ctx.alert() — sem ela o runner não sabe se a condição foi atingida.
+            is_code_monitor = bool(row["condition_description"]) and not row["condition_sql"]
+            if is_code_monitor:
+                if "ctx.notify" in code:
+                    return (
+                        "❌ **Código recusado:** este monitor tem condição composta — "
+                        "sinalize o resultado com `ctx.alert(triggered, message)` em vez de "
+                        "`ctx.notify()` (a notificação só sai na transição para 'atingida')."
+                    )
+                if "ctx.alert" not in code:
+                    return (
+                        "❌ **Código recusado:** este monitor tem condição composta "
+                        f"({row['condition_description']}) — o código deve avaliar a condição "
+                        "inteira e chamar `ctx.alert(triggered, message)` uma vez por execução."
+                    )
+            elif "ctx.alert" in code:
+                return (
+                    "❌ **Código recusado:** `ctx.alert()` só é válido em monitores de condição "
+                    "composta (sem `condition_sql`). Esta tarefa não é um."
                 )
 
             # Prepara aviso se ctx.notify() está no código sem condition_sql (salva mesmo assim)
@@ -752,7 +843,7 @@ def save_task_code(task_id: str, code: str) -> str:
                     (task_id, version, row['task_code'], now),
                 )
 
-            if row["status"] == "draft" and row["condition_sql"]:
+            if row["status"] == "draft" and (row["condition_sql"] or is_code_monitor):
                 # Monitor recém-criado (o registro fica 'draft' até este save): a 1ª checagem
                 # roda no próximo tick do daemon em vez de esperar um intervalo inteiro — se a
                 # condição já estiver atingida, o alerta aparece em segundos.

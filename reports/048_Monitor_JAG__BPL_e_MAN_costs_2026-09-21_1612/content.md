@@ -1,0 +1,1 @@
+Insufficient data to evaluate condition: JAG=N/A, BPL=236.00, MAN=86.33.

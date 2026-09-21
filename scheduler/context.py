@@ -25,6 +25,8 @@ class TaskContext:
         self._lang = lang
         self._analises = 0
         self._notify_called = False
+        self._alert_triggered: bool | None = None  # definido por ctx.alert() (monitor de condição composta)
+        self._alert_prev_state = 0  # condition_state anterior; só notifica na transição 0→1
         self._test_alerts: list[dict] = []  # alertas capturados durante teste (não persistidos)
 
     # ── API local ─────────────────────────────────────────────────────────────
@@ -316,6 +318,26 @@ class TaskContext:
             return
         import chart_store
         chart_store.save_alert(self.session_id, message, value, threshold, user_id=self.user_id)
+
+    def alert(self, triggered: bool, message: str, value: float | None = None, threshold: float | None = None) -> None:
+        """Sinaliza o resultado de um monitor de condição composta (AND/OR/várias métricas).
+
+        Chame UMA vez por execução, com o resultado da condição inteira — `triggered` é
+        True só quando a condição composta é verdadeira. A notificação é disparada apenas
+        na transição de não-atingida para atingida (não repete a cada verificação enquanto
+        a condição continua verdadeira); o estado é controlado pelo daemon.
+
+        Args:
+            triggered: Resultado booleano da condição completa (ex: a > 50 and b < 10).
+            message: Texto da notificação, usado quando triggered é True.
+            value: Valor numérico observado (opcional, exibido no painel).
+            threshold: Valor de referência (opcional, exibido no painel).
+        """
+        self._alert_triggered = bool(triggered)
+        # Impede a auto-notificação do runner (que dispararia mesmo com triggered=False)
+        self._notify_called = True
+        if self._alert_triggered and self._alert_prev_state == 0:
+            self.notify(message, value, threshold)
 
     def notify_alert(self, message: str, value: float | None = None, threshold: float | None = None) -> None:
         """Alias de notify() — mantido para compatibilidade com task_codes existentes."""

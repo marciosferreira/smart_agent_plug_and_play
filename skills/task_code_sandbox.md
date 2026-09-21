@@ -248,6 +248,38 @@ filtros reais de dados usam as colunas de período descritas na skill.
 
 A notificação automática inclui o detalhe da condição: ex. "Monitor de X: 75 > 50".
 
+### Monitores de condição composta (AND / OR / várias métricas)
+
+`condition_sql` só compara **um** valor com **um** threshold. Quando o pedido combina várias
+condições (ex: "JAG > 50 **e** BPL < 10 **e** MAN > 40", "A > 5 **ou** B < 2"), a tarefa é criada
+**sem** `condition_sql` (com `condition_description`) e o próprio `task_code` avalia a condição
+inteira, sinalizando o resultado com `ctx.alert(triggered, message)`:
+
+```python
+def run(from_date, to_date, ctx):
+    rows = ctx.graphql_table(table="...", where=[...], expand=[...], limit=500)
+    df = pd.DataFrame(rows)
+    por_site = df.groupby("site_id__name")["custo"].mean().to_dict()
+
+    jag, bpl, man = por_site.get("JAG"), por_site.get("BPL"), por_site.get("MAN")
+    if None in (jag, bpl, man):          # sem dado → não dispara (nunca assuma 0)
+        ctx.alert(False, "")
+        return "Sem dados de algum site monitorado"
+
+    triggered = jag > 50 and bpl < 10 and man > 40   # E→and, OU→or, com parênteses
+    ctx.alert(triggered, f"JAG {jag:.2f} > 50, BPL {bpl:.2f} < 10, MAN {man:.2f} > 40")
+    return f"JAG {jag:.2f} | BPL {bpl:.2f} | MAN {man:.2f} — {'ATINGIDA' if triggered else 'não atingida'}"
+```
+
+- Chame `ctx.alert` **uma vez** por execução, com o booleano da condição **completa** — nunca de
+  apenas uma das partes.
+- Use `ctx.alert(...)` em vez de `ctx.notify(...)`: a notificação só sai na transição
+  "não atingida → atingida" e reseta quando a condição deixa de valer (igual ao `condition_sql`).
+- Se faltar dado de qualquer parte, `triggered=False` — um `.get(chave, 0)` pode satisfazer um
+  `<` e gerar alerta falso.
+- `ctx.alert` é recusado em tarefas com `condition_sql`, e `ctx.notify` é recusado nas de
+  condição composta.
+
 ---
 
 ## Notificações automáticas
@@ -256,6 +288,7 @@ Quando a tarefa tem `notify=True`, o runner dispara automaticamente uma notifica
 
 **PROIBIDO usar `ctx.notify()` no task_code para implementar condições de threshold.**
 Se o objetivo é "alertar quando X > N", use `condition_sql` + `condition_operator` + `condition_threshold` na tarefa.
+Para condições compostas (AND/OR/várias métricas), use `ctx.alert(triggered, message)` — veja a seção acima.
 O sistema bloqueia o `save_task_code` se detectar `ctx.notify()` em tarefas que já têm `condition_sql`.
 
 ## Monitores (every\_Xm / every\_Xh)

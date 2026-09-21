@@ -1,0 +1,1 @@
+Missing data for one or more sites: JAG=N/A, BPL=236.0, MAN=86.3333333333

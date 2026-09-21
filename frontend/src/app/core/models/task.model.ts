@@ -23,6 +23,7 @@ export interface ScheduledTask {
   condition_operator: string | null;
   condition_threshold: number | null;
   condition_state: boolean;
+  condition_description: string | null;
   email: string | null;
   runs?: TaskRun[];
 }

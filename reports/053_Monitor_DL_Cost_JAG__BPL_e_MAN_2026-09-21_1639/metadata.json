@@ -1,0 +1,14 @@
+{
+  "task_id": "053",
+  "task_name": "Monitor DL Cost JAG, BPL e MAN",
+  "run_at": "2026-09-21T16:39:57.170101",
+  "status": "pending_send",
+  "pdf_urls": [],
+  "email": null,
+  "schedule": {
+    "frequency": "every_5m",
+    "weekday": null,
+    "day": null,
+    "time": null
+  }
+}

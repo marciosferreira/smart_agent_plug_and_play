@@ -495,6 +495,9 @@ class SchedulingState(TypedDict):
     task_code: str     # code being built or corrected
     analista_context: str  # skill + endpoint + colunas + amostra de dados (create only)
     is_monitor: bool   # True se task_type=monitor (set by node_criar_tarefa)
+    is_composite: bool  # True se o monitor tem condição composta (AND/OR/várias métricas): sem condition_sql, o task_code avalia via ctx.alert
+    condition_description: str  # condição composta em linguagem natural (só quando is_composite)
+    interpretacao: str  # escolhas do gerador (métrica/agregação/filtros) que o pedido não especificava — exibidas ao usuário (monitores)
     condition_sql_fix: str  # condition_sql corrigida com IDs reais (monitor GraphQL, opcional)
     error: str         # last test error; empty on success
     retries: int       # correction attempts so far
@@ -1916,6 +1919,11 @@ def _build_sub_agent(llm):
         "  3. O token [chart:uuid], em linha própria, se houver gráfico.\n"
         "  4. Os blocos obrigatórios abaixo (Parâmetros da análise, Dados do gráfico/relatório/"
         "planilha), compactos.\n"
+        "IDIOMA: os títulos desses blocos ('Parâmetros da análise', 'Dados do gráfico', ...) e os "
+        "rótulos de cada linha ('Período', 'Tabela', 'Operação mais barata', ...) estão escritos "
+        "em português só como exemplo — ESCREVA-OS no idioma definido em '## IDIOMA DA RESPOSTA' "
+        "(ex: 'Analysis parameters', 'Chart data', 'Period', 'Table' em inglês). O mesmo vale "
+        "para o texto '(assumido — não pedido explicitamente)' e demais frases fixas.\n"
         "Ressalvas que limitam ou invalidam uma conclusão continuam OBRIGATÓRIAS — uma linha "
         "cada, nunca omitidas para encurtar. Meta: até ~250 palavras, fora a tabela.\n\n"
         "## Regras\n"
@@ -2479,10 +2487,13 @@ def _build_scheduler_agent(llm):
         "every_Xm (ex: every_2m) | every_Xh (ex: every_6h) | every_Xd (ex: every_3d)\n\n"
         "## Monitores e alertas — usar schedule_monitor, NUNCA schedule_task\n"
         "Se a instrução recebida mencionar alerta/avise/notifique/monitore/threshold/caso X>N:\n"
-        "→ A tarefa já foi criada via schedule_monitor com condition_sql/operator/threshold.\n"
-        "→ O task_code deve APENAS retornar o valor atual — sem ctx.notify(), sem lógica condicional.\n"
+        "→ Condição SIMPLES (uma métrica, uma comparação): a tarefa já foi criada via schedule_monitor "
+        "com condition_sql/operator/threshold. O task_code deve APENAS retornar o valor atual — sem "
+        "ctx.notify(), sem lógica condicional. NÃO use ctx.notify() — o daemon notifica automaticamente.\n"
         "→ Exemplo: return f'Valor atual do monitor: {rows[0][\"total\"]}'\n"
-        "→ NÃO use ctx.notify() no task_code de monitores — o daemon notifica automaticamente.\n\n"
+        "→ Condição COMPOSTA (E/OU, várias métricas/entidades): crie com schedule_monitor passando "
+        "condition_description (sem condition_sql). O task_code avalia a condição inteira e chama "
+        "ctx.alert(triggered, message) uma vez por execução — nunca ctx.notify().\n\n"
         "## REGRA CRÍTICA — criar vs editar\n"
         "schedule_task SOMENTE quando o usuário pedir explicitamente para CRIAR uma tarefa nova.\n"
         "Para qualquer outra operação sobre tarefa existente (salvar instructions, editar campos,\n"
@@ -2620,7 +2631,7 @@ def _build_scheduling_graph(llm):
             'Formato: {\n'
             '  "task_type": "monitor" ou "report",\n'
             '  "name": "nome curto (máx 60 chars)",\n'
-            '  "description": "descrição clara",\n'
+            '  "description": "descrição clara (se a instrução tiver \'Referência visual:\', inclua-a resumida)",\n'
             '  "frequency": "once|daily|weekly|monthly|every_Xm|every_Xh|every_Xd",\n'
             '  "weekday": "monday|tuesday|wednesday|thursday|friday|saturday|sunday ou null",\n'
             '  "day": "número 1-31 para monthly ou null",\n'
@@ -2628,7 +2639,9 @@ def _build_scheduling_graph(llm):
             '  "date_range": "ytd|mtd|today|last_7d|last_30d|last_90d ou null",\n'
             '  "condition_sql": "condição do monitor — formato depende do domínio, ver regra abaixo — ou null",\n'
             '  "condition_operator": ">= | > | <= | < | == | != | is_empty | is_not_empty ou null",\n'
-            '  "condition_threshold": "número ou null"\n'
+            '  "condition_threshold": "número ou null",\n'
+            '  "condition_kind": "simple | composite | null",\n'
+            '  "condition_description": "só se composite: a condição COMPLETA em uma frase curta, no idioma do pedido (ex: JAG > 50 E BPL < 10 E MAN > 40) — senão null"\n'
             '}\n\n'
             "REGRAS:\n"
             "- task_type=monitor se o pedido menciona: alerte/avise/notifique/monitore/caso X>N/threshold\n"
@@ -2636,10 +2649,23 @@ def _build_scheduling_graph(llm):
             "- monitor: frequency=every_5m SEMPRE, time=null — a menos que a instrução peça "
             "EXPLICITAMENTE outra frequência (ex: 'a cada hora', 'diariamente'); NUNCA use daily "
             "por conta própria. Preencha condition_sql/operator/threshold\n"
-            f"- {condition_format_hint}\n"
+            "- condition_kind: 'composite' quando o pedido combina VÁRIAS condições — conectivos "
+            "E/AND/OU/OR, várias métricas ou entidades com limites diferentes, ou comparação entre "
+            "entidades (ex: 'JAG > 50 e BPL < 10'). Nesse caso condition_sql, condition_operator e "
+            "condition_threshold = null e preencha condition_description com a condição COMPLETA, "
+            "sem omitir nenhuma parte. 'simple' = UMA métrica com UMA comparação (use condition_sql/"
+            "operator/threshold abaixo). Um monitor simple NUNCA pode representar mais de uma condição.\n"
+            f"- (só para condition_kind=simple) {condition_format_hint}\n"
             f"- {db_config.get_secao('Dica para condition_sql') or 'consulte o schema em config/dominio.md'}\n"
             f"{provisional_hint}"
             "- date_range: preencha quando o pedido especifica período (ano atual→ytd, mês→mtd)\n"
+            "- 'Referência visual:' na instrução = transcrição de um gráfico que o usuário viu. Se o "
+            "título trouxer a janela (ex: 'last 3 months', 'últimos 3 meses'), use-a em date_range "
+            "(3 meses→last_90d, 30 dias→last_30d, mês→mtd, ano→ytd).\n"
+            "- monitor SEM período no pedido: use date_range=last_90d (mesma janela 'últimos 3 meses' do "
+            "dashboard padrão), NÃO 'today'. Dados do domínio são registros mensais/por intervalo: 'today' só "
+            "captura registros cujo período cobre o dia de hoje e deixa entidades sem dado (o monitor nunca "
+            "dispararia), além de divergir do gráfico que o usuário vê.\n"
             "- weekly → weekday obrigatório. monthly → day obrigatório.\n"
         )
         _raise_if_cancelled()
@@ -2670,7 +2696,17 @@ def _build_scheduling_graph(llm):
         if params.get("date_range"):
             base_params["date_range"] = params["date_range"]
 
-        if is_monitor:
+        condition_description = (params.get("condition_description") or "").strip()
+        is_composite = bool(is_monitor and params.get("condition_kind") == "composite")
+        if is_composite and not condition_description:
+            return {"error": "Monitor de condição composta sem condition_description extraída.", "task_id": "", "task_name": ""}
+
+        if is_composite:
+            # Condição composta (AND/OR/várias métricas): não cabe em condition_sql (um único
+            # escalar) — o task_code gerado adiante avalia tudo e sinaliza com ctx.alert().
+            base_params["condition_description"] = condition_description
+            result = schedule_monitor.invoke(base_params)
+        elif is_monitor:
             condition_sql = params.get("condition_sql") or ""
             condition_operator = params.get("condition_operator") or ""
             if not condition_sql or not condition_operator:
@@ -2732,7 +2768,11 @@ def _build_scheduling_graph(llm):
             _conn.execute("UPDATE scheduled_tasks SET status='draft' WHERE id=?", (task_id,))
             _conn.commit()
 
-        return {"task_id": task_id, "task_name": params.get("name", ""), "error": "", "is_monitor": is_monitor}
+        return {
+            "task_id": task_id, "task_name": params.get("name", ""), "error": "",
+            "is_monitor": is_monitor, "is_composite": is_composite,
+            "condition_description": condition_description if is_composite else "",
+        }
 
     # ── Node: consultar_dados ────────────────────────────────────────────────
     # Responsabilidade única: o analista identifica a skill correta, busca dados
@@ -2809,7 +2849,33 @@ def _build_scheduling_graph(llm):
 
         context = state.get("analista_context", "")
 
-        is_graphql_monitor = state.get("is_monitor") and db_config.modo_acesso() == "graphql"
+        is_composite = bool(state.get("is_composite"))
+        # Monitor composto não tem condition_sql para corrigir — só o simples precisa do conditionjson
+        is_graphql_monitor = (
+            state.get("is_monitor") and not is_composite and db_config.modo_acesso() == "graphql"
+        )
+        if is_composite:
+            monitor_instrucao = (
+                f"    MONITOR (condição composta) → esta tarefa NÃO tem condition_sql: o código "
+                f"avalia a condição COMPLETA — {state.get('condition_description', '')} — e chama "
+                f"ctx.alert(triggered, message) exatamente UMA vez por execução, com triggered = "
+                f"resultado booleano da condição inteira (E→and, OU→or, parênteses conforme o "
+                f"pedido; nunca avalie só uma das partes). message = texto curto da notificação "
+                f"com os valores observados de cada parte. NÃO use ctx.notify(). Calcule cada "
+                f"métrica separadamente, identificando cada entidade pelo ID/nome real (ex: agrupe "
+                f"por nome via expand). Se o pedido não diz como agregar, use a MESMA agregação e o "
+                f"mesmo `where` do widget equivalente do dashboard padrão (ex: SUM por site), para o "
+                f"alerta bater com o número que o usuário vê no gráfico — nunca AVG por linha. "
+                f"Se faltar dado de qualquer entidade/métrica usada, "
+                f"triggered=False (nunca use 0 como padrão — 0 pode satisfazer um '<' e gerar "
+                f"alerta falso). Retorne também uma string de status com o valor atual de cada "
+                f"métrica e se a condição foi atingida.\n"
+            )
+        else:
+            monitor_instrucao = (
+                f"    MONITOR         → NÃO use ctx.notify() (a notificação já é automática pela "
+                f"condition_sql da tarefa) — apenas retorne uma string com o valor atual\n"
+            )
 
         if db_config.modo_acesso() == "graphql":
             query_instrucao = (
@@ -2824,6 +2890,25 @@ def _build_scheduling_graph(llm):
             query_instrucao = (
                 "- Use EXATAMENTE a query SQL informada em QUERY, adaptada para `ctx.sql(f'''...''')` "
                 "(com from_date e to_date interpolados como parâmetros de data).\n"
+            )
+
+        # Interpretação: o usuário só vê "criado" — sem isto ele não sabe que escolhas o
+        # pipeline fez sozinho (métrica, agregação, filtros) e só descobre quando o alerta
+        # não bate com o que ele vê no dashboard.
+        interp_instrucao = ""
+        if state.get("is_monitor"):
+            interp_instrucao = (
+                "\n- Além do código, responda com um bloco ```interpretacao\\n...\\n``` (texto simples, "
+                f"em {_idioma_nome(db_config.get_lang())}, 4 linhas no máximo, sem markdown) com as "
+                "escolhas que VOCÊ fez e o pedido não especificava, neste formato:\n"
+                "    Métrica: <campo e tabela usados, em linguagem simples>\n"
+                "    Agregação: <SUM/AVG/... e por qual dimensão; ou 'valor mais recente'>\n"
+                "    Filtros/referência: <filtros aplicados (ex: só aprovados) e, se copiou a consulta "
+                "de um widget do dashboard padrão, o título dele>\n"
+                "    Conferência: (só se o pedido tiver 'Referência visual:' com valores E a AMOSTRA "
+                "trouxer valores comparáveis) diga se os valores lidos na referência batem com os "
+                "da consulta ou divergem — nunca invente números.\n"
+                "  Seja fiel ao código que você escreveu — não descreva o que o código não faz."
             )
 
         condition_fix_instrucao = ""
@@ -2860,6 +2945,10 @@ def _build_scheduling_graph(llm):
             f"- Escreva títulos, rótulos, cabeçalhos de tabela, título do gráfico e o texto de "
             f"fallback em {_idioma_nome(db_config.get_lang())}, o idioma desta tarefa — mesmo que a "
             f"instrução do usuário acima esteja em outro idioma.\n"
+            f"- Se o pedido contém 'Referência visual:', ela transcreve um gráfico/tela que o usuário "
+            f"viu e usa como referência: reproduza a MESMA consulta desse gráfico (mesma tabela, "
+            f"agregação, filtros e janela — procure o widget de mesmo título nas regras do sandbox/"
+            f"domínio) para que o resultado bata com o que ele viu. Nunca troque a agregação por outra.\n"
             f"- Siga o template canônico correspondente ao TIPO_SAIDA:\n"
             f"    PDF_COM_GRAFICO → salve gráfico com ctx.save_chart(fig) e gere PDF com ctx.generate_pdf().\n"
             f"        Se o pedido incluir análise/insights/analyses, siga a seção 'Relatório com análise' "
@@ -2867,18 +2956,23 @@ def _build_scheduling_graph(llm):
             f"— não escreva a análise como frases fixas. Títulos e rótulos no idioma do pedido.\n"
             f"    GRAFICO         → retorne apenas ctx.save_chart(fig)\n"
             f"    EXCEL           → retorne ctx.generate_excel(df, 'nome')\n"
-            f"    MONITOR         → NÃO use ctx.notify() (a notificação já é automática pela "
-            f"condition_sql da tarefa) — apenas retorne uma string com o valor atual\n"
+            f"{monitor_instrucao}"
             f"- NUNCA use import. pd, np, plt, date, datetime, timedelta etc já estão no namespace.\n"
             f"{condition_fix_instrucao}"
             f"- Retorne o bloco Python completo, sem texto explicativo, como ```python\\n...\\n```"
             f"{' seguido do bloco ```conditionjson```, se aplicável.' if is_graphql_monitor else '.'}"
+            f"{interp_instrucao}"
         )
 
         _raise_if_cancelled()
         response = llm.invoke([HumanMessage(content=gen_prompt)])
         resposta_txt = _extract_text_content(response)
         code = _extract_code_block(resposta_txt)
+        interpretacao = ""
+        if state.get("is_monitor"):
+            m_interp = _re_sg.search(r'```interpretacao\n(.*?)```', resposta_txt, _re_sg.DOTALL)
+            if m_interp:
+                interpretacao = m_interp.group(1).strip()
         condition_sql_fix = ""
         if is_graphql_monitor:
             fix_obj = _extract_json_block(resposta_txt, "conditionjson")
@@ -2894,7 +2988,10 @@ def _build_scheduling_graph(llm):
                 "task_code": "",
             }
 
-        return {"task_code": code, "error": "", "condition_sql_fix": condition_sql_fix}
+        return {
+            "task_code": code, "error": "", "condition_sql_fix": condition_sql_fix,
+            "interpretacao": interpretacao,
+        }
 
     # ── Node: editar_codigo ──────────────────────────────────────────────────
 
@@ -2925,6 +3022,9 @@ def _build_scheduling_graph(llm):
             f"- Faça APENAS a mudança mínima necessária\n"
             f"- Preserve toda a estrutura, variáveis, endpoints e lógica inalterada\n"
             f"- NÃO inclua import — pd, np, plt etc já estão disponíveis\n"
+            f"- Se o código já chama ctx.alert(triggered, message) (monitor de condição composta), "
+            f"MANTENHA essa chamada única e reflita qualquer mudança de limite/entidade em triggered "
+            f"E na mensagem\n"
             f"- Retorne APENAS o código Python completo (com def run), sem texto explicativo\n"
             f"- Responda com bloco ```python\\n...\\n```"
         )
@@ -3104,6 +3204,60 @@ def _build_scheduling_graph(llm):
 
     # ── Node: responder ──────────────────────────────────────────────────────
 
+    def _janela_legivel(date_range: str) -> str:
+        dr = (date_range or "").strip()
+        m = _re_sg.match(r"last_(\d+)d$", dr)
+        return {
+            "today": "somente hoje", "mtd": "do início do mês até hoje",
+            "ytd": "do início do ano até hoje",
+        }.get(dr) or (f"últimos {m.group(1)} dias" if m else (dr or "janela padrão da frequência"))
+
+    def _interpretacao_monitor(state: SchedulingState) -> str:
+        """Bloco 'Como interpretei o pedido' anexado à confirmação de um monitor.
+
+        Parte determinística (condição, frequência, janela) lida da própria tarefa salva —
+        o que o daemon de fato vai executar — mais as escolhas descritas pelo gerador de código
+        (métrica/agregação/filtros). Evita que o usuário só descubra uma premissa errada
+        (ex: janela 'hoje' vs gráfico de 3 meses) quando o alerta não bate com o dashboard.
+        """
+        try:
+            from db import get_db as _get_db
+            with _get_db() as _conn:
+                row = _conn.execute(
+                    "SELECT frequency, date_range, condition_sql, condition_operator, "
+                    "condition_threshold, condition_description FROM scheduled_tasks WHERE id=?",
+                    (state["task_id"],),
+                ).fetchone()
+        except Exception:
+            return ""
+        if not row:
+            return ""
+
+        if row["condition_description"] and not row["condition_sql"]:
+            cond = row["condition_description"]
+        elif row["condition_operator"] == "is_empty":
+            cond = "a consulta não retorna registros"
+        elif row["condition_operator"] == "is_not_empty":
+            cond = "a consulta retorna registros"
+        else:
+            th = row["condition_threshold"]
+            th_txt = "" if th is None else f" {int(th) if th == int(th) else th}"
+            cond = f"valor {row['condition_operator']}{th_txt}"
+
+        linhas = [
+            f"- Condição: {cond}",
+            f"- Frequência: {row['frequency']}",
+            f"- Janela de dados: {_janela_legivel(row['date_range'])}",
+        ]
+        for ln in (state.get("interpretacao") or "").splitlines():
+            if ln.strip():
+                linhas.append(f"- {ln.strip().lstrip('-• ').strip()}")
+        return (
+            "\n\n**Como interpretei o pedido** — se algo diferir do que você queria (métrica, "
+            f"agregação, janela), diga o que ajustar com **editar tarefa {state['task_id']}**:\n"
+            + "\n".join(linhas)
+        )
+
     def node_responder(state: SchedulingState) -> dict:
         tid = state.get("task_id", "?")
         err = state.get("error", "")
@@ -3147,6 +3301,8 @@ def _build_scheduling_graph(llm):
                 f"Tarefa **[{tid}]** criada e agendada com código determinístico.\n\n"
                 f"Para ajustar: **editar tarefa {tid}**"
             )
+            if state.get("is_monitor"):
+                msg += _interpretacao_monitor(state)
         else:
             msg = (
                 f"Tarefa **[{tid}]** atualizada com sucesso.\n\n"
@@ -3485,8 +3641,11 @@ def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
         "- Copie LITERALMENTE os tokens [chart:uuid], [excel:uuid] e [pdf:uuid] — sem eles o "
         "artefato não aparece.\n"
         "- Mantenha a tabela do analista, se houver, e os blocos **Parâmetros da análise:** e "
-        "**Dados do gráfico/relatório/planilha:** ao final, sem alterá-los (servem para "
-        "responder follow-ups).\n"
+        "**Dados do gráfico/relatório/planilha:** ao final, sem alterar números, nomes ou "
+        "ressalvas (servem para responder follow-ups). Os títulos e rótulos desses blocos "
+        "('Parâmetros da análise', 'Período', 'Tabela', 'Dados do gráfico', ...) DEVEM sair no "
+        "idioma da resposta — traduza-os se o analista os tiver escrito em outro idioma. "
+        "Nenhuma frase fixa em português pode aparecer numa resposta em outro idioma.\n"
         "- Não acrescente análise além do que o retorno sustenta.\n\n"
         "REGRA CRÍTICA: na dúvida entre A e C, escolha A. Nunca inicie um fluxo de agendamento\n"
         "a menos que o usuário tenha usado explicitamente palavras de agendamento (categoria C).\n\n"
@@ -3499,13 +3658,23 @@ def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
         "é executado automaticamente dentro do tool. NUNCA faça esse fluxo manualmente.\n"
         "NUNCA peça ao usuário nome ou descrição — infira do contexto.\n"
         "Inclua na instrução: o que a tarefa faz, a frequência e (se mencionado) o horário.\n"
+        "Se a mensagem do usuário trouxer uma IMAGEM (screenshot de um gráfico/tela do dashboard) e o "
+        "pedido se basear nela ('esse gráfico', 'esse valor', 'como na tela'), o pipeline de "
+        "agendamento NÃO vê a imagem — só o texto da instrução. Por isso termine a instrução com uma "
+        "linha 'Referência visual: ...' transcrevendo o que a imagem mostra: título exato do "
+        "gráfico/widget (inclui a janela, ex: 'last 3 months'), tipo de gráfico, métrica e unidade do "
+        "eixo, e os valores lidos por entidade (ex: JAG ≈ 100, BPL ≈ 1.080). Transcreva só o que está "
+        "legível — não invente valores. Sem imagem, não escreva essa linha.\n"
         "Para MONITOR/alerta em que o usuário NÃO disse a frequência, NÃO invente uma "
         "(nunca 'diário'): escreva 'verificar a cada 5 minutos' (padrão dos monitores).\n"
         "Exemplos de instrucao:\n"
         "  'Relatório semanal de <métrica> por <dimensão> toda segunda às 8h'\n"
         "  'Monitor a cada 5 minutos, alerta se <métrica> passar de <N>'\n"
         "  'Planilha mensal de <dados> no dia 1 de cada mês'\n\n"
-        "Após criar_tarefa_agendada retornar, repasse o resultado ao usuário.\n"
+        "Após criar_tarefa_agendada retornar, repasse o resultado ao usuário. Se o retorno tiver a\n"
+        "seção 'Como interpretei o pedido', REPASSE-A por inteiro (lista completa, no idioma da\n"
+        "resposta) — ela mostra as premissas assumidas (métrica, agregação, janela) e é como o\n"
+        "usuário corrige uma interpretação errada. Não a resuma nem a omita.\n"
         "NÃO inclua tokens [chart:uuid], [pdf:uuid] ou [excel:uuid] na sua resposta —\n"
         "os artefatos já foram enviados ao chat automaticamente.\n\n"
         "⚠️ Se criar_tarefa_agendada retornar erro ou limitação, NÃO tente contornar chamando\n"
@@ -3519,6 +3688,9 @@ def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
         "Quando o usuário pedir para editar/ajustar qualquer aspecto de uma tarefa\n"
         "(cor, escala, colunas, threshold, período, lógica), chame APENAS:\n\n"
         "  editar_tarefa_agendada(task_id='ID', modificacao='o que deve mudar')\n\n"
+        "Se a mudança se basear em uma IMAGEM anexada, termine a modificação com a linha "
+        "'Referência visual: ...' (mesma regra da criação: transcreva título, métrica e valores "
+        "legíveis) — o fluxo de edição só vê texto.\n"
         "O fluxo completo (ler código atual, aplicar mudança, testar, salvar) é automático.\n"
         "NUNCA leia, modifique ou salve o código manualmente para edição.\n"
         "NÃO inclua tokens na sua resposta após a edição — os artefatos já foram enviados.\n\n"
