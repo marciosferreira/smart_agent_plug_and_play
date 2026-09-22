@@ -1,0 +1,1 @@
+JAG: $272.00 | BPL: $1,082.33 | MAN: $113.22 — Condition TRIGGERED
