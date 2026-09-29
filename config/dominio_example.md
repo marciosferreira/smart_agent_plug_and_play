@@ -51,16 +51,16 @@
   tem um fallback genérico para essa frase (2000-01-01 até hoje) que funciona em QUALQUER
   domínio, com ou sem '## Períodos'/database.url preenchidos. Se este domínio tem uma noção
   própria de período "fechado" mais específica (ex: ano fiscal com trimestres, onde o quarter
-  em andamento não deve entrar em totais), troque por algo como calcular_periodo('ultimo
-  quarter') — só funciona bem se o domínio também documentar seu mes_inicio_fiscal em
+  em andamento não deve entrar em totais), troque por algo como periodo='ultimo
+  quarter' — só funciona bem se o domínio também documentar seu mes_inicio_fiscal em
   settings.yml (ver comentário lá). Teste com uma pergunta SEM período explícito antes de
   considerar esta seção pronta — é fácil essa regra nunca disparar durante o desenvolvimento
   e o bug só aparecer depois, em produção.
 -->
 
 Este é um sistema de <o que é este sistema, em 1 frase> — não é <domínios que NÃO são este,
-se ajudar a desambiguar>. Se o usuário NÃO mencionar período nenhum, use
-calcular_periodo('todo o período') como padrão e siga direto para consultar_analista —
+se ajudar a desambiguar>. Se o usuário NÃO mencionar período nenhum, chame
+consultar_analista direto com periodo='todo o período' como padrão —
 NUNCA pergunte o período ao usuário.
 
 ## Períodos

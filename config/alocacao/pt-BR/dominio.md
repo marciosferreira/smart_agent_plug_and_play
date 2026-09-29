@@ -234,10 +234,10 @@ Períodos e quarters — regras deste domínio:
 - Os dados são um SNAPSHOT estático: o 'agora' deles é o mês em andamento nos dados,
   que pode não coincidir com a data de hoje.
 - 'FQ1', 'FQ2' etc. são RÓTULOS LITERAIS de quarter que existem nos dados —
-  NUNCA peça ao usuário para converter em datas; passe direto para calcular_periodo
-  (ex: calcular_periodo('FQ1')) e inclua o rótulo em `detalhes` de consultar_analista.
-- Se o usuário NÃO mencionar período nenhum, use calcular_periodo('este quarter')
-  como padrão — nunca invente um mês específico.
+  NUNCA peça ao usuário para converter em datas; passe o rótulo direto em `periodo` de
+  consultar_analista (ex: periodo='FQ1') e inclua o rótulo também em `detalhes`.
+- Se o usuário NÃO mencionar período nenhum, passe periodo='este quarter' para
+  consultar_analista como padrão — nunca invente um mês específico.
 
 ## Períodos
 

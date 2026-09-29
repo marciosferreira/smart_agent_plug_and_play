@@ -56,6 +56,8 @@ from scheduler.tools import (
     get_task_code,
     test_task_code,
     save_task_code,
+    _DOMINIO_CLAUSE,
+    _freq_label,
 )
 from scheduler.widget_tools import (
     add_chart_to_dashboard,
@@ -385,6 +387,36 @@ _LABEL_TRANSLATIONS: dict[str, dict[str, str]] = {
     "✏️ Editando código da tarefa": {"en": "✏️ Editing task code", "zh": "✏️ 正在编辑任务代码"},
     # mensagem gravada no histórico quando o usuário para o run (ver _cancelled_reply)
     "⏹ Resposta interrompida pelo usuário.": {"en": "⏹ Response stopped by the user.", "zh": "⏹ 用户已停止回复。"},
+    # turno inicial "canned" do botão de agendamento via chat (ver start_task_creation_chat)
+    "Quero criar uma tarefa nova.": {"en": "I want to create a new task.", "zh": "我想创建一个新任务。"},
+    (
+        "Ótimo, vamos criar sua tarefa! Me diga o que você quer que eu faça, a frequência "
+        "(diária, semanal, mensal...) e o horário, quando for o caso."
+    ): {
+        "en": "Great, let's set up your task! Tell me what you want it to do, the frequency "
+              "(daily, weekly, monthly...) and the time, if relevant.",
+        "zh": "好的,我们来创建你的任务!告诉我你想让它做什么、频率(每天、每周、每月……)以及时间(如果需要的话)。",
+    },
+    # turno inicial "canned" do botão de edição via chat (ver start_task_edit_chat)
+    "Quero editar a tarefa {id}.": {"en": "I want to edit task {id}.", "zh": "我想编辑任务 {id}。"},
+    "Ok, entendido — você quer editar a tarefa:": {
+        "en": "Got it — you want to edit this task:", "zh": "明白了——你想编辑这个任务:",
+    },
+    "O que você gostaria de mudar nesta tarefa?": {
+        "en": "What would you like to change about this task?", "zh": "你想对这个任务做什么修改?",
+    },
+    "Não encontrei a tarefa {id} — ela pode ter sido removida. Peça para listar as tarefas atuais.": {
+        "en": "I couldn't find task {id} — it may have been removed. Ask me to list the current tasks.",
+        "zh": "找不到任务 {id}——它可能已被删除。请让我列出当前的任务。",
+    },
+    "a consulta não retorna registros": {"en": "the query returns no records", "zh": "查询没有返回记录"},
+    "a consulta retorna registros": {"en": "the query returns records", "zh": "查询返回了记录"},
+    # labels do resumo da tarefa no turno canned de edição (ver start_task_edit_chat)
+    "Id": {"en": "ID", "zh": "编号"},
+    "Título": {"en": "Title", "zh": "标题"},
+    "Condição": {"en": "Condition", "zh": "条件"},
+    "Descrição": {"en": "Description", "zh": "描述"},
+    "Frequência": {"en": "Frequency", "zh": "频率"},
 }
 
 
@@ -2048,11 +2080,11 @@ def _build_sub_agent(llm):
         "nomes das dimensões variam por domínio, use os reais observados na query)\n\n"
         "Regras deste bloco:\n"
         "- Marque com '(assumido — não pedido explicitamente)' qualquer valor que você mesmo "
-        "escolheu por o usuário não ter especificado (ex: período veio de "
-        "calcular_periodo('ultimo quarter') porque a pergunta não mencionou data, ou um filtro "
+        "escolheu por o usuário não ter especificado (ex: o marcador [PERÍODO] trouxe "
+        "frase='ultimo quarter' mas o pedido não mencionou data, ou um filtro "
         "veio de um padrão do domínio) — é isso que permite ao usuário identificar rápido se um "
         "default errado explica um resultado estranho.\n"
-        "- QUANDO O PERÍODO ASSUMIDO VEIO DE calcular_periodo('ultimo quarter') (domínio não "
+        "- QUANDO O PERÍODO ASSUMIDO FOR frase='ultimo quarter' (o pedido não "
         "mencionou data), não basta marcar '(assumido)' — explicite a REGRA por extenso na "
         "própria linha: 'último quarter FECHADO — nunca o quarter em andamento' e nomeie qual é "
         "o quarter atual (em andamento) que ficou de fora por causa dessa regra. Exemplo:\n"
@@ -2153,9 +2185,9 @@ def _build_sub_agent(llm):
             bad = meta.get("finish_message", "")
             _tlog("sub_agente", "MALFORMED_FUNCTION_CALL detectado", tentativa=bad)
             response = _AI(content=(
-                "Erro interno: o modelo tentou computar datas em código Python em vez de "
-                "chamar a tool `calcular_periodo`. Use calcular_periodo() para obter as "
-                f"datas before/after e depois chame {nome_tool_dados} normalmente.\n\n"
+                "Erro interno: o modelo tentou computar datas em código Python. Use as datas "
+                "já resolvidas no marcador [PERÍODO: from=... to=...] da mensagem e chame "
+                f"{nome_tool_dados} normalmente.\n\n"
                 f"Tentativa inválida capturada:\n```\n{bad}\n```"
             ))
 
@@ -2250,7 +2282,8 @@ def consultar_analista(detalhes: str, from_date: str = "", to_date: str = "", ti
 
     ns = _ns_get()
     ns["_current_query"] = detalhes
-    flags = f"[TIPO DE SAÍDA OBRIGATÓRIO: {tipo.upper()}]\n[PERÍODO: from={from_date} to={to_date}]"
+    frase_periodo = f" frase='{periodo.strip()}'" if periodo.strip() else ""
+    flags = f"[TIPO DE SAÍDA OBRIGATÓRIO: {tipo.upper()}]\n[PERÍODO: from={from_date} to={to_date}{frase_periodo}]"
 
     # Injeta o último script como referência para edições — sem dados, só código
     last_scripts = ns.get("_script_history", [])
@@ -3704,7 +3737,8 @@ def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
         "   Responda: 'Vou criar e fixar um painel [descrição] no dashboard. Confirma?'\n"
         "   Aguarde confirmação. Se o usuário confirmar, prossiga.\n\n"
         "2. Execute consultar_analista() com para_agendamento=True para descobrir\n"
-        "   os dados reais (query SQL, colunas, valores). Chame calcular_periodo() antes.\n"
+        "   os dados reais (query SQL, colunas, valores). Passe o período pedido em `periodo`\n"
+        "   (ex: periodo='ultimos 30 dias') — NÃO chame calcular_periodo antes.\n"
         "   ⛔ OBRIGATÓRIO — nunca escreva código sem ter observado os dados reais.\n\n"
         "3. Escreva o widget_code com base no bloco task_context do passo 2.\n"
         "   REGRAS CRÍTICAS DO WIDGET CODE (viole qualquer uma = erro garantido):\n\n"
@@ -4132,6 +4166,98 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
         with _eq_lock:
             if _event_queues.get(session_id) is event_queue:
                 _event_queues.pop(session_id, None)
+
+
+def start_task_creation_chat(session_id: str = "default", lang: str = "") -> None:
+    """Injeta no checkpoint da sessão um turno inicial "canned" (sem chamar o LLM) que
+    convida o usuário a descrever a tarefa que quer agendar.
+
+    Usado pelo botão "Agendar nova tarefa via chat" do painel de agenda: abre uma sessão
+    nova e já a deixa com a pergunta guia, sem gastar uma chamada de LLM nisso. Como
+    `messages` usa o reducer `add_messages`, update_state() anexa as duas mensagens ao
+    estado exatamente como um node normal teria feito, e o checkpointer persiste — por
+    isso elas aparecem em /chat/history e entram no histórico que o orquestrador vê no
+    próximo turno real do usuário (o que ajuda o roteamento a reconhecer a continuação
+    como pedido de agendamento, mesmo sem palavras-chave explícitas).
+    """
+    if _orchestrator_graph is None:
+        raise RuntimeError("Multi-agente não inicializado.")
+    db_config.set_lang(lang)
+    tag_session_dominio(session_id, db_config.dominio_filename())
+    _orchestrator_graph.update_state(
+        {"configurable": {"thread_id": session_id}},
+        {"messages": [
+            HumanMessage(content=_lbl("Quero criar uma tarefa nova.")),
+            AIMessage(content=_lbl(
+                "Ótimo, vamos criar sua tarefa! Me diga o que você quer que eu faça, a frequência "
+                "(diária, semanal, mensal...) e o horário, quando for o caso."
+            )),
+        ]},
+    )
+
+
+def _condicao_legivel(task: dict) -> str:
+    """Descreve em texto a condição de um monitor — mesma lógica de _interpretacao_monitor
+    (dentro de _build_scheduling_graph), reaproveitada aqui pois esse fluxo é canned/sem LLM."""
+    if task.get("condition_description") and not task.get("condition_sql"):
+        return task["condition_description"]
+    op = task.get("condition_operator")
+    if op == "is_empty":
+        return _lbl("a consulta não retorna registros")
+    if op == "is_not_empty":
+        return _lbl("a consulta retorna registros")
+    th = task.get("condition_threshold")
+    th_txt = "" if th is None else f" {int(th) if th == int(th) else th}"
+    return f"valor {op}{th_txt}"
+
+
+def start_task_edit_chat(session_id: str = "default", task_id: str = "", lang: str = "") -> None:
+    """Injeta no checkpoint da sessão um turno inicial "canned" (sem chamar o LLM) que
+    resume os campos atuais da tarefa e convida o usuário a dizer o que quer mudar.
+
+    Usado pelo botão "Editar via chat" do card de tarefa — mesma técnica de
+    start_task_creation_chat (ver docstring lá), só que aqui o "assistant" busca a
+    tarefa no banco e monta o resumo em vez de uma pergunta genérica.
+    """
+    if _orchestrator_graph is None:
+        raise RuntimeError("Multi-agente não inicializado.")
+    from db import get_db as _get_db
+
+    db_config.set_lang(lang)
+    dominio = db_config.dominio_filename()
+    with _get_db() as conn:
+        row = conn.execute(
+            f"SELECT * FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}",
+            (task_id, dominio),
+        ).fetchone()
+    tag_session_dominio(session_id, dominio)
+
+    human_text = _lbl("Quero editar a tarefa {id}.").replace("{id}", task_id)
+
+    if not row:
+        ai_text = _lbl(
+            "Não encontrei a tarefa {id} — ela pode ter sido removida. Peça para listar as tarefas atuais."
+        ).replace("{id}", task_id)
+    else:
+        task = dict(row)
+
+        def _campo(label_pt: str, valor: str) -> str:
+            return f"- **{_lbl(label_pt)}:** {valor}"
+
+        linhas = [_campo("Id", task["id"]), _campo("Título", task.get("name") or "—")]
+        if task.get("condition_sql") or task.get("condition_description"):
+            linhas.append(_campo("Condição", _condicao_legivel(task)))
+        linhas.append(_campo("Descrição", task.get("description") or "—"))
+        linhas.append(_campo("Frequência", _freq_label(task)))
+        ai_text = (
+            _lbl("Ok, entendido — você quer editar a tarefa:") + "\n\n" + "\n".join(linhas)
+            + "\n\n" + _lbl("O que você gostaria de mudar nesta tarefa?")
+        )
+
+    _orchestrator_graph.update_state(
+        {"configurable": {"thread_id": session_id}},
+        {"messages": [HumanMessage(content=human_text), AIMessage(content=ai_text)]},
+    )
 
 
 def is_multi_agent_ready() -> bool:

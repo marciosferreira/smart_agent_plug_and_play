@@ -125,8 +125,8 @@ o tipo de erro depende do status do pedido:
 
 Este é um sistema de gestão de pedidos de compra (Brazil Purchase Orders) — 'pedido' significa
 SEMPRE purchase_order. NÃO é um sistema de chão-de-fábrica nem de alocação de supply.
-Se o usuário NÃO mencionar período nenhum, use calcular_periodo('todo o período') como padrão
-e siga direto para consultar_analista — NUNCA pergunte o período ao usuário.
+Se o usuário NÃO mencionar período nenhum, chame consultar_analista direto com
+periodo='todo o período' como padrão — NUNCA pergunte o período ao usuário.
 
 ## Períodos
 
@@ -135,7 +135,7 @@ e siga direto para consultar_analista — NUNCA pergunte o período ao usuário.
 > 数据范围的解析交由 `calcular_periodo`（`agent_multi.py`）的通用回退逻辑处理——
 > "整个时段"/"完整历史"/"从头开始" 会解析为从 `2000-01-01` 到今天（覆盖任何没有 SQL
 > 的业务领域），而不是"今天"。下面编排器规则中默认使用
-> `calcular_periodo('todo o período')` 已经正确反映了这一点。此 SQL 代码块仅作为参考
+> 向 consultar_analista 传入 `periodo='todo o período'` 已经正确反映了这一点。此 SQL 代码块仅作为参考
 > 保留，以备该业务领域未来某天切换到 `modo: sql`。
 
 ### re:todo o per[ií]odo|hist[oó]rico completo|desde o in[ií]cio|整个时段|完整历史|从头开始|所有时间|全部历史

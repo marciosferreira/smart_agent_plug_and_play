@@ -1,0 +1,14 @@
+{
+  "task_id": "015",
+  "task_name": "Alerta DL cost JAG > 50",
+  "run_at": "2026-09-22T15:38:10.000727",
+  "status": "pending_send",
+  "pdf_urls": [],
+  "email": null,
+  "schedule": {
+    "frequency": "every_5m",
+    "weekday": null,
+    "day": null,
+    "time": null
+  }
+}

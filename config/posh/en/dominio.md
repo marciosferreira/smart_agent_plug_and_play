@@ -125,8 +125,8 @@ o tipo de erro depende do status do pedido:
 
 Este é um sistema de gestão de pedidos de compra (Brazil Purchase Orders) — 'pedido' significa
 SEMPRE purchase_order. NÃO é um sistema de chão-de-fábrica nem de alocação de supply.
-Se o usuário NÃO mencionar período nenhum, use calcular_periodo('todo o período') como padrão
-e siga direto para consultar_analista — NUNCA pergunte o período ao usuário.
+Se o usuário NÃO mencionar período nenhum, chame consultar_analista direto com
+periodo='todo o período' como padrão — NUNCA pergunte o período ao usuário.
 
 ## Períodos
 
@@ -135,8 +135,8 @@ e siga direto para consultar_analista — NUNCA pergunte o período ao usuário.
 > `modo: graphql`, resolving the actual data range falls back to the generic fallback in
 > `calcular_periodo` (`agent_multi.py`) — "whole period"/"full history"/"since the
 > beginning" resolves to `2000-01-01` through today (covers any domain without SQL), not
-> to "today". The orchestrator rule below (use `calcular_periodo('todo o período')` as the
-> default) already reflects this correctly. The SQL block is kept only as a reference in
+> to "today". The orchestrator rule below (pass `periodo='todo o período'` to
+> consultar_analista as the default) already reflects this correctly. The SQL block is kept only as a reference in
 > case this domain ever runs under `modo: sql`.
 
 ### re:todo o per[ií]odo|hist[oó]rico completo|desde o in[ií]cio|whole period|full history|since the beginning|all time|entire history

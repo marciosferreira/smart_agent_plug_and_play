@@ -143,8 +143,8 @@ o tipo de erro depende do status do pedido:
 
 Este é um sistema de gestão de pedidos de compra (Brazil Purchase Orders) — 'pedido' significa
 SEMPRE purchase_order. NÃO é um sistema de chão-de-fábrica nem de alocação de supply.
-Se o usuário NÃO mencionar período nenhum, use calcular_periodo('todo o período') como padrão
-e siga direto para consultar_analista — NUNCA pergunte o período ao usuário.
+Se o usuário NÃO mencionar período nenhum, chame consultar_analista direto com
+periodo='todo o período' como padrão — NUNCA pergunte o período ao usuário.
 
 ## Períodos
 
@@ -153,8 +153,8 @@ e siga direto para consultar_analista — NUNCA pergunte o período ao usuário.
 > a resolução do range real dos dados fica a cargo do fallback genérico de
 > `calcular_periodo` em `agent_multi.py` — "todo o período"/"histórico completo"/"desde o
 > início" resolve para `2000-01-01` até hoje (cobre qualquer domínio sem SQL), não para
-> "hoje". A regra do orquestrador abaixo (usar `calcular_periodo('todo o período')` como
-> padrão) já reflete isso corretamente. O bloco SQL ficou apenas como referência para o
+> "hoje". A regra do orquestrador abaixo (passar `periodo='todo o período'` para
+> consultar_analista como padrão) já reflete isso corretamente. O bloco SQL ficou apenas como referência para o
 > caso deste domínio um dia rodar em `modo: sql`.
 
 ### re:todo o per[ií]odo|hist[oó]rico completo|desde o in[ií]cio

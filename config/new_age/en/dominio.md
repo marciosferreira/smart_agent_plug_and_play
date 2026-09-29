@@ -97,11 +97,10 @@ Existem três tools de leitura de dados neste domínio — escolha pela natureza
 
 Este é um sistema de custo de mão de obra direta (DL cost) pago a fábricas contratadas (CMs)
 que fabricam os produtos — não é um sistema de pedidos de compra (isso é o domínio posh) nem
-de alocação de supply. Se o usuário NÃO mencionar período nenhum, use
-calcular_periodo('ultimo quarter') como padrão (o quarter fiscal fechado mais recente — escolha
-deliberada de granularidade, não workaround: `calcular_periodo('todo o período')` também
-funciona aqui via fallback genérico de calendário, cobrindo 2000-01-01 até hoje) e siga direto
-para consultar_analista — NUNCA pergunte o período ao usuário.
+de alocação de supply. Se o usuário NÃO mencionar período nenhum, chame
+consultar_analista direto com periodo='ultimo quarter' como padrão (o quarter fiscal fechado
+mais recente — escolha deliberada de granularidade, não workaround: periodo='todo o período'
+também funciona aqui via fallback genérico de calendário, cobrindo 2000-01-01 até hoje) — NUNCA pergunte o período ao usuário.
 
 Ao delegar a consultar_analista, avise de antemão sobre as duas limitações de dado mais
 comuns deste domínio (evita ida e volta desnecessária): (1) "Sales Model" é filtrável via

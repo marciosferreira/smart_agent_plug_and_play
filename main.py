@@ -35,7 +35,7 @@ import threading
 from sse_starlette.sse import EventSourceResponse
 from agent_multi import (
     init_multi_agent, invoke_multi_agent, is_multi_agent_ready, stream_multi_agent,
-    begin_run, cancel_run,
+    begin_run, cancel_run, start_task_creation_chat, start_task_edit_chat,
     set_chart_snapshot, ns_cleanup_loop, _extract_thinking, _extract_text_content, _TOOL_LABELS, _lbl,
 )
 from scheduler.daemon import scheduler_loop, _execute_task
@@ -214,6 +214,17 @@ class CancelRequest(BaseModel):
     session_id: str = "default"
 
 
+class StartTaskCreationRequest(BaseModel):
+    session_id: str = "default"
+    lang: str = ""
+
+
+class StartTaskEditRequest(BaseModel):
+    session_id: str = "default"
+    task_id: str
+    lang: str = ""
+
+
 class ChartSnapshotRequest(BaseModel):
     session_id: str
     snapshot: dict
@@ -236,6 +247,32 @@ async def chat(req: ChatRequest):
         )
     reply = await asyncio.to_thread(lambda: invoke_multi_agent(req.message, req.session_id, req.user_id, req.lang))
     return {"reply": _embed_charts(reply)}
+
+
+@app.post("/chat/start-task-creation")
+async def start_task_creation(req: StartTaskCreationRequest):
+    """Abre uma sessão de chat já com o turno inicial de agendamento (pergunta guia),
+    sem chamar o LLM — usado pelo botão "Agendar nova tarefa via chat" do painel de agenda."""
+    if not is_multi_agent_ready():
+        return JSONResponse(
+            status_code=503,
+            content=_error_body(503, "ServiceUnavailable", "Agente IA não configurado.", "/chat/start-task-creation"),
+        )
+    await asyncio.to_thread(start_task_creation_chat, req.session_id, req.lang)
+    return {"ok": True}
+
+
+@app.post("/chat/start-task-edit")
+async def start_task_edit(req: StartTaskEditRequest):
+    """Abre uma sessão de chat já com o resumo da tarefa e a pergunta guia de edição,
+    sem chamar o LLM — usado pelo botão "Editar via chat" do card de tarefa."""
+    if not is_multi_agent_ready():
+        return JSONResponse(
+            status_code=503,
+            content=_error_body(503, "ServiceUnavailable", "Agente IA não configurado.", "/chat/start-task-edit"),
+        )
+    await asyncio.to_thread(start_task_edit_chat, req.session_id, req.task_id, req.lang)
+    return {"ok": True}
 
 
 @app.get("/chart/{chart_id}")

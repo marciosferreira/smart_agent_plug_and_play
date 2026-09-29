@@ -102,6 +102,46 @@ export class ChatService {
     this.pushText('assistant', this.welcomeMsg());
   }
 
+  /**
+   * Abre uma sessão nova já com o turno inicial de agendamento (pergunta guia) —
+   * usado pelo botão "Agendar nova tarefa via chat" do painel de agenda. O turno é
+   * injetado no backend sem chamar o LLM (ver start_task_creation_chat em
+   * agent_multi.py), então aqui só recarregamos o histórico dessa sessão.
+   */
+  async startTaskCreationChat(): Promise<void> {
+    this.userSession.setSession(this.userSession.newSessionId());
+    this.messages.set([]);
+    try {
+      await firstValueFrom(
+        this.http.post('/chat/start-task-creation', { session_id: this.sessionId, lang: this.locale.lang() }),
+      );
+      await this.loadChatHistory();
+    } catch {
+      this.pushText('assistant', this.welcomeMsg());
+    }
+  }
+
+  /**
+   * Idem startTaskCreationChat, mas o turno inicial já traz o resumo da tarefa
+   * (buscado no banco pelo backend) — usado pelo botão "Editar via chat" do card de tarefa.
+   */
+  async startTaskEditChat(taskId: string): Promise<void> {
+    this.userSession.setSession(this.userSession.newSessionId());
+    this.messages.set([]);
+    try {
+      await firstValueFrom(
+        this.http.post('/chat/start-task-edit', {
+          session_id: this.sessionId,
+          task_id: taskId,
+          lang: this.locale.lang(),
+        }),
+      );
+      await this.loadChatHistory();
+    } catch {
+      this.pushText('assistant', this.welcomeMsg());
+    }
+  }
+
   // ── Lista de conversas ──────────────────────────────────
 
   async loadSessions(): Promise<void> {

@@ -89,6 +89,7 @@
     "resume": "▶ 恢复",
     "pauseTask": "暂停任务",
     "viewCode": "查看任务代码",
+    "editViaChat": "通过聊天编辑任务",
     "deleteTask": "移除任务",
     "frequency": "频率",
     "nextRun": "下次执行",

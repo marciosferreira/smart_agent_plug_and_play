@@ -3,6 +3,9 @@ import { AgendaService } from '../../core/services/agenda.service';
 import { TaskCodeModalService } from '../../core/services/task-code-modal.service';
 import { RunErrorModalService } from '../../core/services/run-error-modal.service';
 import { TranslateService } from '../../core/services/translate.service';
+import { ChatService } from '../../core/services/chat.service';
+import { ChatPanelStateService } from '../../core/services/chat-panel-state.service';
+import { PanelStateService } from '../../core/services/panel-state.service';
 import { TranslatePipe } from '../../core/pipes/translate.pipe';
 import { ScheduledTask } from '../../core/models/task.model';
 
@@ -36,6 +39,9 @@ export class TaskCardComponent {
   private readonly taskCode = inject(TaskCodeModalService);
   private readonly runError = inject(RunErrorModalService);
   private readonly translate = inject(TranslateService);
+  private readonly chat = inject(ChatService);
+  private readonly chatPanel = inject(ChatPanelStateService);
+  private readonly panelState = inject(PanelStateService);
 
   @Input({ required: true }) task!: ScheduledTask;
   @Input() isNew = false;
@@ -132,6 +138,12 @@ export class TaskCardComponent {
 
   openCode(): void {
     this.taskCode.openFor(this.task.id);
+  }
+
+  async editViaChat(): Promise<void> {
+    this.panelState.close();
+    await this.chat.startTaskEditChat(this.task.id);
+    this.chatPanel.open();
   }
 
   async deleteTask(): Promise<void> {

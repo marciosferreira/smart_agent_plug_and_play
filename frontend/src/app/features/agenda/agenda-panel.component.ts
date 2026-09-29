@@ -2,6 +2,7 @@ import { Component, effect, inject } from '@angular/core';
 import { AgendaService } from '../../core/services/agenda.service';
 import { PanelStateService } from '../../core/services/panel-state.service';
 import { ChatPanelStateService } from '../../core/services/chat-panel-state.service';
+import { ChatService } from '../../core/services/chat.service';
 import { TaskCardComponent } from './task-card.component';
 import { TranslatePipe } from '../../core/pipes/translate.pipe';
 
@@ -17,6 +18,7 @@ export class AgendaPanelComponent {
   readonly agenda = inject(AgendaService);
   readonly panelState = inject(PanelStateService);
   private readonly chatPanel = inject(ChatPanelStateService);
+  private readonly chat = inject(ChatService);
 
   constructor() {
     effect(() => {
@@ -27,8 +29,9 @@ export class AgendaPanelComponent {
     });
   }
 
-  newTaskViaChat(): void {
+  async newTaskViaChat(): Promise<void> {
     this.panelState.close();
+    await this.chat.startTaskCreationChat();
     this.chatPanel.open();
   }
 }
