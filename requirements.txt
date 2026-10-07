@@ -31,6 +31,7 @@ langgraph==1.0.1
 langgraph-prebuilt==1.0.1
 langgraph-sdk==0.2.15
 langgraph-checkpoint-sqlite==3.0.3
+langmem==0.0.30
 
 # Banco de dados
 SQLAlchemy==2.0.50

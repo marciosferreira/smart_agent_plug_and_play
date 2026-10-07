@@ -40,6 +40,7 @@ from agent_multi import (
 )
 from scheduler.daemon import scheduler_loop, _execute_task
 import chart_store as cs
+import memoria
 
 _CHART_RE = re.compile(r'\[chart:([a-f0-9\-]{36})\]')
 _PDF_RE   = re.compile(r'\[pdf:([a-f0-9\-]{36})\]')
@@ -183,6 +184,12 @@ async def handler_422(request: Request, exc: Exception):
         status_code=422,
         content=_error_body(422, "ValidationError", str(exc), str(request.url.path)),
     )
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    # o worker do ReflectionExecutor (memória do agente) não é daemon: sem isto o processo não sai
+    memoria.encerrar()
 
 
 @app.on_event("startup")

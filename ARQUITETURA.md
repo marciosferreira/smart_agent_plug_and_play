@@ -27,7 +27,7 @@ Este documento descreve como cada componente foi construído e por que as decis�
 | `db_config.py` | Porta única para o pack `config/` (settings, idioma, seções do `dominio.md`, períodos, painéis padrão) e para o banco de domínio em modo SQL |
 | `graphql_config.py` | Cliente GraphQL do modo `graphql`: `reportTable`, `reportAggregate`, `reportSchema` |
 | `db.py` | Banco local do app (`mfg.db`): criação e migração das tabelas de tarefas, painéis, ordem, auditoria e sessão×domínio |
-| `memoria.py` | Memória do agente: extrator em background que mantém lições do banco e preferências do usuário em `mfg.db`, e os blocos injetados nos prompts (ver [Memória do agente](#memória-do-agente--lições-do-banco-e-preferências-do-usuário)) |
+| `memoria.py` | Memória do agente: extratores do LangMem em background que mantêm lições do banco e preferências do usuário no `mfg.db`, e os blocos injetados nos prompts (ver [Memória do agente](#memória-do-agente--lições-do-banco-e-preferências-do-usuário)) |
 | `chart_store.py` | Artefatos (gráficos, PDFs, Excels) e alertas de threshold, também em `mfg.db` |
 | `scheduler/daemon.py` | Loop do agendador e execução das tarefas (retry, timeout, relatórios) |
 | `scheduler/runner.py`, `scheduler/context.py` | Sandbox do `task_code` e o objeto `ctx` injetado nele |
@@ -392,32 +392,36 @@ Os botões "Agendar nova tarefa via chat" e "Editar via chat" abrem uma sessão 
 
 ## Memória do agente — lições do banco e preferências do usuário
 
-Além do histórico de cada sessão (checkpointer), o agente aprende entre sessões. Ele **não grava nada**: depois de cada turno, um extrator separado (uma chamada de LLM em background, em `memoria.py`) lê o que aconteceu e atualiza dois documentos no `mfg.db`.
+Além do histórico de cada sessão (checkpointer), o agente aprende entre sessões. Ele **não grava nada**: depois de cada turno, extratores do **LangMem** (`create_memory_store_manager` + `ReflectionExecutor`, em `memoria.py`) leem o que aconteceu, em background, e atualizam dois documentos no `mfg.db`.
 
-| Documento | Tabela | Escopo | Quem lê | Conteúdo |
+| Documento | Namespace no store | Escopo | Quem lê | Conteúdo |
 | --- | --- | --- | --- | --- |
-| **Lições do banco** | `agent_lessons` | Por domínio (compartilhado por todos os usuários) | Sub-agente analista (quem escreve o SQL) | Regras curtas: coluna certa de uma tabela, chave de join, regra de cálculo declarada como permanente. Cada lição é `verificada` (erro técnico corrigido, ou causa declarada pelo usuário) ou `provavel` (hipótese após contestação sem causa, só com indício concreto no SQL ou no resultado) |
-| **Preferências** | `agent_preferences` | Por `user_id` e domínio | Orquestrador (redige a resposta) e analista (gráficos) | Tipos de gráfico, formato e nível de detalhe das respostas, escopo consultado com frequência (só se aparecer em 2 ou mais turnos) |
+| **Lições do banco** | `db_lessons / <dominio>` | Por domínio (compartilhado por todos os usuários) | Sub-agente analista (quem escreve o SQL) | Regras curtas: coluna certa de uma tabela, chave de join, regra de cálculo ou dado a usar declarada como permanente. Cada lição é `verificada` (erro técnico corrigido, ou regra declarada pelo usuário) ou `provavel` (hipótese após contestação sem causa, só com indício concreto no SQL ou no resultado) |
+| **Preferências** | `users / <user_id> / preferences` | Por `user_id` | Orquestrador (redige a resposta) e analista (gráficos) | Tipos de gráfico, formato e nível de detalhe das respostas, escopo consultado com frequência (só se aparecer em 2 ou mais turnos). Regras sobre qual dado usar ou como calcular são lições, não preferências |
 
 **O que nunca é gravado:** valores e resultados dos dados, cada pedido como registro, histórico de SQLs.
+
+Os documentos ficam na tabela `store` do `SqliteStore` do LangGraph, dentro do próprio `mfg.db`. Pontos ou barras em `<dominio>` e `<user_id>` viram `_` (o LangGraph não aceita ponto em namespace).
 
 ### Fluxo
 
 1. `consultar_analista` guarda o trace do analista (SQL, erros, retries, com a saída cortada em 300 caracteres) via `memoria.add_trace`. O orquestrador só vê o texto final do analista, então é a única chance de capturar isso.
-2. No fim do turno, `memoria.finalizar_turno` fecha o registro e agenda a extração com debounce por sessão (`MEMORIA_DELAY_SEGUNDOS`, padrão 30). Turnos cancelados ou com erro são descartados.
-3. A extração roda numa thread de background e envia ao LLM os turnos pendentes **mais um turno de contexto**, para que uma contestação chegue junto com a análise contestada mesmo que ela já tenha sido extraída antes.
-4. No turno seguinte, `bloco_licoes` entra no prompt do analista (depois do `dominio.md`) e `bloco_preferencias` nos prompts do orquestrador e do analista. As lições `provavel` entram rotuladas como hipótese, para confirmar antes de aplicar.
+2. No fim do turno, `memoria.finalizar_turno` fecha o registro e envia ao `ReflectionExecutor` (um por documento). O `thread_id` é o `session_id`: um turno novo substitui a extração ainda pendente da mesma sessão, e `MEMORIA_DELAY_SEGUNDOS` (padrão 30) é a espera antes de rodar. Turnos cancelados ou com erro são descartados. O extrator de lições só roda se a janela tiver trace do analista; o de preferências só roda com `user_id`.
+3. A janela enviada ao LLM tem os turnos ainda não extraídos **mais um turno de contexto** (marcado `[CONTEXTO, já processado]`), para que uma contestação chegue junto com a análise contestada mesmo que ela já tenha sido extraída antes. O ponteiro de turnos extraídos só avança quando a extração termina.
+4. No turno seguinte, `bloco_licoes` entra no prompt do analista (depois do `dominio.md`) e `bloco_preferencias` nos prompts do orquestrador e do analista. As lições `provavel` entram rotuladas como hipótese, para confirmar antes de aplicar; as preferências entram como instruções do usuário.
 
-### Proteções
+### Proteções e detalhes de integração
 
-- O extrator de lições devolve **só as mudanças** (novas, atualizar, remover), não o documento inteiro: lição que ele não cita fica intacta. Remover exige um motivo, que vai para o log. Em teste, devolver o documento inteiro fazia o Gemini apagar lições verificadas.
-- O limite de 30 lições é imposto em código, descartando primeiro as hipóteses.
-- Sem `user_id` não há preferências (só lições). Falha na extração ou na leitura nunca afeta a resposta do chat: tudo é try/except com log.
-- A leitura é feita a cada chamada de LLM (consulta pequena ao SQLite), então uma lição nova vale já na próxima mensagem.
+- **Trava das lições.** O LangMem reescreve o documento, e em teste o Gemini 3.8 Flash chegou a apagar lições verificadas ao registrar uma nova. `_ExtratorLicoes` compara o documento antes e depois: uma lição verificada que sumiu, sem nenhuma lição parecida no novo (similaridade ≥ 0,6, o que indicaria só uma reescrita), é restaurada, e o evento vai para o log. O limite de 30 lições também é imposto aqui (descarta hipóteses primeiro). Como consequência, uma lição verificada só sai do banco por intervenção manual.
+- **`thought_signature` do Gemini 3.** O motor do LangMem (trustcall) reinjeta o documento existente como uma chamada de função que o modelo nunca gerou, e o Vertex responde 400 sem `thought_signature`. A subclasse `ChatVertexAIThinkingLevel` agora usa o valor de bypass documentado pelo Google (`skip_thought_signature_validator`) para qualquer chamada de função sem assinatura real.
+- **`SqliteStore` e threads.** O store usa uma conexão única e exige autocommit (`isolation_level=None`); o manager faz buscas em paralelo e o chat lê o store em outras threads, então `_SqliteStoreSeguro` serializa as operações com um lock.
+- **Shutdown.** O worker do `ReflectionExecutor` não é daemon: o `main.py` chama `memoria.encerrar()` no evento de shutdown, senão o processo não termina.
+- Sem `user_id` não há preferências (só lições). Falha na extração ou na leitura nunca afeta a resposta do chat: tudo é try/except com log. A leitura é feita a cada chamada de LLM (consulta pequena ao SQLite), então uma lição nova vale já na próxima mensagem.
+- `MEMORIA_DEBUG=1` loga o payload enviado ao extrator, útil para entender por que algo não foi aprendido.
 
 ### Limites conhecidos
 
-- A qualidade da extração depende do modelo e foi validada com poucos cenários. Vale revisar os documentos por amostragem nas primeiras semanas (`SELECT * FROM agent_lessons`).
+- A qualidade da extração depende do modelo e foi validada com poucos cenários. Com `THINKING_LEVEL_MEMORIA=low` o extrator deixava passar uma regra declarada pelo usuário em parte das execuções (2 de 4); com `medium` (o padrão) acertou 6 de 6 no mesmo caso. Vale revisar os documentos por amostragem nas primeiras semanas.
 - O modelo trata as preferências como instruções, mas pode ignorá-las em parte.
 - As instruções do extrator têm exemplos de domínio fictícios (`producao`, `paradas`); trocar por casos reais do seu banco melhora o resultado.
 - Os turnos pendentes ficam em memória: um restart do app antes da extração perde o turno.
@@ -859,8 +863,9 @@ As variáveis podem vir do ambiente ou de um arquivo `.env` na raiz (carregado n
 | `MAX_INTERACOES` | Janela de interações recentes enviada ao modelo pelo checkpointer | `10` |
 | `SCHEDULER_TICK_SECONDS` | Intervalo do loop do daemon de agendamento | `5` |
 | `MIN_MONITOR_INTERVAL_MINUTES` | Menor intervalo aceito para um monitor (`every_Xm`) | `5` |
-| `THINKING_LEVEL_MEMORIA` | Nível de raciocínio do extrator da memória | `low` |
+| `THINKING_LEVEL_MEMORIA` | Nível de raciocínio do extrator da memória (roda em background; com `low` o extrator deixava passar regras que o usuário declarou) | `medium` |
 | `MEMORIA_ATIVA` | `0` desliga a leitura e a extração da memória do agente | `1` |
+| `MEMORIA_DEBUG` | `1` loga o payload enviado ao extrator da memória | `0` |
 | `MEMORIA_DELAY_SEGUNDOS` | Espera depois do último turno da sessão antes de extrair | `30` |
 | `DEBUG_TOOLS` | `1` loga o payload completo de cada tool call do agente | `0` |
 | `DEBUG_TOOLS_TRUNCATE` | Com `DEBUG_TOOLS=1`, trunca cada campo logado nesse nº de caracteres (0 = não trunca) | `0` |

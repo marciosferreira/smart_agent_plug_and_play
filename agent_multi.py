@@ -3931,6 +3931,12 @@ def _chat_vertex_with_thinking_level():
                     sig = next(pendentes, None)
                     if sig:
                         part.thought_signature = base64.b64decode(sig) if isinstance(sig, str) else sig
+                    else:
+                        # Chamada de função que o modelo nunca gerou (ex.: o LangMem/trustcall
+                        # reinjeta o documento de memória existente como se fosse uma tool call).
+                        # Sem assinatura o Gemini 3 responde 400; este é o valor de bypass
+                        # documentado pelo Google para chamadas injetadas.
+                        part.thought_signature = b"skip_thought_signature_validator"
             return request
 
     return ChatVertexAIThinkingLevel
@@ -4012,7 +4018,7 @@ def init_multi_agent(project: str, location: str, model_name: str, credentials=N
             location=location,
             credentials=credentials,
             temperature=0.1,
-            **(_thinking_kwargs("THINKING_LEVEL_MEMORIA") or {"thinking_level": "low"}),
+            **(_thinking_kwargs("THINKING_LEVEL_MEMORIA") or {"thinking_level": "medium"}),
         ))
 
         # Conexão persistente para o checkpointer (check_same_thread=False pois
