@@ -27,6 +27,7 @@ Este documento descreve como cada componente foi construído e por que as decis�
 | `db_config.py` | Porta única para o pack `config/` (settings, idioma, seções do `dominio.md`, períodos, painéis padrão) e para o banco de domínio em modo SQL |
 | `graphql_config.py` | Cliente GraphQL do modo `graphql`: `reportTable`, `reportAggregate`, `reportSchema` |
 | `db.py` | Banco local do app (`mfg.db`): criação e migração das tabelas de tarefas, painéis, ordem, auditoria e sessão×domínio |
+| `memoria.py` | Memória do agente: extrator em background que mantém lições do banco e preferências do usuário em `mfg.db`, e os blocos injetados nos prompts (ver [Memória do agente](#memória-do-agente--lições-do-banco-e-preferências-do-usuário)) |
 | `chart_store.py` | Artefatos (gráficos, PDFs, Excels) e alertas de threshold, também em `mfg.db` |
 | `scheduler/daemon.py` | Loop do agendador e execução das tarefas (retry, timeout, relatórios) |
 | `scheduler/runner.py`, `scheduler/context.py` | Sandbox do `task_code` e o objeto `ctx` injetado nele |
@@ -386,6 +387,40 @@ Para evitar que o contexto cresça indefinidamente (e o custo por token junto), 
 Cada sessão é marcada com o domínio ativo no primeiro turno (`session_dominio`, gravação idempotente). `/chat/history` e `/chat/sessions` escondem as sessões de outro domínio, então trocar o `settings.yml` não mistura conversas de negócios diferentes. Ao recarregar o histórico, `/chat/history` reconstrói o balão de raciocínio de cada resposta a partir das mensagens intermediárias (as que chamaram tools).
 
 Os botões "Agendar nova tarefa via chat" e "Editar via chat" abrem uma sessão nova já com um turno inicial pronto (`start_task_creation_chat` / `start_task_edit_chat`): as duas mensagens são gravadas direto no checkpoint com `update_state`, **sem chamar o LLM**, e entram no histórico que o orquestrador vê no próximo turno real — o que ajuda o roteamento a reconhecer a continuação como pedido de agendamento mesmo sem palavras-chave.
+
+---
+
+## Memória do agente — lições do banco e preferências do usuário
+
+Além do histórico de cada sessão (checkpointer), o agente aprende entre sessões. Ele **não grava nada**: depois de cada turno, um extrator separado (uma chamada de LLM em background, em `memoria.py`) lê o que aconteceu e atualiza dois documentos no `mfg.db`.
+
+| Documento | Tabela | Escopo | Quem lê | Conteúdo |
+| --- | --- | --- | --- | --- |
+| **Lições do banco** | `agent_lessons` | Por domínio (compartilhado por todos os usuários) | Sub-agente analista (quem escreve o SQL) | Regras curtas: coluna certa de uma tabela, chave de join, regra de cálculo declarada como permanente. Cada lição é `verificada` (erro técnico corrigido, ou causa declarada pelo usuário) ou `provavel` (hipótese após contestação sem causa, só com indício concreto no SQL ou no resultado) |
+| **Preferências** | `agent_preferences` | Por `user_id` e domínio | Orquestrador (redige a resposta) e analista (gráficos) | Tipos de gráfico, formato e nível de detalhe das respostas, escopo consultado com frequência (só se aparecer em 2 ou mais turnos) |
+
+**O que nunca é gravado:** valores e resultados dos dados, cada pedido como registro, histórico de SQLs.
+
+### Fluxo
+
+1. `consultar_analista` guarda o trace do analista (SQL, erros, retries, com a saída cortada em 300 caracteres) via `memoria.add_trace`. O orquestrador só vê o texto final do analista, então é a única chance de capturar isso.
+2. No fim do turno, `memoria.finalizar_turno` fecha o registro e agenda a extração com debounce por sessão (`MEMORIA_DELAY_SEGUNDOS`, padrão 30). Turnos cancelados ou com erro são descartados.
+3. A extração roda numa thread de background e envia ao LLM os turnos pendentes **mais um turno de contexto**, para que uma contestação chegue junto com a análise contestada mesmo que ela já tenha sido extraída antes.
+4. No turno seguinte, `bloco_licoes` entra no prompt do analista (depois do `dominio.md`) e `bloco_preferencias` nos prompts do orquestrador e do analista. As lições `provavel` entram rotuladas como hipótese, para confirmar antes de aplicar.
+
+### Proteções
+
+- O extrator de lições devolve **só as mudanças** (novas, atualizar, remover), não o documento inteiro: lição que ele não cita fica intacta. Remover exige um motivo, que vai para o log. Em teste, devolver o documento inteiro fazia o Gemini apagar lições verificadas.
+- O limite de 30 lições é imposto em código, descartando primeiro as hipóteses.
+- Sem `user_id` não há preferências (só lições). Falha na extração ou na leitura nunca afeta a resposta do chat: tudo é try/except com log.
+- A leitura é feita a cada chamada de LLM (consulta pequena ao SQLite), então uma lição nova vale já na próxima mensagem.
+
+### Limites conhecidos
+
+- A qualidade da extração depende do modelo e foi validada com poucos cenários. Vale revisar os documentos por amostragem nas primeiras semanas (`SELECT * FROM agent_lessons`).
+- O modelo trata as preferências como instruções, mas pode ignorá-las em parte.
+- As instruções do extrator têm exemplos de domínio fictícios (`producao`, `paradas`); trocar por casos reais do seu banco melhora o resultado.
+- Os turnos pendentes ficam em memória: um restart do app antes da extração perde o turno.
 
 ---
 
@@ -824,6 +859,9 @@ As variáveis podem vir do ambiente ou de um arquivo `.env` na raiz (carregado n
 | `MAX_INTERACOES` | Janela de interações recentes enviada ao modelo pelo checkpointer | `10` |
 | `SCHEDULER_TICK_SECONDS` | Intervalo do loop do daemon de agendamento | `5` |
 | `MIN_MONITOR_INTERVAL_MINUTES` | Menor intervalo aceito para um monitor (`every_Xm`) | `5` |
+| `THINKING_LEVEL_MEMORIA` | Nível de raciocínio do extrator da memória | `low` |
+| `MEMORIA_ATIVA` | `0` desliga a leitura e a extração da memória do agente | `1` |
+| `MEMORIA_DELAY_SEGUNDOS` | Espera depois do último turno da sessão antes de extrair | `30` |
 | `DEBUG_TOOLS` | `1` loga o payload completo de cada tool call do agente | `0` |
 | `DEBUG_TOOLS_TRUNCATE` | Com `DEBUG_TOOLS=1`, trunca cada campo logado nesse nº de caracteres (0 = não trunca) | `0` |
 

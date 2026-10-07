@@ -205,7 +205,9 @@ turnos distintos. Um filtro que ele pede uma única vez ("nessa análise, só a 
 é pedido pontual: NÃO registre.
 
 Não registre: erros de consulta ao banco (outro documento), valores dos dados, pedidos \
-pontuais que ele não repete. Atualize os campos existentes em vez de duplicar. Se ele \
+pontuais que ele não repete. Regras sobre dados e cálculos (moeda, filtros, colunas, \
+como somar ou juntar tabelas) pertencem ao documento de lições, não a este: aqui entra \
+só como o resultado é APRESENTADO. Atualize os campos existentes em vez de duplicar. Se ele \
 mudar de preferência, substitua o valor antigo; não remova preferências anteriores sem \
 que ele as contrarie.
 """
@@ -334,7 +336,8 @@ def bloco_preferencias(user_id: str, dominio: str) -> str:
         return ""
     return (
         "\n\n## Preferências deste usuário (memória de conversas anteriores)\n"
-        "Aplique quando o pedido atual não disser o contrário.\n" + "\n".join(linhas)
+        "São instruções do usuário, não sugestões: siga-as em toda resposta, a menos que o "
+        "pedido atual diga o contrário.\n" + "\n".join(linhas)
     )
 
 
