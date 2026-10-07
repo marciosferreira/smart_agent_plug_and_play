@@ -15,9 +15,9 @@ Três documentos, mantidos em background depois do turno, sem atrasar a resposta
                    usuário e por domínio. Lido só pelo orquestrador, que se dirige à pessoa.
 
 Uma ÚNICA chamada estruturada ao LLM (`_Extrator`) lê a conversa e os três documentos e devolve
-as mudanças (`MudancasMemoria`); o código as aplica (`aplicar_*`). Como o mesmo modelo decide,
-na mesma chamada, em qual documento cada declaração entra, ela nunca vai para dois (nem
-contradiz um deles). Do LangMem só usamos o `ReflectionExecutor`, que agenda a extração em
+uma lista de operações (`MudancasMemoria`: destino, ação, texto antigo e texto novo); o código as
+aplica por casamento de texto (`aplicar_operacoes`). Como o mesmo modelo decide, na mesma
+chamada, em qual documento cada declaração entra, ela nunca vai para dois (nem contradiz um deles). Do LangMem só usamos o `ReflectionExecutor`, que agenda a extração em
 background e faz o debounce por sessão.
 
 O agente não grava nada: ele só lê. Os dados e valores das consultas nunca são gravados.
@@ -68,7 +68,8 @@ _MAX_TURNOS_GUARDADOS = 6
 MAX_PREFERENCIAS = 20
 MAX_OUTROS = 10          # itens livres do perfil
 _IGUAL = 0.9             # similaridade a partir da qual duas frases contam como a mesma
-_CITADA = 0.8            # mínimo para o texto citado pelo extrator casar com um item existente
+_CITADA = 0.8            # mínimo para o texto citado pelo extrator casar (de forma aproximada) com um item
+_EMPATE = 0.05           # dois itens assim de parecidos com a citação: ambíguo, não mexe em nenhum
 
 _NS_LICOES = "db_lessons"
 
@@ -158,84 +159,87 @@ class PerfilUsuario(BaseModel):
 # ---------------------------------------------------------------------------
 # Saída e instruções do extrator
 # ---------------------------------------------------------------------------
-class CampoPerfil(BaseModel):
-    campo: Literal["nome", "cargo", "funcao_area", "atuacao", "local_atuacao", "equipe_gestor"]
-    valor: str = Field(description="Novo valor, em texto curto. Texto vazio apaga o campo.")
+Destino = Literal[
+    "licao_verificada", "licao_hipotese", "preferencia", "perfil_outros",
+    "perfil_nome", "perfil_cargo", "perfil_funcao_area", "perfil_atuacao",
+    "perfil_local_atuacao", "perfil_equipe_gestor",
+]
+
+
+class Operacao(BaseModel):
+    """Uma mudança em UM documento. O destino diz qual documento e qual lista ou campo."""
+
+    destino: Destino
+    acao: Literal["adicionar", "remover", "substituir"]
+    antigo: str = Field(
+        default="",
+        description="Texto EXATO do item existente que sai (remover ou substituir). Vazio ao adicionar.",
+    )
+    novo: str = Field(
+        default="", description="Texto do item que entra (adicionar ou substituir). Vazio ao remover."
+    )
 
 
 class MudancasMemoria(BaseModel):
-    """As mudanças a aplicar nos três documentos. Cada declaração vai para UM só documento."""
+    """As mudanças a aplicar nos três documentos. Cada declaração vai para UM só destino."""
 
     raciocinio: str = Field(
         description="Uma ou duas frases: o que você decidiu e por quê. Inclua os casos em que "
         "decidiu não registrar nada."
     )
-    licoes_verificadas_novas: list[str] = Field(
-        default_factory=list,
-        description="Lições novas confirmadas. Uma regra curta por item, sem dados nem valores.",
-    )
-    licoes_hipoteses_novas: list[str] = Field(
-        default_factory=list, description="Hipóteses novas, ainda não confirmadas."
-    )
-    licoes_promover: list[str] = Field(
-        default_factory=list,
-        description="Texto EXATO de hipóteses existentes que foram confirmadas.",
-    )
-    licoes_remover: list[str] = Field(
-        default_factory=list,
-        description="Texto EXATO de lições existentes que as mensagens contrariam. Para "
-        "reescrever uma lição, remova a antiga e acrescente a nova.",
-    )
-    preferencias_novas: list[str] = Field(default_factory=list)
-    preferencias_remover: list[str] = Field(
-        default_factory=list,
-        description="Texto EXATO de preferências existentes que o usuário trocou ou desfez.",
-    )
-    perfil_definir: list[CampoPerfil] = Field(default_factory=list)
-    perfil_outros_novos: list[str] = Field(default_factory=list)
-    perfil_outros_remover: list[str] = Field(
-        default_factory=list, description="Texto EXATO de itens existentes de `outros`."
+    operacoes: list[Operacao] = Field(
+        default_factory=list, description="Vazia quando não há nada a mudar."
     )
 
 
 INSTRUCOES = """\
 Você mantém a memória de um agente que analisa dados para os usuários. A memória tem TRÊS \
 documentos, e você recebe o conteúdo atual deles e as mensagens de um ou mais turnos. \
-Devolva SÓ as mudanças necessárias, e deixe vazias as listas em que não há nada a mudar. \
-Escreva os itens em português, uma frase curta cada. Mensagens marcadas com [CONTEXTO] já \
-foram processadas antes; use-as só para entender o que o usuário diz.
+Devolva SÓ as operações necessárias; a lista fica vazia quando não há nada a mudar. Escreva \
+os itens em português, uma frase curta cada. Mensagens marcadas com [CONTEXTO] já foram \
+processadas antes; use-as só para entender o que o usuário diz.
 
-OS TRÊS DOCUMENTOS, e quando algo entra em cada um (uma declaração entra em UM só):
+CADA OPERAÇÃO tem um destino, uma ação, o texto antigo e o texto novo:
+- acao "adicionar": preencha só "novo".
+- acao "remover": preencha só "antigo", com o texto EXATO do item existente, copiado dos \
+documentos atuais.
+- acao "substituir": preencha "antigo" (texto EXATO do item existente) e "novo". Use \
+para reescrever, atualizar ou corrigir um item. Nunca adicione o novo e deixe o antigo \
+contraditório no lugar.
+
+OS DESTINOS, e quando algo entra em cada um (uma declaração entra em UM só):
 
 1. LIÇÕES sobre o banco de dados (compartilhadas por todos os usuários). Ajudam o agente a \
-não repetir erros ao consultar. Entram:
-   a) Erro técnico verificado: a ferramenta devolveu erro (coluna ou tabela inexistente, \
-tipo errado, join inválido) e uma nova tentativa funcionou. Vai em licoes_verificadas_novas.
-   b) Regra declarada pelo usuário como permanente sobre QUAL dado, coluna, moeda ou filtro \
-usar e COMO calcular, filtrar, somar ou juntar ("sempre", "nunca", "o correto é"). Vale mesmo \
-que ele a diga com "mostre" ou "apresente". Registre-a SEMPRE que aparecer, mesmo que a regra \
-pareça específica de um cálculo: o usuário sabe do que fala. Vai em licoes_verificadas_novas.
-   c) Contestação sem causa declarada ("esse total está estranho, refaz"): registre uma \
-hipótese em licoes_hipoteses_novas SOMENTE se houver indício concreto no SQL ou no resultado \
-(join sem chave, filtro de período omitido, agregação duplicando linhas). Sem indício, nada.
-   Uma hipótese que reaparece ou que o usuário confirma vai em licoes_promover.
+não repetir erros ao consultar.
+   - licao_verificada: (a) erro técnico verificado: a ferramenta devolveu erro (coluna ou \
+tabela inexistente, tipo errado, join inválido) e uma nova tentativa funcionou; (b) regra \
+declarada pelo usuário como permanente sobre QUAL dado, coluna, moeda ou filtro usar e COMO \
+calcular, filtrar, somar ou juntar ("sempre", "nunca", "o correto é"), mesmo que ele a diga \
+com "mostre" ou "apresente". Registre-a SEMPRE que aparecer, mesmo que pareça específica de \
+um cálculo: o usuário sabe do que fala.
+   - licao_hipotese: contestação sem causa declarada ("esse total está estranho, refaz"), \
+SOMENTE se houver indício concreto no SQL ou no resultado (join sem chave, filtro de período \
+omitido, agregação duplicando linhas). Sem indício, nada. Uma hipótese confirmada passa a \
+verificada: remova-a de licao_hipotese e adicione em licao_verificada.
 
-2. PREFERÊNCIAS do usuário sobre COMO ele quer receber os resultados, e só o que ele DECLARA \
-como permanente: "prefiro", "sempre que possível", "por padrão", "daqui para frente", "a \
-partir de agora" ou equivalentes em inglês e chinês. Cor, tipo de gráfico, formato, nível de \
+2. preferencia: como o usuário quer receber os resultados, e só o que ele DECLARA como \
+permanente: "prefiro", "sempre que possível", "por padrão", "daqui para frente", "a partir \
+de agora" ou equivalentes em inglês e chinês. Cor, tipo de gráfico, formato, nível de \
 detalhe, idioma, ordenação. Nunca por inferência, repetição ou aprovação.
 
 3. PERFIL: quem é o usuário, só o que ELE afirma sobre si ("meu nome é Márcio", "sou gerente \
-de supply", "cuido dos sites JAG e BPL", "respondo ao João"). Campos de perfil_definir: \
-nome (como quer ser chamado), cargo, funcao_area (função, área ou departamento), atuacao (o \
-que faz e acompanha, em uma frase), local_atuacao (planta, site, região), equipe_gestor. O \
-que não couber nos campos vai em perfil_outros_novos. Nunca deduza nada do que ele pergunta.
+de supply", "cuido dos sites JAG e BPL", "respondo ao João"). Cada campo guarda um valor só \
+(adicionar e substituir definem o valor; remover apaga): perfil_nome (como quer ser chamado), \
+perfil_cargo, perfil_funcao_area (função, área ou departamento), perfil_atuacao (o que faz e \
+acompanha, em uma frase), perfil_local_atuacao (planta, site, região), perfil_equipe_gestor. \
+O que não couber nos campos vai em perfil_outros (lista de frases). Nunca deduza nada do que \
+ele pergunta.
 
 ONDE CADA COISA VAI, nos casos de fronteira:
 - Qual dado, moeda, coluna, filtro ou cálculo usar é LIÇÃO, nunca preferência, mesmo dito \
 como "mostre em USD". Só a FORMA de apresentar é preferência.
 - Se ficar na dúvida entre lição e preferência, é lição. Nunca registre a mesma coisa em \
-dois documentos.
+dois destinos.
 
 NÃO REGISTRE EM NENHUM:
 - Pedidos e perguntas pontuais, mesmo repetidos ou explícitos: "faça um gráfico de barras", \
@@ -247,37 +251,44 @@ religião, política, senhas ou credenciais, mesmo que o usuário os informe.
 - Contestações cuja causa você não sustenta com as mensagens.
 
 CONSOLIDAÇÃO:
-- Compare com o conteúdo atual antes de acrescentar: se já existe a mesma coisa, não repita.
-- Para trocar ou reescrever um item (mudou de cor, de cargo, de regra), cite o texto EXATO do \
-item antigo em *_remover e acrescente o novo. Para mudar um campo do perfil, use \
-perfil_definir (texto vazio apaga o campo).
-- Remova um item só se as mensagens trouxerem evidência que o contraria ou o usuário pedir \
-para esquecer ("esqueça meu nome", "não sou mais gerente"). Nunca para abrir espaço, nem \
-porque ele não apareceu neste turno.
+- Compare com o conteúdo atual antes de adicionar: se já existe a mesma coisa, não repita.
+- Para trocar ou reescrever um item (mudou de cor, de cargo, de regra), use "substituir" com \
+o texto EXATO do item antigo.
+- Remova ou substitua um item só se as mensagens trouxerem evidência que o contraria ou o \
+usuário pedir para esquecer ("esqueça meu nome", "não sou mais gerente"). Nunca para abrir \
+espaço, nem porque ele não apareceu neste turno.
 - Os documentos atuais NÃO indicam que a memória está completa: avalie as mensagens contra \
 os critérios acima como se os documentos estivessem vazios, e só então compare.
 - Limites: 30 lições no total, 20 preferências, 10 itens em perfil_outros.
 
 EXEMPLOS (nomes fictícios; use os reais das mensagens):
 - Erro: o agente consulta a coluna "data" de producao, a ferramenta diz que não existe e \
-refaz com "dt_producao". Lição verificada: "Na tabela producao, a coluna de data é \
-dt_producao (não data)".
-- "Sempre desconsidere as paradas programadas no OEE": lição verificada "Ao calcular OEE, \
-desconsiderar paradas programadas".
-- "Sempre mostre o custo em USD, nunca somando moedas locais": LIÇÃO verificada "Apresentar \
-e calcular o custo apenas em USD; nunca somar moedas locais". Não é preferência.
-- "Prefiro sempre gráficos na cor laranja": preferência "Gráficos na cor laranja".
-- "Faça um gráfico de barras" ou "Agora quero em linha": pedido pontual. Nada.
+refaz com "dt_producao". Operação: destino licao_verificada, acao adicionar, novo "Na tabela \
+producao, a coluna de data é dt_producao (não data)".
+- "Sempre desconsidere as paradas programadas no OEE": licao_verificada, adicionar, novo "Ao \
+calcular OEE, desconsiderar paradas programadas".
+- "Sempre mostre o custo em USD, nunca somando moedas locais": LIÇÃO, não preferência. \
+licao_verificada, adicionar, novo "Apresentar e calcular o custo apenas em USD; nunca somar \
+moedas locais".
+- "Prefiro sempre gráficos na cor laranja": preferencia, adicionar, novo "Gráficos na cor \
+laranja".
+- "Faça um gráfico de barras" ou "Agora quero em linha": pedido pontual. operacoes vazia.
 - "Na verdade prefiro gráficos de linha", com "Usar gráficos de barras" já gravada: \
-preferencias_remover ["Usar gráficos de barras"] e preferencias_novas ["Usar gráficos de linha"].
-- "Me chame de Márcio, sou gerente de supply": perfil_definir nome=Márcio, cargo=Gerente de \
-supply.
-- "Toda segunda apresento esses números ao diretor": perfil_outros_novos \
-["Apresenta os números ao diretor toda segunda-feira"].
-- "Nessa análise, considere só os turnos completos": pontual. Nada.
+preferencia, substituir, antigo "Usar gráficos de barras", novo "Usar gráficos de linha".
+- "Agora pode mostrar também em BRL, a regra de só USD não vale mais", com a regra de USD \
+gravada: licao_verificada, substituir, antigo (texto exato da regra de USD), novo "Os custos \
+podem ser apresentados também em BRL, além de USD".
+- "Me chame de Márcio, sou gerente de supply": perfil_nome, adicionar, novo "Márcio"; \
+perfil_cargo, adicionar, novo "Gerente de supply".
+- "O meu nome é Marcio, não Marico", com "Marico" gravado: perfil_nome, substituir, novo \
+"Marcio".
+- "Toda segunda apresento esses números ao diretor": perfil_outros, adicionar, novo \
+"Apresenta os números ao diretor toda segunda-feira".
+- "Esqueça meu cargo": perfil_cargo, remover.
+- "Nessa análise, considere só os turnos completos": pontual. operacoes vazia.
 - "Esse total está estranho, refaz", com o SQL juntando producao e paradas só por linha_id: \
-hipótese "Ao juntar producao e paradas, incluir a data na chave do join".
-- "Não gostei, faz de novo", sem indício no SQL: nada.
+licao_hipotese, adicionar, novo "Ao juntar producao e paradas, incluir a data na chave do join".
+- "Não gostei, faz de novo", sem indício no SQL: operacoes vazia.
 """
 
 
@@ -432,88 +443,159 @@ def bloco_perfil(user_id: str, dominio: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Aplicação das mudanças propostas pelo extrator
+# Aplicação das operações propostas pelo extrator
 # ---------------------------------------------------------------------------
-def _norm(txt: str) -> str:
-    return " ".join(txt.lower().split())
+_DESTINOS_LISTA = {
+    "licao_verificada": ("licoes", "verificadas"),
+    "licao_hipotese": ("licoes", "hipoteses"),
+    "preferencia": ("preferencias", "preferencias"),
+    "perfil_outros": ("perfil", "outros"),
+}
+_DESTINOS_CAMPO = {
+    "perfil_nome": "nome", "perfil_cargo": "cargo", "perfil_funcao_area": "funcao_area",
+    "perfil_atuacao": "atuacao", "perfil_local_atuacao": "local_atuacao",
+    "perfil_equipe_gestor": "equipe_gestor",
+}
+# Se o extrator puser a mesma frase em dois destinos, fica o primeiro desta lista: quem diz qual
+# dado ou cálculo usar é lição, e só a forma de apresentar é preferência.
+_PRIORIDADE = [
+    "licao_verificada", "licao_hipotese", *_DESTINOS_CAMPO, "perfil_outros", "preferencia",
+]
 
 
-def _achar(texto: str, itens: list[str], minimo: float) -> int | None:
-    """Índice do item mais parecido com `texto`, se a similaridade chegar a `minimo`."""
-    melhor, idx = 0.0, None
+def _chave(txt: str) -> str:
+    return " ".join(txt.lower().split()).strip(" .;:,!")
+
+
+def _semelhanca(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(None, _chave(a), _chave(b)).ratio()
+
+
+def _parecido_com_algum(texto: str, itens: list[str]) -> bool:
+    return any(_semelhanca(texto, x) >= _IGUAL for x in itens)
+
+
+def _casar(texto: str, itens: list[str]) -> int | None:
+    """Índice do item que o extrator citou: o texto igual (sem contar maiúsculas, espaços e
+    pontuação final) ou, na falta dele, o mais parecido. Com dois candidatos quase empatados a
+    citação é ambígua e nada é alterado, para não mexer no item errado."""
+    if not texto.strip():
+        return None
+    alvo = _chave(texto)
     for i, item in enumerate(itens):
-        r = difflib.SequenceMatcher(None, _norm(texto), _norm(item)).ratio()
-        if r > melhor:
-            melhor, idx = r, i
-    return idx if melhor >= minimo else None
+        if _chave(item) == alvo:
+            return i
+    pontuados = sorted(((_semelhanca(texto, x), i) for i, x in enumerate(itens)), reverse=True)
+    if not pontuados or pontuados[0][0] < _CITADA:
+        return None
+    if len(pontuados) > 1 and pontuados[1][0] >= _CITADA and pontuados[0][0] - pontuados[1][0] < _EMPATE:
+        logger.warning("[memoria] citação ambígua, nada foi alterado: %s", texto)
+        return None
+    return pontuados[0][1]
 
 
-def _retirar(itens: list[str], citados: list[str]) -> list[str]:
-    restantes = list(itens)
-    for c in citados:
-        i = _achar(c, restantes, _CITADA)
+def _sem_duplicata_entre_destinos(ops: list[Operacao]) -> list[Operacao]:
+    """A mesma frase em dois destinos diferentes fica só no de maior prioridade."""
+    ordem = {d: i for i, d in enumerate(_PRIORIDADE)}
+    mantidas: list[Operacao] = []
+    for op in ops:
+        if op.acao != "remover" and op.novo.strip():
+            outra = next(
+                (m for m in mantidas
+                 if m.acao != "remover" and m.destino != op.destino and m.novo.strip()
+                 and _semelhanca(m.novo, op.novo) >= _IGUAL),
+                None,
+            )
+            if outra is not None:
+                perdedora, vencedora = (op, outra) if ordem[outra.destino] <= ordem[op.destino] else (outra, op)
+                logger.warning("[memoria] mesma frase em dois destinos (%s e %s); fica só em %s: %s",
+                               outra.destino, op.destino, vencedora.destino, op.novo)
+                if perdedora is op:
+                    continue
+                mantidas.remove(outra)
+        mantidas.append(op)
+    return mantidas
+
+
+def _itens(valor) -> list[str]:
+    return [x.strip() for x in (valor or []) if isinstance(x, str) and x.strip()]
+
+
+def _aplicar_em_lista(docs: dict, op: Operacao) -> None:
+    doc, chave = _DESTINOS_LISTA[op.destino]
+    itens = docs[doc][chave]
+    antigo, novo = op.antigo.strip(), op.novo.strip()
+    if op.acao == "remover":
+        i = _casar(antigo or novo, itens)
         if i is None:
-            logger.info("[memoria] item a remover não encontrado: %s", c)
-        else:
-            logger.info("[memoria] item retirado: %s", restantes[i])
-            restantes.pop(i)
-    return restantes
-
-
-def _acrescentar(itens: list[str], novos: list[str], limite: int) -> list[str]:
-    resultado = list(itens)
-    for n in novos:
-        n = (n or "").strip()
-        if n and _achar(n, resultado, _IGUAL) is None:
-            resultado.append(n)
-    return resultado[-limite:]  # passou do limite: descarta os mais antigos
-
-
-def aplicar_licoes(doc: dict, m: MudancasMemoria) -> dict:
-    """Aplica as mudanças de lições. Retirar uma lição verificada vai para o log como aviso."""
-    verificadas = [x for x in (doc.get("verificadas") or []) if isinstance(x, str) and x.strip()]
-    hipoteses = [x for x in (doc.get("hipoteses") or []) if isinstance(x, str) and x.strip()]
-    for c in m.licoes_remover:
-        i, j = _achar(c, verificadas, _CITADA), _achar(c, hipoteses, _CITADA)
+            logger.info("[memoria] item a remover não encontrado em %s: %s", op.destino, antigo or novo)
+            return
+        (logger.warning if op.destino == "licao_verificada" else logger.info)(
+            "[memoria] item retirado de %s: %s", op.destino, itens[i])
+        itens.pop(i)
+        return
+    if not novo:
+        logger.info("[memoria] operação %s sem texto novo em %s; ignorada", op.acao, op.destino)
+        return
+    if op.acao == "substituir" and antigo:
+        i = _casar(antigo, itens)
         if i is not None:
-            logger.warning("[memoria] lição verificada retirada: %s", verificadas[i])
-            verificadas.pop(i)
-        elif j is not None:
-            logger.info("[memoria] hipótese retirada: %s", hipoteses[j])
-            hipoteses.pop(j)
-        else:
-            logger.info("[memoria] lição a remover não encontrada: %s", c)
-    for c in m.licoes_promover:
-        j = _achar(c, hipoteses, _CITADA)
+            duplicata = any(k != i and _semelhanca(x, novo) >= _IGUAL for k, x in enumerate(itens))
+            if duplicata:  # o novo já existe em outro item: só retira o antigo
+                itens.pop(i)
+            else:
+                itens[i] = novo
+            return
+        logger.info("[memoria] item a substituir não encontrado em %s (tratado como adição): %s",
+                    op.destino, antigo)
+    if op.destino == "licao_hipotese" and _parecido_com_algum(novo, docs["licoes"]["verificadas"]):
+        return  # já é uma regra confirmada
+    if op.destino == "licao_verificada":  # a hipótese virou regra confirmada
+        hipoteses = docs["licoes"]["hipoteses"]
+        j = next((k for k, x in enumerate(hipoteses) if _semelhanca(x, novo) >= _IGUAL), None)
         if j is not None:
-            verificadas = _acrescentar(verificadas, [hipoteses.pop(j)], MAX_LICOES)
-    for n in m.licoes_verificadas_novas:
-        j = _achar(n, hipoteses, _IGUAL)
-        if j is not None:  # a hipótese virou regra confirmada
             hipoteses.pop(j)
-        verificadas = _acrescentar(verificadas, [n], MAX_LICOES)
-    for n in m.licoes_hipoteses_novas:
-        if _achar(n, verificadas + hipoteses, _IGUAL) is None:
-            hipoteses = _acrescentar(hipoteses, [n], MAX_LICOES)
-    while len(verificadas) + len(hipoteses) > MAX_LICOES:  # descarta hipóteses primeiro
-        (hipoteses or verificadas).pop(0)
-    return {"verificadas": verificadas, "hipoteses": hipoteses}
+    if not _parecido_com_algum(novo, itens):
+        itens.append(novo)
 
 
-def aplicar_preferencias(doc: dict, m: MudancasMemoria) -> dict:
-    itens = [x for x in (doc.get("preferencias") or []) if isinstance(x, str) and x.strip()]
-    itens = _retirar(itens, m.preferencias_remover)
-    return {"preferencias": _acrescentar(itens, m.preferencias_novas, MAX_PREFERENCIAS)}
+def _aplicar_em_campo(perfil: dict, op: Operacao) -> None:
+    campo = _DESTINOS_CAMPO[op.destino]
+    if op.acao == "remover":
+        perfil[campo] = None
+    elif op.novo.strip():
+        perfil[campo] = op.novo.strip()
+    else:
+        logger.info("[memoria] operação %s sem valor em %s; ignorada", op.acao, op.destino)
 
 
-def aplicar_perfil(doc: dict, m: MudancasMemoria) -> dict:
-    novo = {c: (doc.get(c) or None) for c in PerfilUsuario.model_fields if c != "outros"}
-    for d in m.perfil_definir:
-        novo[d.campo] = d.valor.strip() or None
-    outros = [x for x in (doc.get("outros") or []) if isinstance(x, str) and x.strip()]
-    outros = _retirar(outros, m.perfil_outros_remover)
-    novo["outros"] = _acrescentar(outros, m.perfil_outros_novos, MAX_OUTROS)
-    return novo
+def aplicar_operacoes(
+    ops: list[Operacao], lic: dict, pref: dict, perfil: dict, tem_usuario: bool = True
+) -> tuple[dict, dict, dict]:
+    """Aplica as operações aos três documentos e devolve os novos conteúdos (os de entrada
+    não são alterados). Sem usuário identificado só as lições mudam. Impõe os limites: 30
+    lições (descarta hipóteses primeiro), 20 preferências e 10 itens livres no perfil."""
+    docs = {
+        "licoes": {"verificadas": _itens(lic.get("verificadas")), "hipoteses": _itens(lic.get("hipoteses"))},
+        "preferencias": {"preferencias": _itens(pref.get("preferencias"))},
+        "perfil": {
+            **{c: (perfil.get(c) or None) for c in PerfilUsuario.model_fields if c != "outros"},
+            "outros": _itens(perfil.get("outros")),
+        },
+    }
+    for op in _sem_duplicata_entre_destinos(ops):
+        if not tem_usuario and (op.destino == "preferencia" or op.destino.startswith("perfil_")):
+            continue
+        if op.destino in _DESTINOS_CAMPO:
+            _aplicar_em_campo(docs["perfil"], op)
+        else:
+            _aplicar_em_lista(docs, op)
+    v, h = docs["licoes"]["verificadas"], docs["licoes"]["hipoteses"]
+    while len(v) + len(h) > MAX_LICOES:
+        (h or v).pop(0)
+    docs["preferencias"]["preferencias"] = docs["preferencias"]["preferencias"][-MAX_PREFERENCIAS:]
+    docs["perfil"]["outros"] = docs["perfil"]["outros"][-MAX_OUTROS:]
+    return docs["licoes"], docs["preferencias"], docs["perfil"]
 
 
 def _gravar(ns: tuple[str, ...], kind: str, antes: dict, depois: dict) -> bool:
@@ -610,14 +692,26 @@ class _Extrator:
             raise ValueError(f"o modelo não devolveu as mudanças estruturadas: {_cortar(repr(m), 200)}")
         logger.info("[memoria] extrator: %s", _cortar(m.raciocinio, 600))
 
-        _gravar(ns_lic, "LicoesDoBanco", _normalizar_licoes(lic), aplicar_licoes(lic, m))
+        lic_novo, pref_novo, perfil_novo = aplicar_operacoes(m.operacoes, lic, pref, perfil, bool(user_id))
+        _gravar(ns_lic, "LicoesDoBanco", _normalizar_licoes(lic), lic_novo)
         if user_id:
-            _gravar(ns_pref, "PreferenciasUsuario", pref, aplicar_preferencias(pref, m))
-            _gravar(ns_perf, "PerfilUsuario", perfil, aplicar_perfil(perfil, m))
+            _gravar(ns_pref, "PreferenciasUsuario", _normalizar_prefs(pref), pref_novo)
+            _gravar(ns_perf, "PerfilUsuario", _normalizar_perfil(perfil), perfil_novo)
 
 
 def _normalizar_licoes(doc: dict) -> dict:
-    return {"verificadas": list(doc.get("verificadas") or []), "hipoteses": list(doc.get("hipoteses") or [])}
+    return {"verificadas": _itens(doc.get("verificadas")), "hipoteses": _itens(doc.get("hipoteses"))}
+
+
+def _normalizar_prefs(doc: dict) -> dict:
+    return {"preferencias": _itens(doc.get("preferencias"))}
+
+
+def _normalizar_perfil(doc: dict) -> dict:
+    return {
+        **{c: (doc.get(c) or None) for c in PerfilUsuario.model_fields if c != "outros"},
+        "outros": _itens(doc.get("outros")),
+    }
 
 
 # ---------------------------------------------------------------------------

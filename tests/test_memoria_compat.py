@@ -17,7 +17,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 import agent_multi
 import memoria
-from memoria import CampoPerfil, MAX_LICOES, MudancasMemoria, aplicar_licoes, aplicar_perfil, aplicar_preferencias
+from memoria import MAX_LICOES, MudancasMemoria, Operacao, aplicar_operacoes
 
 # Versões em que a memória foi validada com o Vertex de verdade.
 VERSOES_VALIDADAS = {
@@ -72,77 +72,133 @@ class ThoughtSignature(unittest.TestCase):
         self.assertEqual(self._assinaturas(self._par(sigs)), [b"assinatura-real"])
 
 
-def _m(**campos):
-    return MudancasMemoria(raciocinio="teste", **campos)
+def _op(destino, acao, antigo="", novo=""):
+    return Operacao(destino=destino, acao=acao, antigo=antigo, novo=novo)
 
 
-class MesclaLicoes(unittest.TestCase):
-    def test_acrescenta_verificada_nova(self):
-        doc = aplicar_licoes({}, _m(licoes_verificadas_novas=["Usar USD"]))
-        self.assertEqual(doc, {"verificadas": ["Usar USD"], "hipoteses": []})
+def _aplica(ops, lic=None, pref=None, perfil=None, tem_usuario=True):
+    return aplicar_operacoes(ops, lic or {}, pref or {}, perfil or {}, tem_usuario)
+
+
+class OperacoesDeLicoes(unittest.TestCase):
+    def test_adiciona_verificada(self):
+        lic, _, _ = _aplica([_op("licao_verificada", "adicionar", novo="Usar USD")])
+        self.assertEqual(lic, {"verificadas": ["Usar USD"], "hipoteses": []})
 
     def test_nao_duplica_frase_igual(self):
-        doc = {"verificadas": ["Usar a coluna dt_producao para data"], "hipoteses": []}
-        novo = aplicar_licoes(doc, _m(licoes_verificadas_novas=["usar a coluna dt_producao para data."]))
-        self.assertEqual(novo["verificadas"], doc["verificadas"])
+        doc = {"verificadas": ["Usar a coluna dt_producao para data"]}
+        lic, _, _ = _aplica([_op("licao_verificada", "adicionar", novo="usar a coluna dt_producao para data.")], doc)
+        self.assertEqual(lic["verificadas"], doc["verificadas"])
 
     def test_nao_confunde_regras_parecidas_mas_diferentes(self):
-        doc = {"verificadas": ["Na tabela producao, a coluna de data é dt_producao"], "hipoteses": []}
-        novo = aplicar_licoes(doc, _m(licoes_verificadas_novas=["Na tabela paradas, a coluna de data é dt_parada"]))
-        self.assertEqual(len(novo["verificadas"]), 2)
+        doc = {"verificadas": ["Na tabela producao, a coluna de data é dt_producao"]}
+        lic, _, _ = _aplica([_op("licao_verificada", "adicionar",
+                                 novo="Na tabela paradas, a coluna de data é dt_parada")], doc)
+        self.assertEqual(len(lic["verificadas"]), 2)
 
-    def test_reescrever_remove_a_antiga_e_acrescenta_a_nova(self):
-        doc = {"verificadas": ["Usar apenas USD nos custos"], "hipoteses": []}
-        novo = aplicar_licoes(doc, _m(licoes_remover=["Usar apenas USD nos custos"],
-                                      licoes_verificadas_novas=["Custos podem ser apresentados em USD ou BRL"]))
-        self.assertEqual(novo["verificadas"], ["Custos podem ser apresentados em USD ou BRL"])
+    def test_substituir_troca_no_mesmo_lugar(self):
+        doc = {"verificadas": ["Regra A", "Usar apenas USD nos custos", "Regra C"]}
+        lic, _, _ = _aplica([_op("licao_verificada", "substituir", "Usar apenas USD nos custos",
+                                 "Custos podem ser apresentados em USD ou BRL")], doc)
+        self.assertEqual(lic["verificadas"], ["Regra A", "Custos podem ser apresentados em USD ou BRL", "Regra C"])
+
+    def test_substituir_aceita_citacao_com_pequena_diferenca(self):
+        doc = {"verificadas": ["Usar apenas USD nos custos, nunca somando moedas locais."]}
+        lic, _, _ = _aplica([_op("licao_verificada", "substituir",
+                                 "usar apenas USD nos custos, nunca somando moedas locais",
+                                 "Custos em USD ou BRL")], doc)
+        self.assertEqual(lic["verificadas"], ["Custos em USD ou BRL"])
+
+    def test_substituir_item_inexistente_vira_adicao(self):
+        doc = {"verificadas": ["Usar USD"]}
+        lic, _, _ = _aplica([_op("licao_verificada", "substituir", "algo que nunca existiu", "Regra nova")], doc)
+        self.assertEqual(lic["verificadas"], ["Usar USD", "Regra nova"])
 
     def test_remover_item_inexistente_nao_apaga_nada(self):
         doc = {"verificadas": ["Usar USD"], "hipoteses": ["Incluir a data no join"]}
-        self.assertEqual(aplicar_licoes(doc, _m(licoes_remover=["algo que nunca existiu"])), doc)
+        lic, _, _ = _aplica([_op("licao_verificada", "remover", "algo que nunca existiu")], doc)
+        self.assertEqual(lic, doc)
 
-    def test_promover_hipotese(self):
+    def test_citacao_ambigua_nao_altera_nada(self):
+        doc = {"verificadas": ["Na tabela producao a coluna de data é dt_prod_a",
+                               "Na tabela producao a coluna de data é dt_prod_b"]}
+        lic, _, _ = _aplica([_op("licao_verificada", "remover", "Na tabela producao a coluna de data é dt_prod")], doc)
+        self.assertEqual(lic["verificadas"], doc["verificadas"])
+
+    def test_casamento_exato_vence_o_aproximado(self):
+        doc = {"verificadas": ["Na tabela producao a coluna de data é dt_prod_a",
+                               "Na tabela producao a coluna de data é dt_prod_b"]}
+        lic, _, _ = _aplica([_op("licao_verificada", "remover", "Na tabela producao a coluna de data é dt_prod_b")], doc)
+        self.assertEqual(lic["verificadas"], ["Na tabela producao a coluna de data é dt_prod_a"])
+
+    def test_promover_hipotese_e_remover_mais_adicionar(self):
         doc = {"verificadas": [], "hipoteses": ["Incluir a data no join"]}
-        novo = aplicar_licoes(doc, _m(licoes_promover=["Incluir a data no join"]))
-        self.assertEqual(novo, {"verificadas": ["Incluir a data no join"], "hipoteses": []})
+        lic, _, _ = _aplica([_op("licao_hipotese", "remover", "Incluir a data no join"),
+                             _op("licao_verificada", "adicionar", novo="Incluir a data no join")], doc)
+        self.assertEqual(lic, {"verificadas": ["Incluir a data no join"], "hipoteses": []})
 
     def test_verificada_nova_substitui_a_hipotese_igual(self):
         doc = {"verificadas": [], "hipoteses": ["Incluir a data no join"]}
-        novo = aplicar_licoes(doc, _m(licoes_verificadas_novas=["Incluir a data no join"]))
-        self.assertEqual(novo, {"verificadas": ["Incluir a data no join"], "hipoteses": []})
+        lic, _, _ = _aplica([_op("licao_verificada", "adicionar", novo="Incluir a data no join")], doc)
+        self.assertEqual(lic, {"verificadas": ["Incluir a data no join"], "hipoteses": []})
 
     def test_hipotese_igual_a_verificada_e_ignorada(self):
         doc = {"verificadas": ["Usar USD"], "hipoteses": []}
-        self.assertEqual(aplicar_licoes(doc, _m(licoes_hipoteses_novas=["Usar USD"])), doc)
+        lic, _, _ = _aplica([_op("licao_hipotese", "adicionar", novo="Usar USD")], doc)
+        self.assertEqual(lic, doc)
 
     def test_limite_descarta_hipoteses_primeiro(self):
-        verificadas = [f"regra verificada numero {i} " + "x" * i * 3 for i in range(MAX_LICOES)]
-        novo = aplicar_licoes({"verificadas": verificadas, "hipoteses": []},
-                              _m(licoes_hipoteses_novas=["uma hipotese a mais, bem diferente"]))
-        self.assertEqual(len(novo["verificadas"]) + len(novo["hipoteses"]), MAX_LICOES)
-        self.assertEqual(novo["verificadas"], verificadas)
-        self.assertEqual(novo["hipoteses"], [])
+        verificadas = [(f"regra verificada numero {i} " + "x" * i * 3).strip() for i in range(MAX_LICOES)]
+        lic, _, _ = _aplica([_op("licao_hipotese", "adicionar", novo="uma hipotese a mais, bem diferente")],
+                            {"verificadas": verificadas})
+        self.assertEqual(len(lic["verificadas"]) + len(lic["hipoteses"]), MAX_LICOES)
+        self.assertEqual(lic["verificadas"], verificadas)
+        self.assertEqual(lic["hipoteses"], [])
 
 
-class MesclaPreferenciasEPerfil(unittest.TestCase):
+class OperacoesDePreferenciasEPerfil(unittest.TestCase):
     def test_trocar_preferencia_por_assunto(self):
         doc = {"preferencias": ["Gráficos na cor laranja", "Respostas curtas"]}
-        novo = aplicar_preferencias(doc, _m(preferencias_remover=["Gráficos na cor laranja"],
-                                            preferencias_novas=["Gráficos na cor rosa"]))
-        self.assertEqual(novo["preferencias"], ["Respostas curtas", "Gráficos na cor rosa"])
+        _, pref, _ = _aplica([_op("preferencia", "substituir", "Gráficos na cor laranja",
+                                  "Gráficos na cor rosa")], pref=doc)
+        self.assertEqual(pref["preferencias"], ["Gráficos na cor rosa", "Respostas curtas"])
 
     def test_perfil_define_corrige_e_apaga_campos(self):
         doc = {"nome": "Marico", "cargo": "Cientista de dados", "outros": ["Apresenta ao diretor"]}
-        novo = aplicar_perfil(doc, _m(perfil_definir=[CampoPerfil(campo="nome", valor="Marcio"),
-                                                       CampoPerfil(campo="cargo", valor="")]))
-        self.assertEqual(novo["nome"], "Marcio")
-        self.assertIsNone(novo["cargo"])
-        self.assertEqual(novo["outros"], ["Apresenta ao diretor"])
+        _, _, perfil = _aplica([_op("perfil_nome", "substituir", novo="Marcio"),
+                                _op("perfil_cargo", "remover")], perfil=doc)
+        self.assertEqual(perfil["nome"], "Marcio")
+        self.assertIsNone(perfil["cargo"])
+        self.assertEqual(perfil["outros"], ["Apresenta ao diretor"])
 
     def test_perfil_outros_sem_duplicar(self):
         doc = {"outros": ["Apresenta ao diretor toda segunda"]}
-        novo = aplicar_perfil(doc, _m(perfil_outros_novos=["Apresenta ao diretor toda segunda."]))
-        self.assertEqual(novo["outros"], doc["outros"])
+        _, _, perfil = _aplica([_op("perfil_outros", "adicionar", novo="Apresenta ao diretor toda segunda.")],
+                               perfil=doc)
+        self.assertEqual(perfil["outros"], doc["outros"])
+
+    def test_sem_usuario_so_as_licoes_mudam(self):
+        lic, pref, perfil = _aplica([_op("licao_verificada", "adicionar", novo="Usar USD"),
+                                     _op("preferencia", "adicionar", novo="Gráficos azuis"),
+                                     _op("perfil_nome", "adicionar", novo="Ana")], tem_usuario=False)
+        self.assertEqual(lic["verificadas"], ["Usar USD"])
+        self.assertEqual(pref["preferencias"], [])
+        self.assertIsNone(perfil["nome"])
+
+
+class DuplicataEntreDestinos(unittest.TestCase):
+    def test_mesma_frase_em_licao_e_preferencia_fica_so_na_licao(self):
+        frase = "Apresentar os custos apenas em USD, nunca somando moedas locais"
+        lic, pref, _ = _aplica([_op("preferencia", "adicionar", novo=frase + "."),
+                                _op("licao_verificada", "adicionar", novo=frase)])
+        self.assertEqual(lic["verificadas"], [frase])
+        self.assertEqual(pref["preferencias"], [])
+
+    def test_frases_diferentes_em_destinos_diferentes_ficam(self):
+        lic, pref, _ = _aplica([_op("licao_verificada", "adicionar", novo="Custos apenas em USD"),
+                                _op("preferencia", "adicionar", novo="Gráficos na cor rosa")])
+        self.assertEqual(lic["verificadas"], ["Custos apenas em USD"])
+        self.assertEqual(pref["preferencias"], ["Gráficos na cor rosa"])
 
 
 class BlocosDeLeitura(unittest.TestCase):
