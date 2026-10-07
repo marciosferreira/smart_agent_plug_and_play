@@ -294,7 +294,6 @@ export class ChatService {
     let stepN = 0;
     let hasEvents = false;
     let lastThought = '';
-    let lastArtifactId: string | null = null;
 
     const updateThinking = (patch: Partial<ThinkingChatMessage>) => {
       this.messages.update((list) =>
@@ -347,7 +346,6 @@ export class ChatService {
             const match = ev.token.match(/^\[(chart|pdf|excel):([a-f0-9-]{36})\]$/);
             if (match) {
               const artifactId = nextId('am');
-              lastArtifactId = artifactId;
               const artifact: ArtifactChatMessage = {
                 kind: 'artifact',
                 id: artifactId,
@@ -362,12 +360,12 @@ export class ChatService {
             break;
           }
           case 'artifact_saved':
-            if (lastArtifactId) {
-              const id = lastArtifactId;
-              this.messages.update((list) =>
-                list.map((m) => (m.kind === 'artifact' && m.id === id ? { ...m, saved: true } : m)),
-              );
-            }
+            // Ao salvar, o backend promove TODOS os artefatos de teste da tarefa
+            // (chart_store.promote_test_artifacts) — então todos os previews dela viram
+            // "Salvo", não só o último (um teste pode gerar vários: gráfico, PDF, Excel).
+            this.messages.update((list) =>
+              list.map((m) => (m.kind === 'artifact' && m.taskId === ev.task_id ? { ...m, saved: true } : m)),
+            );
             break;
           case 'widget_added':
             this.widgets.onWidgetAdded();

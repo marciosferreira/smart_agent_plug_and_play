@@ -114,6 +114,17 @@ def _push_artifacts(event_type: str, tokens: list[str], task_id: str, session_id
         pass  # silencioso — não quebra a tool se o stream não estiver ativo
 
 
+def _push_artifact_saved(task_id: str) -> None:
+    """Avisa o chat que o task_code foi salvo — o front troca o selo "Preview" por "✔ Salvo" no
+    último artefato exibido. É um evento sem token; por isso não passa por _push_artifacts, que
+    emite um evento por token (com a lista vazia, nada era emitido)."""
+    try:
+        from agent_multi import _push_event, _current_session
+        _push_event(_current_session.get(), {"type": "artifact_saved", "task_id": task_id})
+    except Exception:
+        pass  # silencioso — não quebra a tool se o stream não estiver ativo
+
+
 def _row_to_dict(row) -> dict:
     return dict(row) if row else {}
 
@@ -871,7 +882,7 @@ def save_task_code(task_id: str, code: str) -> str:
         pass
 
     # Notifica o chat que o código foi persistido
-    _push_artifacts("artifact_saved", [], task_id)
+    _push_artifact_saved(task_id)
     return (
         f"✅ **task_code salvo** na tarefa **[{task_id}]** ({row['name']}).\n"
         "A próxima execução usará este código diretamente (modo determinístico).\n"

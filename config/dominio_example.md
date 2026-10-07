@@ -8,14 +8,22 @@
   MODELO / TEMPLATE de arquivo de domínio para o sistema plug-and-play.
 
   Como funciona:
-  - Este arquivo descreve UM banco de dados para o agente. `config/settings.yml` escolhe
-    qual arquivo `dominio_*.md` está ativo (chave `app.dominio`) e qual `database.url`
-    (SQLAlchemy) ele usa — os dois têm que corresponder ao MESMO banco.
-  - Pode haver vários `dominio_*.md` na pasta ao mesmo tempo (ex: dominio_posh.md,
-    dominio_alocacao.md); só o apontado por `app.dominio` fica ativo.
-  - Copie este arquivo para `dominio_<seunome>.md`, preencha as seções, aponte o
-    settings.yml para ele e para a URL do banco novo. Não precisa mexer em código —
-    troca exige apenas restart do app.
+  - Este arquivo descreve UM domínio (um banco de dados ou API) para o agente. `config/settings.yml`
+    escolhe qual domínio está ativo (chave `app.dominio`) e COMO os dados são acessados
+    (`database.modo`): `sql` (consulta direta, com `database.url` SQLAlchemy) ou `graphql`
+    (endpoint GraphQL, com o bloco `graphql`: url + token ou api_key). Cada domínio usa só um
+    dos dois, e a configuração e este arquivo têm que corresponder ao MESMO banco.
+  - Onde salvar: `config/<slug>/<idioma>/dominio.md`, em que <slug> é o valor de `app.dominio`
+    sem o prefixo "dominio_" e sem ".md" (ex: `app.dominio: "dominio_vendas.md"` →
+    `config/vendas/pt-BR/dominio.md`). Um arquivo por idioma (pt-BR, en, zh); um idioma sem
+    arquivo cai no `app.idioma_default`. Os painéis padrão do dashboard (opcionais) ficam ao
+    lado, em `config/<slug>/<idioma>/dashboard_default.py` (uma lista `WIDGETS`).
+  - Pode haver vários domínios (pastas) ao mesmo tempo; só o apontado por `app.dominio` fica
+    ativo. Copie este arquivo, preencha as seções e aponte o settings.yml para o domínio e para o
+    banco novos. Não precisa mexer em código — a troca exige apenas restart do app.
+  - Edições neste arquivo são relidas sozinhas, exceto as seções injetadas nos prompts na
+    inicialização — "Regras do agente", "Regras do orquestrador" e "Exemplos task_code" —, que só
+    valem depois de um restart.
   - As seções são delimitadas por headings de nível "## " (exatamente esse nível).
     Headings internos DENTRO de uma seção devem ser "###" — nunca "##", que o parser
     usa como delimitador de seção. Seções podem vir em qualquer ordem; as que faltarem
@@ -27,11 +35,15 @@
 ## Regras do agente
 
 <!--
-  Injetada verbatim no prompt do sub-agente "analista" (quem gera e executa SQL).
+  Injetada verbatim no prompt do sub-agente "analista" (quem consulta os dados — por SQL ou por
+  GraphQL, conforme o `database.modo` — e gera tabelas e gráficos).
   Coloque aqui regras de interpretação que evitam erros comuns de leitura do dado:
   qual coluna de data usar para "hoje"/"este mês", granularidade real dos dados
   (ex: "só existem lançamentos no dia 1 de cada mês"), armadilhas de schema
   (colunas enum que precisam de cast, campos desnormalizados a evitar, etc.).
+  Em domínios `graphql`, diga também como o analista deve usar as tools: quando preferir a
+  agregação no servidor (executar_graphql_agregado) à busca de linhas (executar_graphql), e como
+  resolver o ID de uma entidade citada pelo nome antes de filtrar por ela.
 -->
 
 ### <nome da sub-regra, ex: "Coluna de data — use sempre a coluna certa">
@@ -41,10 +53,10 @@
 ## Regras do orquestrador
 
 <!--
-  Injetada verbatim no prompt do orquestrador (quem decide se pergunta é deste domínio,
-  calcula período e roteia para o analista). Diga em 1-2 frases o que este sistema É
-  (para o orquestrador negar assuntos de outros domínios) e confirme que, sem período
-  explícito na pergunta, ele deve assumir um padrão e seguir direto — nunca perguntar
+  Injetada verbatim no prompt do orquestrador (quem decide se a pergunta é deste domínio,
+  escolhe o período em linguagem natural e roteia para o analista). Diga em 1-2 frases o que
+  este sistema É (para o orquestrador negar assuntos de outros domínios) e confirme que, sem
+  período explícito na pergunta, ele deve assumir um padrão e seguir direto — nunca perguntar
   de volta ao usuário.
 
   "todo o período" (abaixo) é o padrão seguro para a maioria dos domínios — calcular_periodo
@@ -87,6 +99,11 @@ NUNCA pergunte o período ao usuário.
 
   Se seus dados são um período corrido normal (sem snapshot, "hoje" == data real), você
   pode deixar esta seção vazia ou com só a entrada "todo o período" abaixo.
+
+  Domínios `graphql` SEM `database.url`: essas SQLs não têm onde rodar — toda entrada é
+  ignorada em silêncio e vale só o fallback de calendário, que já cobre hoje, semana, mês,
+  "todo o período" e, via `app.mes_inicio_fiscal` do settings.yml, quarters e ano fiscal.
+  Nesse caso omita esta seção (ou deixe-a só como referência, marcada como tal).
 -->
 
 ### re:todo o per[ií]odo|hist[oó]rico completo|desde o in[ií]cio
@@ -98,10 +115,14 @@ SELECT MIN(<coluna_de_data>), MAX(<coluna_de_data>) FROM <tabela_principal>
 ## Modelo de dados
 
 <!--
-  Schema do banco: tabelas, colunas, joins, exemplos de query. Servida ao agente por
-  read_skill('dominio.md') (nome lógico fixo — sempre resolve para o arquivo ativo) e
-  usada para gerar SQL correto. Seja explícito sobre: PK/FK, colunas enum e como tratá-las
-  no dialeto do banco (cast, etc.), colunas desnormalizadas a evitar, nullable relevante.
+  Schema do domínio: tabelas, colunas, joins, exemplos. É carregada no prompt do analista a
+  cada análise — a única fonte dos nomes reais de tabelas e colunas (sem ela o analista
+  inventa nomes que não existem) — e também servida por rag_dados. Seja explícito sobre:
+  PK/FK, colunas enum e como tratá-las no dialeto do banco (cast, etc.), colunas
+  desnormalizadas a evitar, nullable relevante.
+  Em domínios `graphql`, descreva tabelas e colunas do mesmo jeito e documente o grafo de FKs:
+  é por ele que o analista escolhe `group_by` e `expand` (join de UM salto). Os exemplos de
+  query viram exemplos de chamada das tools.
 -->
 
 ### `<schema.tabela>` — <o que cada linha representa>
@@ -113,14 +134,14 @@ SELECT MIN(<coluna_de_data>), MAX(<coluna_de_data>) FROM <tabela_principal>
 
 ### Grafo de joins
 
-```
+```text
 <tabela_a> (1)──(N) <tabela_b>   via <tabela_b>.<coluna_fk>
 ```
 
 ### Exemplos de queries
 
 ```sql
--- <o que a query responde>
+-- <o que a query responde> (domínios modo: sql)
 SELECT ...
 FROM <tabela>
 WHERE ...
@@ -128,12 +149,19 @@ GROUP BY ...
 ORDER BY ...;
 ```
 
+<!--
+  Domínios modo: graphql — troque o bloco acima por exemplos de chamada, p.ex.:
+  executar_graphql_agregado(table="<tabela>", group_by="<coluna_fk>", metric_field="<coluna>",
+      metric_op="SUM", where=[{"field": "<coluna>", "op": "EQ", "value": "<valor>"}],
+      expand=["<coluna_da_tabela_relacionada>"], order_by="DESC", limit=10)
+-->
+
 ## Domínio de negócio
 
 <!--
   Glossário e regras de negócio (não-SQL): o que o sistema faz, fluxo/estados de vida de
   uma entidade, definição de métricas/siglas do domínio, KPIs usuais. Servida ao agente
-  por rag_dominio / read_skill('dominio.md').
+  por rag_dominio e incluída na skill do analista.
 -->
 
 ### O que é este sistema
@@ -147,10 +175,19 @@ ORDER BY ...;
 ## Exemplos task_code
 
 <!--
-  Anexada às regras do sandbox de tarefas agendadas (geração de PDF/Excel via chat).
-  Dê pelo menos um exemplo completo de função run(from_date, to_date, ctx) usando
-  ctx.sql(...) contra as tabelas reais deste domínio, para o agente copiar o padrão.
+  Anexada às regras do sandbox de tarefas agendadas — o agente a usa para gerar o código de
+  relatórios, monitores e painéis do dashboard: uma função run(from_date, to_date, ctx).
+  Dê pelo menos um exemplo completo contra as tabelas reais deste domínio, para o agente
+  copiar o padrão. MANTENHA SÓ o exemplo do modo deste domínio (`database.modo`):
+    - modo sql:     busque os dados com ctx.sql("SELECT ...") → list[dict]
+    - modo graphql: ctx.sql() NÃO existe; use ctx.graphql_table(...) / ctx.graphql_aggregate(...),
+                    com os mesmos argumentos das tools do analista, mas SEM o parâmetro `chave`
+  Mostre também como o período (from_date/to_date, objetos date) é aplicado nas colunas de
+  período REAIS do domínio: eles não filtram nada sozinhos — a consulta precisa usá-los.
+  No fim, devolva o artefato (ctx.generate_pdf / ctx.generate_excel / ctx.save_chart).
 -->
+
+### Modo sql
 
 ```python
 def run(from_date, to_date, ctx):
@@ -166,13 +203,46 @@ def run(from_date, to_date, ctx):
     return ctx.generate_pdf('<Título>', conteudo)
 ```
 
+### Modo graphql
+
+```python
+def run(from_date, to_date, ctx):
+    rows = ctx.graphql_aggregate(
+        "<tabela>", group_by="<coluna_fk>",
+        metric_field="<coluna_numerica>", metric_op="SUM",
+        where=[{"field": "<coluna_data>", "op": "GTE", "value": from_date},
+               {"field": "<coluna_data>", "op": "LTE", "value": to_date}],
+        expand=["<coluna_da_tabela_relacionada>"], order_by="DESC", limit=20,
+    )
+    df = pd.DataFrame(rows)  # colunas: groupKey, metricValue (vem como TEXTO) e as do expand
+    if df.empty:
+        return ctx.generate_pdf('<Título>', '## Sem dados no período.')
+    df['metricValue'] = pd.to_numeric(df['metricValue'])
+    # ... gráfico / cálculo ...
+    return ctx.generate_pdf('<Título>', conteudo)
+```
+
 ## Dica para condition_sql
 
 <!--
-  Injetada ao criar monitores (alertas agendados que rodam uma condition_sql e comparam
-  contra um threshold). Liste as tabelas/colunas mais úteis para alertas e como escrever
-  "hoje" no dialeto do banco configurado.
+  Injetada ao criar monitores (alertas agendados que avaliam uma condição e notificam quando
+  ela é atingida). O formato de `condition_sql` depende de `database.modo`:
+    - modo sql:     uma query SELECT que devolve um escalar (ou linhas, para
+                    is_empty/is_not_empty). Liste as tabelas/colunas mais úteis para alertas e
+                    como escrever "hoje" no dialeto do banco configurado.
+    - modo graphql: NÃO é SQL — é uma string JSON (type "aggregate" ou "table"). Dê aqui um
+                    exemplo pronto para o caso mais comum. O valor comparado ao threshold é
+                    sempre `metricValue` (aggregate) ou o `value_field` indicado (table), e
+                    filtros por entidade devem usar o ID real, não o nome.
+  Mantenha só o que vale para o modo deste domínio.
 -->
 
 Tabelas disponíveis: `<tabela1>`, `<tabela2>`. Hoje = <expressão do dialeto, ex:
 `CURRENT_DATE` no PostgreSQL, `date('now')` no SQLite>.
+
+<!--
+  Modo graphql — exemplo de condition_sql (JSON):
+  {"type": "aggregate", "table": "<tabela>", "group_by": "<coluna_fk>",
+   "metric_field": "<coluna_numerica>", "metric_op": "SUM",
+   "where": [{"field": "<coluna_fk>", "op": "EQ", "value": "<id real>"}]}
+-->

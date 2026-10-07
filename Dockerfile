@@ -31,6 +31,8 @@ COPY . .
 COPY --from=frontend-build /app/frontend/dist/frontend/browser ./frontend/dist/frontend/browser
 
 # Diretório para o banco SQLite e credentials — monte um volume aqui no EasyPanel
+# TODO(email): os relatórios agendados (reports/) ficam em /app/reports, fora deste volume —
+# ver o TODO(email) em scheduler/daemon.py.
 RUN mkdir -p /data
 
 # Variáveis de ambiente com defaults seguros

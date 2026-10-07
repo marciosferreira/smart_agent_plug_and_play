@@ -978,6 +978,9 @@ def rag_dominio() -> str:
     return corpo or db_config.MSG_NAO_CONFIGURADO
 
 
+# TODO(email): rag/<idioma>/capacidades.md diz que o sistema não envia e-mails (2 frases por
+# idioma: a da seção de relatórios e a de "Limites"). Atualizar quando o envio existir — e a
+# seção de e-mail do ARQUITETURA.md também.
 @tool
 def rag_capacidades() -> str:
     """Retorna o catálogo completo de capacidades do agente: tipos de análise disponíveis,
@@ -2657,6 +2660,10 @@ def _build_scheduling_graph(llm):
                 "rejeita. Nesta etapa, ignore a orientação de 'resolver o id via dim_site antes'.\n"
             )
 
+        # TODO(email): este JSON não tem campo de destinatário — um "envie para fulano@..." dito no
+        # pedido é descartado aqui. Hoje só schedule_task/update_scheduled_task (via gerenciar_agenda)
+        # gravam scheduled_tasks.email. Ao implementar o envio de relatórios por e-mail (ver o
+        # TODO(email) em scheduler/daemon.py), extrair "email" neste JSON e repassá-lo ao schedule_task.
         param_prompt = (
             "Extraia os parâmetros de agendamento da instrução abaixo. "
             "Responda APENAS com JSON válido, sem explicação nem marcação markdown.\n\n"

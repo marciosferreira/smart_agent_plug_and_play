@@ -14,7 +14,7 @@ export type ChatStreamEvent =
   | { type: 'thinking'; text: string }
   | { type: 'tool'; label: string }
   | { type: 'artifact_preview'; token: string; task_id?: string }
-  | { type: 'artifact_saved' }
+  | { type: 'artifact_saved'; task_id?: string }
   | { type: 'widget_added' }
   | { type: 'widget_updated'; widget_id: string }
   | { type: 'widget_deleted'; widget_id: string }

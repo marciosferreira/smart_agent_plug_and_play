@@ -19,6 +19,15 @@ logger = logging.getLogger(__name__)
 
 import os
 
+# TODO(email): o envio de relatórios por e-mail ainda não existe — _save_report só PREPARA o
+# registro (reports/<id>_<nome>_<data>/metadata.json, status 'pending_send') e nada o consome.
+# Ao implementar, resolver:
+#   - destinatário: scheduled_tasks.email só é preenchido por schedule_task/update_scheduled_task;
+#     o pipeline de criação (node_criar_tarefa, em agent_multi.py) não o extrai do pedido;
+#   - REPORTS_DIR fica ao lado do código (/app/reports no Docker), fora do volume /data do
+#     mfg.db: o estado 'pending_send' se perde num redeploy (montar volume ou mover para o banco);
+#   - BACKEND_URL (padrão http://localhost:8000) monta os links dos anexos: em produção precisa
+#     ser a URL pública.
 REPORTS_DIR = Path(__file__).parent.parent / "reports"
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
@@ -59,6 +68,9 @@ def _save_report(task: dict, content: str, now: datetime) -> Path:
     folder = REPORTS_DIR / folder_name
     folder.mkdir(parents=True, exist_ok=True)
 
+    # TODO(email): só tokens [pdf:...] viram anexo — gráfico/Excel gerados pela tarefa ficam de
+    # fora de 'attachments'. E nada muda 'pending_send' depois do envio: falta um estado final
+    # (sent/failed).
     pdf_ids = _PDF_TOKEN.findall(content)
     content_with_links = _resolve_pdf_links(content)
     (folder / 'content.md').write_text(content_with_links, encoding='utf-8')
