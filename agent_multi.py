@@ -2161,10 +2161,15 @@ def _build_sub_agent(llm):
             f"\n\n## Skill dominio.md (já carregada — não chame read_skill para ela)\n{dominio_txt}"
             if dominio_txt and db_config.is_configured() else ""
         )
-        # Memória (lições do banco e preferências do usuário): vem depois do dominio.md e antes
+        # Memória (lições do banco, convenções e preferências do usuário): vem depois do dominio.md e antes
         # de `extra` para manter o prefixo estável entre chamadas.
         _dom = db_config.dominio_filename()
-        bloco_memoria = memoria.bloco_licoes(_dom) + memoria.bloco_preferencias(_current_user_id.get(), _dom)
+        _uid = _current_user_id.get()
+        bloco_memoria = (
+            memoria.bloco_licoes(_dom)
+            + memoria.bloco_convencoes(_uid, _dom)
+            + memoria.bloco_preferencias(_uid, _dom)
+        )
         msgs = [SystemMessage(
             content=_diretiva_idioma() + SUB_SYSTEM_PROMPT + bloco_dominio + bloco_memoria + extra
         )] + list(state["messages"])

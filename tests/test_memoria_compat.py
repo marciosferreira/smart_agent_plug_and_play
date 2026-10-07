@@ -17,7 +17,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 import agent_multi
 import memoria
-from memoria import MAX_LICOES, MudancasMemoria, Operacao, aplicar_operacoes
+from memoria import MAX_CONVENCOES, MAX_LICOES, MudancasMemoria, Operacao, aplicar_operacoes
 
 # Versões em que a memória foi validada com o Vertex de verdade.
 VERSOES_VALIDADAS = {
@@ -76,8 +76,13 @@ def _op(destino, acao, antigo="", novo=""):
     return Operacao(destino=destino, acao=acao, antigo=antigo, novo=novo)
 
 
+def _aplica4(ops, lic=None, pref=None, perfil=None, conv=None, tem_usuario=True):
+    """Devolve (lições, preferências, perfil, convenções)."""
+    return aplicar_operacoes(ops, lic or {}, pref or {}, perfil or {}, conv or {}, tem_usuario)
+
+
 def _aplica(ops, lic=None, pref=None, perfil=None, tem_usuario=True):
-    return aplicar_operacoes(ops, lic or {}, pref or {}, perfil or {}, tem_usuario)
+    return _aplica4(ops, lic, pref, perfil, None, tem_usuario)[:3]
 
 
 class OperacoesDeLicoes(unittest.TestCase):
@@ -186,6 +191,58 @@ class OperacoesDePreferenciasEPerfil(unittest.TestCase):
         self.assertIsNone(perfil["nome"])
 
 
+class ConvencoesPessoais(unittest.TestCase):
+    def test_adiciona_e_substitui(self):
+        _, _, _, conv = _aplica4([_op("convencao_pessoal", "adicionar", novo="Mostrar os custos em USD")])
+        self.assertEqual(conv["convencoes"], ["Mostrar os custos em USD"])
+        _, _, _, conv = _aplica4([_op("convencao_pessoal", "substituir", "Mostrar os custos em USD",
+                                      "Mostrar os custos em USD ou BRL")], conv=conv)
+        self.assertEqual(conv["convencoes"], ["Mostrar os custos em USD ou BRL"])
+
+    def test_nao_vaza_para_as_licoes_compartilhadas(self):
+        lic, _, _, conv = _aplica4([_op("convencao_pessoal", "adicionar", novo="Considerar só os sites BPL e MAN")])
+        self.assertEqual(lic, {"verificadas": [], "hipoteses": []})
+        self.assertEqual(conv["convencoes"], ["Considerar só os sites BPL e MAN"])
+
+    def test_duas_coisas_na_mesma_frase_vao_cada_uma_ao_seu_destino(self):
+        lic, _, _, conv = _aplica4([_op("convencao_pessoal", "adicionar", novo="Mostrar os custos em USD"),
+                                    _op("licao_verificada", "adicionar", novo="Nunca somar valores de moedas diferentes")])
+        self.assertEqual(conv["convencoes"], ["Mostrar os custos em USD"])
+        self.assertEqual(lic["verificadas"], ["Nunca somar valores de moedas diferentes"])
+
+    def test_mesma_frase_em_licao_e_convencao_fica_so_na_convencao(self):
+        frase = "Considerar por padrão só os sites BPL e MAN"
+        lic, _, _, conv = _aplica4([_op("licao_verificada", "adicionar", novo=frase),
+                                    _op("convencao_pessoal", "adicionar", novo=frase + ".")])
+        self.assertEqual(lic["verificadas"], [])
+        self.assertEqual(len(conv["convencoes"]), 1)
+
+    def test_sem_usuario_nao_grava_convencao(self):
+        _, _, _, conv = _aplica4([_op("convencao_pessoal", "adicionar", novo="Mostrar em USD")], tem_usuario=False)
+        self.assertEqual(conv["convencoes"], [])
+
+    def test_limite_descarta_as_mais_antigas(self):
+        antigas = [f"convencao numero {i} " + "y" * i * 2 for i in range(MAX_CONVENCOES)]
+        _, _, _, conv = _aplica4([_op("convencao_pessoal", "adicionar", novo="uma convencao nova e bem diferente")],
+                                 conv={"convencoes": [a.strip() for a in antigas]})
+        self.assertEqual(len(conv["convencoes"]), MAX_CONVENCOES)
+        self.assertEqual(conv["convencoes"][-1], "uma convencao nova e bem diferente")
+
+
+class ResumoDaResposta(unittest.TestCase):
+    def test_resposta_curta_nao_muda(self):
+        self.assertEqual(memoria._resumir_resposta("curta"), "curta")
+
+    def test_resposta_longa_mantem_o_comeco_e_o_fim(self):
+        corpo = "achado " * 600
+        bloco = "**Parâmetros da análise:**\n- Período: 2026-09-01 a 2026-09-30\n- Tabela: fact_hourly_rate"
+        resumo = memoria._resumir_resposta("INICIO " + corpo + "\n" + bloco)
+        self.assertTrue(resumo.startswith("INICIO"))
+        self.assertTrue(resumo.endswith(bloco))
+        self.assertIn("[...]", resumo)
+        self.assertLess(len(resumo), 2400)
+
+
 class DuplicataEntreDestinos(unittest.TestCase):
     def test_mesma_frase_em_licao_e_preferencia_fica_so_na_licao(self):
         frase = "Apresentar os custos apenas em USD, nunca somando moedas locais"
@@ -236,6 +293,16 @@ class BlocosDeLeitura(unittest.TestCase):
                     {"preferencias": ["Gráficos na cor rosa"]})
         self.assertIn("Gráficos na cor rosa", memoria.bloco_preferencias("321", "dom_a.md"))
         self.assertEqual(memoria.bloco_preferencias("321", "dom_b.md"), "")
+
+    def test_convencoes_so_no_dominio_e_usuario_certos(self):
+        self._grava(("users", "321", "dom_a_md", "conventions"), "ConvencoesDoUsuario",
+                    {"convencoes": ["Considerar só os sites BPL e MAN"]})
+        bloco = memoria.bloco_convencoes("321", "dom_a.md")
+        self.assertIn("Considerar só os sites BPL e MAN", bloco)
+        self.assertIn("vale o pedido", bloco)
+        self.assertEqual(memoria.bloco_convencoes("321", "dom_b.md"), "")
+        self.assertEqual(memoria.bloco_convencoes("999", "dom_a.md"), "")
+        self.assertEqual(memoria.bloco_convencoes("", "dom_a.md"), "")
 
     def test_gravar_mantem_a_chave_e_so_grava_se_mudou(self):
         ns = ("db_lessons", "dom_a_md")

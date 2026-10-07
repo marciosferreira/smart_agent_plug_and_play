@@ -1,7 +1,7 @@
 """
 Memória do agente: aprende sobre o banco e sobre o usuário a partir das conversas.
 
-Três documentos, mantidos em background depois do turno, sem atrasar a resposta:
+Quatro documentos, mantidos em background depois do turno, sem atrasar a resposta:
 
   LIÇÕES        -> regras sobre como consultar o banco. Um documento por domínio (compartilhado
                    por todos os usuários), com duas listas de texto: `verificadas` e `hipoteses`.
@@ -10,11 +10,16 @@ Três documentos, mantidos em background depois do turno, sem atrasar a resposta
                    frases livres, sem campos por assunto. Um documento por usuário e por domínio
                    (nada vaza de um domínio para outro). Lido pelo orquestrador (que redige a
                    resposta) e pelo analista (gráficos).
+  CONVENÇÕES    -> como ESTE usuário quer que as análises sejam delimitadas ou calculadas por
+                   padrão, sem ser uma definição do negócio (moeda de exibição, sites ou período
+                   padrão, filtros que sempre aplica, o vocabulário dele). Um documento por usuário
+                   e por domínio. Lido pelo sub-agente analista. Fica separado das lições para uma
+                   correção pessoal não virar regra de todos.
   PERFIL        -> quem é o usuário, como ele mesmo contou (nome, cargo, área, atuação, local,
                    equipe ou gestor, e uma lista livre para o que não couber). Um documento por
                    usuário e por domínio. Lido só pelo orquestrador, que se dirige à pessoa.
 
-Uma ÚNICA chamada estruturada ao LLM (`_Extrator`) lê a conversa e os três documentos e devolve
+Uma ÚNICA chamada estruturada ao LLM (`_Extrator`) lê a conversa e os quatro documentos e devolve
 uma lista de operações (`MudancasMemoria`: destino, ação, texto antigo e texto novo); o código as
 aplica por casamento de texto (`aplicar_operacoes`). Como o mesmo modelo decide, na mesma
 chamada, em qual documento cada declaração entra, ela nunca vai para dois (nem contradiz um deles). Do LangMem só usamos o `ReflectionExecutor`, que agenda a extração em
@@ -63,10 +68,12 @@ logger = logging.getLogger(__name__)
 MAX_LICOES = 30
 _MAX_ARGS = 800          # chars de entrada de ferramenta mostrados ao extrator
 _MAX_SAIDA = 300         # chars de saída de ferramenta (corta dados de produção)
-_MAX_RESPOSTA = 1500     # chars da resposta final mostrados ao extrator
+_RESPOSTA_CABECA = 500   # chars do começo da resposta final mostrados ao extrator
+_RESPOSTA_CAUDA = 1800   # chars do fim: é onde ficam os blocos de parâmetros e de dados
 _MAX_TURNOS_GUARDADOS = 6
 MAX_PREFERENCIAS = 20
 MAX_OUTROS = 10          # itens livres do perfil
+MAX_CONVENCOES = 20
 _IGUAL = 0.9             # similaridade a partir da qual duas frases contam como a mesma
 _CITADA = 0.8            # mínimo para o texto citado pelo extrator casar (de forma aproximada) com um item
 _EMPATE = 0.05           # dois itens assim de parecidos com a citação: ambíguo, não mexe em nenhum
@@ -132,6 +139,20 @@ class PreferenciasUsuario(BaseModel):
     )
 
 
+class ConvencoesDoUsuario(BaseModel):
+    """Convenções pessoais de análise do usuário, como frases livres.
+
+    Diferem das lições (definições do banco e do negócio, valem para todos) e das preferências
+    (forma de apresentar): são o jeito dele de delimitar ou calcular as análises por padrão.
+    """
+
+    convencoes: list[str] = Field(
+        default_factory=list,
+        description="Convenções que o usuário DECLAROU como permanentes para as análises dele, "
+        "uma frase curta por item.",
+    )
+
+
 class PerfilUsuario(BaseModel):
     """Quem é o usuário, só o que ele mesmo declarou.
 
@@ -160,7 +181,7 @@ class PerfilUsuario(BaseModel):
 # Saída e instruções do extrator
 # ---------------------------------------------------------------------------
 Destino = Literal[
-    "licao_verificada", "licao_hipotese", "preferencia", "perfil_outros",
+    "licao_verificada", "licao_hipotese", "convencao_pessoal", "preferencia", "perfil_outros",
     "perfil_nome", "perfil_cargo", "perfil_funcao_area", "perfil_atuacao",
     "perfil_local_atuacao", "perfil_equipe_gestor",
 ]
@@ -181,7 +202,7 @@ class Operacao(BaseModel):
 
 
 class MudancasMemoria(BaseModel):
-    """As mudanças a aplicar nos três documentos. Cada declaração vai para UM só destino."""
+    """As mudanças a aplicar nos documentos. Cada declaração vai para UM só destino."""
 
     raciocinio: str = Field(
         description="Uma ou duas frases: o que você decidiu e por quê. Inclua os casos em que "
@@ -193,7 +214,7 @@ class MudancasMemoria(BaseModel):
 
 
 INSTRUCOES = """\
-Você mantém a memória de um agente que analisa dados para os usuários. A memória tem TRÊS \
+Você mantém a memória de um agente que analisa dados para os usuários. A memória tem QUATRO \
 documentos, e você recebe o conteúdo atual deles e as mensagens de um ou mais turnos. \
 Devolva SÓ as operações necessárias; a lista fica vazia quando não há nada a mudar. Escreva \
 os itens em português, uma frase curta cada. Mensagens marcadas com [CONTEXTO] já foram \
@@ -209,25 +230,33 @@ contraditório no lugar.
 
 OS DESTINOS, e quando algo entra em cada um (uma declaração entra em UM só):
 
-1. LIÇÕES sobre o banco de dados (compartilhadas por todos os usuários). Ajudam o agente a \
-não repetir erros ao consultar.
+1. LIÇÕES COMPARTILHADAS sobre o banco e o negócio (valem para TODOS os usuários). São fatos \
+sobre o que os dados significam e como se calcula certo: qual tabela, coluna, join, filtro \
+ou fórmula é o adequado para um tipo de análise, o que um campo quer dizer.
    - licao_verificada: (a) erro técnico verificado: a ferramenta devolveu erro (coluna ou \
-tabela inexistente, tipo errado, join inválido) e uma nova tentativa funcionou; (b) regra \
-declarada pelo usuário como permanente sobre QUAL dado, coluna, moeda ou filtro usar e COMO \
-calcular, filtrar, somar ou juntar ("sempre", "nunca", "o correto é"), mesmo que ele a diga \
-com "mostre" ou "apresente". Registre-a SEMPRE que aparecer, mesmo que pareça específica de \
-um cálculo: o usuário sabe do que fala.
+tabela inexistente, tipo errado, join inválido) e uma nova tentativa funcionou; (b) correção \
+ou regra declarada pelo usuário sobre o SIGNIFICADO ou o CÁLCULO certo ("o correto é", \
+"sempre", "nunca", "o custo considera só...", "esse join está errado"). Registre-a SEMPRE que \
+aparecer, mesmo que pareça específica de um cálculo: o usuário sabe do que fala.
    - licao_hipotese: contestação sem causa declarada ("esse total está estranho, refaz"), \
 SOMENTE se houver indício concreto no SQL ou no resultado (join sem chave, filtro de período \
 omitido, agregação duplicando linhas). Sem indício, nada. Uma hipótese confirmada passa a \
 verificada: remova-a de licao_hipotese e adicione em licao_verificada.
 
-2. preferencia: como o usuário quer receber os resultados, e só o que ele DECLARA como \
-permanente: "prefiro", "sempre que possível", "por padrão", "daqui para frente", "a partir \
-de agora" ou equivalentes em inglês e chinês. Cor, tipo de gráfico, formato, nível de \
-detalhe, idioma, ordenação. Nunca por inferência, repetição ou aprovação.
+2. convencao_pessoal: como ESTE usuário quer que as análises dele sejam delimitadas ou \
+calculadas por padrão, sem ser uma definição do negócio, e só o que ele DECLARA como \
+permanente: moeda em que quer ver os valores, sites, produtos ou período padrão, filtros que \
+ele sempre aplica, o vocabulário dele ("quando digo operação, quero dizer site"). Vale só \
+para ele. NA DÚVIDA ENTRE LIÇÃO COMPARTILHADA E CONVENÇÃO PESSOAL, É CONVENÇÃO PESSOAL: a \
+compartilhada muda as análises de todos, então só entra o que é claramente um fato do \
+negócio ou do banco.
 
-3. PERFIL: quem é o usuário, só o que ELE afirma sobre si ("meu nome é Márcio", "sou gerente \
+3. preferencia: como o usuário quer que os resultados sejam APRESENTADOS, e só o que ele \
+DECLARA como permanente: "prefiro", "sempre que possível", "por padrão", "daqui para frente", \
+"a partir de agora" ou equivalentes em inglês e chinês. Cor, tipo de gráfico, formato, nível \
+de detalhe, idioma, ordenação. Nunca por inferência, repetição ou aprovação.
+
+4. PERFIL: quem é o usuário, só o que ELE afirma sobre si ("meu nome é Márcio", "sou gerente \
 de supply", "cuido dos sites JAG e BPL", "respondo ao João"). Cada campo guarda um valor só \
 (adicionar e substituir definem o valor; remover apaga): perfil_nome (como quer ser chamado), \
 perfil_cargo, perfil_funcao_area (função, área ou departamento), perfil_atuacao (o que faz e \
@@ -236,10 +265,21 @@ O que não couber nos campos vai em perfil_outros (lista de frases). Nunca deduz
 ele pergunta.
 
 ONDE CADA COISA VAI, nos casos de fronteira:
-- Qual dado, moeda, coluna, filtro ou cálculo usar é LIÇÃO, nunca preferência, mesmo dito \
-como "mostre em USD". Só a FORMA de apresentar é preferência.
-- Se ficar na dúvida entre lição e preferência, é lição. Nunca registre a mesma coisa em \
-dois destinos.
+- Definição do negócio ou jeito certo de calcular: lição compartilhada. Escolha pessoal de \
+escopo, moeda ou filtro padrão: convenção pessoal. Só a FORMA de apresentar: preferência.
+- Se a mesma frase do usuário trouxer duas coisas diferentes, registre cada uma no seu \
+destino, com textos diferentes. Nunca registre a MESMA coisa em dois destinos.
+
+COMO LER UMA CORREÇÃO:
+- As respostas do AGENTE terminam com um bloco de parâmetros (em português "Parâmetros da \
+análise", em inglês "Analysis parameters", ou o equivalente no idioma) que lista o período, \
+as tabelas e os filtros realmente usados; o que o agente assumiu sem o usuário pedir vem \
+marcado. Uma correção do usuário quase sempre contesta um desses parâmetros ou uma etapa do \
+cálculo. Descubra qual e escreva a lição como a abordagem CORRETA para aquele tipo de \
+análise (qual tabela, coluna, filtro ou join usar), e não só "o resultado estava errado".
+- Escreva a lição como uma receita curta: o tipo de análise e como fazer. Por exemplo: "Para \
+custo por hora por site, usar a taxa vigente mais recente por site, produto e área, e não a \
+média do período".
 
 NÃO REGISTRE EM NENHUM:
 - Pedidos e perguntas pontuais, mesmo repetidos ou explícitos: "faça um gráfico de barras", \
@@ -259,25 +299,36 @@ usuário pedir para esquecer ("esqueça meu nome", "não sou mais gerente"). Nun
 espaço, nem porque ele não apareceu neste turno.
 - Os documentos atuais NÃO indicam que a memória está completa: avalie as mensagens contra \
 os critérios acima como se os documentos estivessem vazios, e só então compare.
-- Limites: 30 lições no total, 20 preferências, 10 itens em perfil_outros.
+- Limites: 30 lições, 20 convenções pessoais, 20 preferências, 10 itens em perfil_outros.
 
 EXEMPLOS (nomes fictícios; use os reais das mensagens):
 - Erro: o agente consulta a coluna "data" de producao, a ferramenta diz que não existe e \
-refaz com "dt_producao". Operação: destino licao_verificada, acao adicionar, novo "Na tabela \
-producao, a coluna de data é dt_producao (não data)".
-- "Sempre desconsidere as paradas programadas no OEE": licao_verificada, adicionar, novo "Ao \
-calcular OEE, desconsiderar paradas programadas".
-- "Sempre mostre o custo em USD, nunca somando moedas locais": LIÇÃO, não preferência. \
-licao_verificada, adicionar, novo "Apresentar e calcular o custo apenas em USD; nunca somar \
-moedas locais".
+refaz com "dt_producao". licao_verificada, adicionar, novo "Na tabela producao, a coluna de \
+data é dt_producao (não data)".
+- "O custo de mão de obra deve considerar só registros aprovados": definição do negócio. \
+licao_verificada, adicionar, novo "Para custo de mão de obra, considerar apenas registros \
+com status aprovado".
+- "Esse resultado está errado, para taxa horária use a vigência mais recente, não a média", \
+com o bloco de parâmetros mostrando a média do período: licao_verificada, adicionar, novo \
+"Para taxa horária por site, usar a vigência mais recente de cada site, e não a média do \
+período".
+- "Sempre desconsidere as paradas programadas no OEE": licao_verificada, adicionar, novo \
+"Ao calcular OEE, desconsiderar paradas programadas".
+- "Nas minhas análises, considere só os sites BPL e MAN": convencao_pessoal, adicionar, novo \
+"Considerar por padrão só os sites BPL e MAN".
+- "Quando eu falo operação, quero dizer site": convencao_pessoal, adicionar, novo "Operação \
+significa site".
+- "Sempre mostre o custo em USD, e nunca some valores de moedas diferentes": duas coisas. \
+convencao_pessoal, adicionar, novo "Mostrar os custos em USD"; licao_verificada, adicionar, \
+novo "Nunca somar valores de moedas diferentes".
 - "Prefiro sempre gráficos na cor laranja": preferencia, adicionar, novo "Gráficos na cor \
 laranja".
 - "Faça um gráfico de barras" ou "Agora quero em linha": pedido pontual. operacoes vazia.
 - "Na verdade prefiro gráficos de linha", com "Usar gráficos de barras" já gravada: \
 preferencia, substituir, antigo "Usar gráficos de barras", novo "Usar gráficos de linha".
-- "Agora pode mostrar também em BRL, a regra de só USD não vale mais", com a regra de USD \
-gravada: licao_verificada, substituir, antigo (texto exato da regra de USD), novo "Os custos \
-podem ser apresentados também em BRL, além de USD".
+- "Mudou: agora pode mostrar também em BRL", com "Mostrar os custos em USD" gravada como \
+convenção: convencao_pessoal, substituir, antigo "Mostrar os custos em USD", novo "Mostrar os \
+custos em USD ou BRL".
 - "Me chame de Márcio, sou gerente de supply": perfil_nome, adicionar, novo "Márcio"; \
 perfil_cargo, adicionar, novo "Gerente de supply".
 - "O meu nome é Marcio, não Marico", com "Marico" gravado: perfil_nome, substituir, novo \
@@ -365,6 +416,15 @@ def ler_perfil(user_id: str, dominio: str) -> PerfilUsuario:
         return PerfilUsuario()
 
 
+def ler_convencoes(user_id: str, dominio: str) -> ConvencoesDoUsuario:
+    _, conteudo = _ler_doc(("users", _seg(user_id), _seg(dominio), "conventions"), "ConvencoesDoUsuario")
+    try:
+        return ConvencoesDoUsuario(convencoes=conteudo.get("convencoes") or [])
+    except Exception:
+        logger.warning("[memoria] convenções ilegíveis de %s; ignoradas", user_id)
+        return ConvencoesDoUsuario()
+
+
 def bloco_licoes(dominio: str) -> str:
     """Texto das lições para o prompt do analista. Vazio se não houver nada."""
     if not ativa() or _store is None:
@@ -414,6 +474,26 @@ def bloco_preferencias(user_id: str, dominio: str) -> str:
     )
 
 
+def bloco_convencoes(user_id: str, dominio: str) -> str:
+    """Texto das convenções pessoais para o prompt do analista. Vazio se não houver nada."""
+    if not ativa() or _store is None or not user_id:
+        return ""
+    try:
+        c = ler_convencoes(user_id, dominio)
+    except Exception:
+        logger.warning("[memoria] falha ao ler convenções", exc_info=True)
+        return ""
+    linhas = [f"- {x}" for x in c.convencoes]
+    if not linhas:
+        return ""
+    return (
+        "\n\n## Convenções deste usuário (como ele quer que as análises dele sejam feitas)\n"
+        "São escolhas pessoais dele, não regras do banco: aplique-as quando o pedido não disser "
+        "o contrário. Esta lista pode estar atrasada: se o pedido atual trouxer algo diferente, "
+        "vale o pedido.\n" + "\n".join(linhas)
+    )
+
+
 _ROTULOS_PERFIL = (
     ("nome", "Nome"), ("cargo", "Cargo"), ("funcao_area", "Função/área"),
     ("atuacao", "Atuação"), ("local_atuacao", "Local de atuação"), ("equipe_gestor", "Equipe/gestor"),
@@ -450,6 +530,7 @@ _DESTINOS_LISTA = {
     "licao_hipotese": ("licoes", "hipoteses"),
     "preferencia": ("preferencias", "preferencias"),
     "perfil_outros": ("perfil", "outros"),
+    "convencao_pessoal": ("convencoes", "convencoes"),
 }
 _DESTINOS_CAMPO = {
     "perfil_nome": "nome", "perfil_cargo": "cargo", "perfil_funcao_area": "funcao_area",
@@ -458,9 +539,12 @@ _DESTINOS_CAMPO = {
 }
 # Se o extrator puser a mesma frase em dois destinos, fica o primeiro desta lista: quem diz qual
 # dado ou cálculo usar é lição, e só a forma de apresentar é preferência.
+# A convenção pessoal vem antes da lição: na dúvida entre as duas, vale a que só afeta o usuário.
 _PRIORIDADE = [
-    "licao_verificada", "licao_hipotese", *_DESTINOS_CAMPO, "perfil_outros", "preferencia",
+    "convencao_pessoal", "licao_verificada", "licao_hipotese", *_DESTINOS_CAMPO,
+    "perfil_outros", "preferencia",
 ]
+_DESTINOS_DO_USUARIO = {"convencao_pessoal", "preferencia", "perfil_outros", *_DESTINOS_CAMPO}
 
 
 def _chave(txt: str) -> str:
@@ -570,21 +654,23 @@ def _aplicar_em_campo(perfil: dict, op: Operacao) -> None:
 
 
 def aplicar_operacoes(
-    ops: list[Operacao], lic: dict, pref: dict, perfil: dict, tem_usuario: bool = True
-) -> tuple[dict, dict, dict]:
-    """Aplica as operações aos três documentos e devolve os novos conteúdos (os de entrada
-    não são alterados). Sem usuário identificado só as lições mudam. Impõe os limites: 30
-    lições (descarta hipóteses primeiro), 20 preferências e 10 itens livres no perfil."""
+    ops: list[Operacao], lic: dict, pref: dict, perfil: dict, conv: dict, tem_usuario: bool = True
+) -> tuple[dict, dict, dict, dict]:
+    """Aplica as operações aos documentos e devolve os novos conteúdos (lições, preferências,
+    perfil, convenções); os de entrada não são alterados. Sem usuário identificado só as
+    lições mudam. Impõe os limites: 30 lições (descarta hipóteses primeiro), 20 preferências,
+    20 convenções e 10 itens livres no perfil."""
     docs = {
         "licoes": {"verificadas": _itens(lic.get("verificadas")), "hipoteses": _itens(lic.get("hipoteses"))},
         "preferencias": {"preferencias": _itens(pref.get("preferencias"))},
+        "convencoes": {"convencoes": _itens(conv.get("convencoes"))},
         "perfil": {
             **{c: (perfil.get(c) or None) for c in PerfilUsuario.model_fields if c != "outros"},
             "outros": _itens(perfil.get("outros")),
         },
     }
     for op in _sem_duplicata_entre_destinos(ops):
-        if not tem_usuario and (op.destino == "preferencia" or op.destino.startswith("perfil_")):
+        if not tem_usuario and op.destino in _DESTINOS_DO_USUARIO:
             continue
         if op.destino in _DESTINOS_CAMPO:
             _aplicar_em_campo(docs["perfil"], op)
@@ -594,8 +680,9 @@ def aplicar_operacoes(
     while len(v) + len(h) > MAX_LICOES:
         (h or v).pop(0)
     docs["preferencias"]["preferencias"] = docs["preferencias"]["preferencias"][-MAX_PREFERENCIAS:]
+    docs["convencoes"]["convencoes"] = docs["convencoes"]["convencoes"][-MAX_CONVENCOES:]
     docs["perfil"]["outros"] = docs["perfil"]["outros"][-MAX_OUTROS:]
-    return docs["licoes"], docs["preferencias"], docs["perfil"]
+    return docs["licoes"], docs["preferencias"], docs["perfil"], docs["convencoes"]
 
 
 def _gravar(ns: tuple[str, ...], kind: str, antes: dict, depois: dict) -> bool:
@@ -624,22 +711,36 @@ def _cortar(txt: str, n: int) -> str:
     return txt if len(txt) <= n else txt[:n] + "…"
 
 
+def _resumir_resposta(txt: str) -> str:
+    """Encurta a resposta final para o extrator, mantendo o começo e o FIM. O fim é onde ficam
+    os blocos de parâmetros e de dados da análise (qualquer que seja o idioma do título), que é
+    o que a correção do usuário costuma contestar."""
+    txt = str(txt)
+    if len(txt) <= _RESPOSTA_CABECA + _RESPOSTA_CAUDA:
+        return txt
+    return txt[:_RESPOSTA_CABECA] + "\n[...]\n" + txt[-_RESPOSTA_CAUDA:]
+
+
 def _texto_conversa(msgs: list[dict]) -> str:
     return "\n\n".join(
         ("USUÁRIO: " if m["role"] == "user" else "AGENTE: ") + m["content"] for m in msgs
     )
 
 
-def _conteudo_para_o_llm(msgs: list[dict], lic: dict, pref: dict, perfil: dict, tem_usuario: bool) -> str:
+def _conteudo_para_o_llm(
+    msgs: list[dict], lic: dict, pref: dict, perfil: dict, conv: dict, tem_usuario: bool
+) -> str:
     atuais = {"licoes": {"verificadas": lic.get("verificadas") or [], "hipoteses": lic.get("hipoteses") or []}}
     if tem_usuario:
+        atuais["convencoes_pessoais"] = conv.get("convencoes") or []
         atuais["preferencias"] = pref.get("preferencias") or []
         atuais["perfil"] = {
             **{c: perfil.get(c) for c in PerfilUsuario.model_fields if c != "outros"},
             "outros": perfil.get("outros") or [],
         }
     aviso = "" if tem_usuario else (
-        "\nNão há usuário identificado: preencha SÓ as listas de lições; deixe preferências e perfil vazios.\n"
+        "\nNão há usuário identificado: use SÓ os destinos de lição; não registre convenções, "
+        "preferências nem perfil.\n"
     )
     return (
         "DOCUMENTOS ATUAIS (JSON):\n" + json.dumps(atuais, ensure_ascii=False, indent=1)
@@ -680,11 +781,13 @@ class _Extrator:
         ns_lic = (_NS_LICOES, _seg(dominio))
         ns_pref = ("users", _seg(user_id), _seg(dominio), "preferences") if user_id else None
         ns_perf = ("users", _seg(user_id), _seg(dominio), "profile") if user_id else None
+        ns_conv = ("users", _seg(user_id), _seg(dominio), "conventions") if user_id else None
         _, lic = _ler_doc(ns_lic, "LicoesDoBanco")
         _, pref = _ler_doc(ns_pref, "PreferenciasUsuario") if user_id else (None, {})
         _, perfil = _ler_doc(ns_perf, "PerfilUsuario") if user_id else (None, {})
+        _, conv = _ler_doc(ns_conv, "ConvencoesDoUsuario") if user_id else (None, {})
 
-        conteudo = _conteudo_para_o_llm(msgs, lic, pref, perfil, bool(user_id))
+        conteudo = _conteudo_para_o_llm(msgs, lic, pref, perfil, conv, bool(user_id))
         if os.getenv("MEMORIA_DEBUG", "0").strip() == "1":
             logger.info("[memoria] payload enviado ao extrator:\n%s", conteudo)
         m = self._llm.invoke([SystemMessage(content=INSTRUCOES), HumanMessage(content=conteudo)])
@@ -692,11 +795,14 @@ class _Extrator:
             raise ValueError(f"o modelo não devolveu as mudanças estruturadas: {_cortar(repr(m), 200)}")
         logger.info("[memoria] extrator: %s", _cortar(m.raciocinio, 600))
 
-        lic_novo, pref_novo, perfil_novo = aplicar_operacoes(m.operacoes, lic, pref, perfil, bool(user_id))
+        lic_novo, pref_novo, perfil_novo, conv_novo = aplicar_operacoes(
+            m.operacoes, lic, pref, perfil, conv, bool(user_id)
+        )
         _gravar(ns_lic, "LicoesDoBanco", _normalizar_licoes(lic), lic_novo)
         if user_id:
             _gravar(ns_pref, "PreferenciasUsuario", _normalizar_prefs(pref), pref_novo)
             _gravar(ns_perf, "PerfilUsuario", _normalizar_perfil(perfil), perfil_novo)
+            _gravar(ns_conv, "ConvencoesDoUsuario", _normalizar_convencoes(conv), conv_novo)
 
 
 def _normalizar_licoes(doc: dict) -> dict:
@@ -705,6 +811,10 @@ def _normalizar_licoes(doc: dict) -> dict:
 
 def _normalizar_prefs(doc: dict) -> dict:
     return {"preferencias": _itens(doc.get("preferencias"))}
+
+
+def _normalizar_convencoes(doc: dict) -> dict:
+    return {"convencoes": _itens(doc.get("convencoes"))}
 
 
 def _normalizar_perfil(doc: dict) -> dict:
@@ -809,7 +919,7 @@ def finalizar_turno(session_id: str, user_id: str, dominio: str, pergunta: str, 
         with _lock:
             trace = "\n".join(_traces.pop(session_id, []))
             lista = _turnos[session_id]
-            lista.append({"pergunta": pergunta, "trace": trace, "resposta": _cortar(resposta, _MAX_RESPOSTA)})
+            lista.append({"pergunta": pergunta, "trace": trace, "resposta": _resumir_resposta(resposta)})
             if len(lista) > _MAX_TURNOS_GUARDADOS:
                 excesso = len(lista) - _MAX_TURNOS_GUARDADOS
                 del lista[:excesso]
