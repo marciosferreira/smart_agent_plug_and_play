@@ -73,6 +73,7 @@ logger = logging.getLogger(__name__)
 from db import DB_PATH, tag_session_dominio
 import db_config
 import graphql_config
+import memoria
 
 SKILLS_FOLDER = Path(__file__).parent / "skills"
 SKILL_HEADER_LINES = 4
@@ -2160,8 +2161,12 @@ def _build_sub_agent(llm):
             f"\n\n## Skill dominio.md (já carregada — não chame read_skill para ela)\n{dominio_txt}"
             if dominio_txt and db_config.is_configured() else ""
         )
+        # Memória (lições do banco e preferências do usuário): vem depois do dominio.md e antes
+        # de `extra` para manter o prefixo estável entre chamadas.
+        _dom = db_config.dominio_filename()
+        bloco_memoria = memoria.bloco_licoes(_dom) + memoria.bloco_preferencias(_current_user_id.get(), _dom)
         msgs = [SystemMessage(
-            content=_diretiva_idioma() + SUB_SYSTEM_PROMPT + bloco_dominio + extra
+            content=_diretiva_idioma() + SUB_SYSTEM_PROMPT + bloco_dominio + bloco_memoria + extra
         )] + list(state["messages"])
         _tlog("sub_agente", "LLM INVOCADO", mensagens=len(msgs))
         _raise_if_cancelled()
@@ -2335,6 +2340,9 @@ def consultar_analista(detalhes: str, from_date: str = "", to_date: str = "", ti
             f"O sub-agente analista encontrou um erro interno ({type(e).__name__}) e não pôde "
             "completar a análise. Informe o usuário e sugira reformular a pergunta."
         )
+    # Memória: o SQL, os erros e os retries ficam só nesta camada (o orquestrador vê apenas o
+    # texto final), então o trace é guardado aqui para o extrator.
+    memoria.add_trace(_current_session.get(), resultado["messages"])
     # O Gemini pode devolver o conteúdo em partes (lista) — normaliza para texto.
     content = _extract_text_content(resultado["messages"][-1])
     if not content or not content.strip():
@@ -3838,7 +3846,8 @@ def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
 
     def no_orquestrador(state: State) -> dict:
         historico_recente = state["messages"][-(MAX_INTERACOES * 2):]
-        msgs = [SystemMessage(content=_diretiva_idioma() + ORQ_SYSTEM_PROMPT)] + historico_recente
+        bloco_pref = memoria.bloco_preferencias(_current_user_id.get(), db_config.dominio_filename())
+        msgs = [SystemMessage(content=_diretiva_idioma() + ORQ_SYSTEM_PROMPT + bloco_pref)] + historico_recente
         if _cancelled():
             return _cancelled_reply()
         # Última mensagem do usuário => 1ª chamada do turno (rotear ou responder direto).
@@ -3995,6 +4004,17 @@ def init_multi_agent(project: str, location: str, model_name: str, credentials=N
             **(_thinking_kwargs("THINKING_LEVEL_RELATORIO") or {"thinking_level": "medium"}),
         )
 
+        # Extrator da memória do agente (ver memoria.py): roda em background depois do turno,
+        # então pode raciocinar um pouco mais que o chat, mas é uma tarefa de classificação.
+        memoria.init(ChatVertexAI(
+            model_name=model_name,
+            project=project,
+            location=location,
+            credentials=credentials,
+            temperature=0.1,
+            **(_thinking_kwargs("THINKING_LEVEL_MEMORIA") or {"thinking_level": "low"}),
+        ))
+
         # Conexão persistente para o checkpointer (check_same_thread=False pois
         # o FastAPI despacha requests em threads diferentes)
         conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
@@ -4044,7 +4064,9 @@ def invoke_multi_agent(query: str, session_id: str = "default", user_id: str = "
         {"messages": [_build_human_message(query, session_id)]},
         config={"configurable": {"thread_id": session_id}, "recursion_limit": 50},
     )
-    return _extract_text_content(resultado["messages"][-1])
+    resposta = _extract_text_content(resultado["messages"][-1])
+    memoria.finalizar_turno(session_id, user_id, db_config.dominio_filename(), query, resposta)
+    return resposta
 
 
 
@@ -4114,6 +4136,7 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
         db_config.set_lang(lang)
         _t_graph = _time.perf_counter()
         _first_chunk = True
+        _resposta_final = ""
         try:
             for chunk in _orchestrator_graph.stream(
                 {"messages": [human_message]},
@@ -4143,7 +4166,11 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
                             if getattr(msg, "additional_kwargs", {}).get("cancelled"):
                                 event_queue.put({"type": "cancelled"})
                             elif text and not has_tool:
+                                _resposta_final = text
                                 event_queue.put({"type": "reply", "text": text})
+
+            if _resposta_final:
+                memoria.finalizar_turno(session_id, user_id, db_config.dominio_filename(), query, _resposta_final)
 
         except RunCancelled:
             event_queue.put({"type": "cancelled"})
@@ -4154,6 +4181,8 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
             logger.error("[STREAM ERROR] %s\n%s", e, _tb.format_exc())
             event_queue.put({"type": "error", "text": f"Erro interno: {e}"})
         finally:
+            if not _resposta_final:
+                memoria.descartar_turno(session_id)  # cancelado ou com erro: não extrai
             event_queue.put(None)  # sentinel — sinaliza fim do stream
             with _runs_lock:
                 if _active_runs.get(session_id) is run:
