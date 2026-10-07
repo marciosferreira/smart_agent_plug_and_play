@@ -3846,7 +3846,8 @@ def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
 
     def no_orquestrador(state: State) -> dict:
         historico_recente = state["messages"][-(MAX_INTERACOES * 2):]
-        bloco_pref = memoria.bloco_preferencias(_current_user_id.get(), db_config.dominio_filename())
+        _uid, _dom = _current_user_id.get(), db_config.dominio_filename()
+        bloco_pref = memoria.bloco_perfil(_uid, _dom) + memoria.bloco_preferencias(_uid, _dom)
         msgs = [SystemMessage(content=_diretiva_idioma() + ORQ_SYSTEM_PROMPT + bloco_pref)] + historico_recente
         if _cancelled():
             return _cancelled_reply()
@@ -3932,10 +3933,11 @@ def _chat_vertex_with_thinking_level():
                     if sig:
                         part.thought_signature = base64.b64decode(sig) if isinstance(sig, str) else sig
                     else:
-                        # Chamada de função que o modelo nunca gerou (ex.: o LangMem/trustcall
-                        # reinjeta o documento de memória existente como se fosse uma tool call).
-                        # Sem assinatura o Gemini 3 responde 400; este é o valor de bypass
-                        # documentado pelo Google para chamadas injetadas.
+                        # Chamada de função que o modelo nunca gerou (a memória já usou isso, quando
+                        # o trustcall reinjetava o documento como uma tool call). Sem assinatura o
+                        # Gemini 3 responde 400; este é o valor de bypass documentado pelo Google
+                        # para chamadas injetadas. Hoje nenhum fluxo conhecido depende dele: pode
+                        # sair se, depois de removido, as conversas e agendamentos seguirem OK.
                         part.thought_signature = b"skip_thought_signature_validator"
             return request
 
@@ -4010,11 +4012,10 @@ def init_multi_agent(project: str, location: str, model_name: str, credentials=N
             **(_thinking_kwargs("THINKING_LEVEL_RELATORIO") or {"thinking_level": "medium"}),
         )
 
-        # Extrator da memória do agente (ver memoria.py): roda em background depois do turno,
-        # então pode raciocinar um pouco mais que o chat, mas é uma tarefa de classificação.
-        # com_schemas_sem_null: os schemas do trustcall têm null aninhado, que esta versão do
-        # langchain-google-vertexai não converte para o Vertex.
-        memoria.init(memoria.com_schemas_sem_null(ChatVertexAI)(
+        # Extrator da memória do agente (ver memoria.py): uma chamada estruturada por turno, em
+        # background, que decide e devolve as mudanças nos três documentos (lições, preferências
+        # e perfil). Como separa o que é lição do que é preferência, o padrão é medium.
+        memoria.init(ChatVertexAI(
             model_name=model_name,
             project=project,
             location=location,

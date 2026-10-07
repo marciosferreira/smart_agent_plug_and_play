@@ -27,7 +27,7 @@ Este documento descreve como cada componente foi construído e por que as decis�
 | `db_config.py` | Porta única para o pack `config/` (settings, idioma, seções do `dominio.md`, períodos, painéis padrão) e para o banco de domínio em modo SQL |
 | `graphql_config.py` | Cliente GraphQL do modo `graphql`: `reportTable`, `reportAggregate`, `reportSchema` |
 | `db.py` | Banco local do app (`mfg.db`): criação e migração das tabelas de tarefas, painéis, ordem, auditoria e sessão×domínio |
-| `memoria.py` | Memória do agente: extratores do LangMem em background que mantêm lições do banco e preferências do usuário no `mfg.db`, e os blocos injetados nos prompts (ver [Memória do agente](#memória-do-agente--lições-do-banco-e-preferências-do-usuário)) |
+| `memoria.py` | Memória do agente: uma extração em background (chamada estruturada ao LLM, agendada pelo `ReflectionExecutor` do LangMem) que mantém lições do banco, preferências e perfil do usuário no `mfg.db`, e os blocos injetados nos prompts (ver [Memória do agente](#memória-do-agente--lições-do-banco-e-preferências-do-usuário)) |
 | `chart_store.py` | Artefatos (gráficos, PDFs, Excels) e alertas de threshold, também em `mfg.db` |
 | `scheduler/daemon.py` | Loop do agendador e execução das tarefas (retry, timeout, relatórios) |
 | `scheduler/runner.py`, `scheduler/context.py` | Sandbox do `task_code` e o objeto `ctx` injetado nele |
@@ -149,7 +149,7 @@ O `graphql_config.py` é o único ponto de contato com o endpoint (timeout de 30
 | **O que guarda** | Os dados que o negócio quer analisar | Tarefas agendadas (`scheduled_tasks`, `task_runs`, `task_code_versions`, `task_id_sequence`), auditoria de erros de geração de código (`task_code_audit`), alertas de threshold (`threshold_alerts`), painéis customizados (`dashboard_widgets`) e a ordem dos painéis por usuário (`dashboard_widget_order`), artefatos gerados (`charts`, `pdfs`, `excels`), qual domínio cada sessão de chat usava (`session_dominio`), o histórico de conversa do LangGraph (`checkpoints`, `writes`) e a memória do agente, com lições e preferências (`store`, `store_migrations`) |
 | **Troca com a config?** | Sim — é exatamente o que `settings.yml` aponta | Não — é fixo por instalação, independe de qual domínio está ativo |
 
-Quem cria o quê: `db.py` (`init_db` + `migrate_db`, no startup) cuida das tabelas de tarefas, painéis, auditoria, ordem e sessão×domínio; `chart_store.init_chart_store` cria `charts`, `pdfs`, `excels` e `threshold_alerts`; o `SqliteSaver` do LangGraph cria `checkpoints` e `writes`; o `SqliteStore` do LangGraph, aberto por `memoria.init`, cria `store` e `store_migrations`. As tabelas de tarefas, painéis, alertas e artefatos carregam `user_id` e `dominio`; o histórico de execuções e as versões de código herdam o escopo da tarefa pelo `task_id`; a memória do agente separa por namespace do store (domínio nas lições, `user_id` nas preferências), não por coluna. Os **painéis padrão** do dashboard não estão aqui — vivem em arquivos do pack (ver [Painéis do dashboard](#painéis-do-dashboard--padrão-do-domínio-e-customizados)).
+Quem cria o quê: `db.py` (`init_db` + `migrate_db`, no startup) cuida das tabelas de tarefas, painéis, auditoria, ordem e sessão×domínio; `chart_store.init_chart_store` cria `charts`, `pdfs`, `excels` e `threshold_alerts`; o `SqliteSaver` do LangGraph cria `checkpoints` e `writes`; o `SqliteStore` do LangGraph, aberto por `memoria.init`, cria `store` e `store_migrations`. As tabelas de tarefas, painéis, alertas e artefatos carregam `user_id` e `dominio`; o histórico de execuções e as versões de código herdam o escopo da tarefa pelo `task_id`; a memória do agente separa por namespace do store (domínio nas lições; `user_id` e domínio nas preferências), não por coluna. Os **painéis padrão** do dashboard não estão aqui — vivem em arquivos do pack (ver [Painéis do dashboard](#painéis-do-dashboard--padrão-do-domínio-e-customizados)).
 
 Na prática: apagar/mover `mfg.db` reseta tarefas, alertas, painéis, artefatos, **o histórico de conversa e a memória do agente** sem afetar o banco de domínio; trocar o banco de domínio via `settings.yml` não afeta nada que esteja em `mfg.db` — só quais linhas dele ficam visíveis.
 
@@ -195,13 +195,13 @@ Tarefas agendadas são o único fluxo que não passa pelo `ContextVar`: `user_id
 | `dashboard_widget_order` (ordem dos painéis) | `user_id` (chave junto com `dominio`) | Sem ordem salva — ordem natural |
 | `threshold_alerts` (alertas de threshold) | `user_id` | Vê só alertas sem dono |
 | `charts` / `pdfs` / `excels` (artefatos gerados) | `user_id` | Vê só artefatos sem dono |
-| `store`, namespace `users/<user_id>/preferences` (preferências da [memória do agente](#memória-do-agente--lições-do-banco-e-preferências-do-usuário)) | Namespace, não coluna | Não lê nem grava preferências |
+| `store`, namespaces `users/<user_id>/<dominio>/preferences` e `.../profile` (preferências e perfil da [memória do agente](#memória-do-agente--lições-do-banco-e-preferências-do-usuário)) | Namespace, não coluna | Não lê nem grava preferências nem perfil |
 
 Nas tabelas, a regra é sempre a mesma cláusula SQL — `(user_id = ? OR user_id IS NULL)` — aplicada com o parâmetro vindo do request: uma linha com `user_id` preenchido só aparece para o dono; uma linha com `user_id NULL` é tratada como "compartilhada" e aparece para qualquer um (esse é o caso de registros antigos, criados antes dessa separação existir, e serve como modo degradado seguro quando o host esquece de mandar o parâmetro — ninguém vê dados de outro usuário, só dados sem dono). O filtro por `dominio` (`(dominio = ? OR dominio IS NULL)`) é aplicado por cima, sempre.
 
 Painéis customizados têm uma regra a mais: com `shared = 1` o painel fica **visível** para todos os usuários do domínio, mas só o dono (ou uma linha legada sem dono) pode editar, remover ou alterar o compartilhamento — "compartilhado" dá visibilidade, não permissão de escrita.
 
-A memória do agente segue outra lógica: as preferências ficam num namespace por `user_id` e **valem em todos os domínios**; as lições ficam num namespace por domínio e são **compartilhadas por todos os usuários** dele, porque descrevem o banco, não a pessoa.
+A memória do agente segue outra lógica, e **sempre separada por domínio**: as preferências ficam num namespace por `user_id` **e** domínio (o que o usuário prefere num domínio não aparece em outro); as lições ficam num namespace só por domínio e são **compartilhadas por todos os usuários** dele, porque descrevem o banco, não a pessoa.
 
 ### Três eixos independentes: `dominio`, `user_id` e `lang`
 
@@ -210,7 +210,7 @@ Não confundir os três:
 | Eixo | Escopo | Quem define | O que decide |
 | --- | --- | --- | --- |
 | `dominio` | **Processo** (muda com restart) | `settings.yml` | Qual banco/negócio está ativo para toda a instalação, e quais lições da memória do agente valem |
-| `user_id` | **Requisição** | App host (`?user_id=`) | De quem são tarefas, painéis, alertas e artefatos dentro daquele domínio, e as preferências da memória do agente (estas valem em todos os domínios) |
+| `user_id` | **Requisição** | App host (`?user_id=`) | De quem são tarefas, painéis, alertas e artefatos dentro daquele domínio, e as preferências da memória do agente (também separadas por domínio) |
 | `lang` | **Requisição** | App host (`?lang=`) ou seletor do header | Em que idioma a interface, as respostas e o conteúdo de domínio são servidos |
 
 Trocar o domínio não redistribui usuários; trocar de usuário não troca o banco de negócio consultado; trocar de idioma não muda nem um nem outro.
@@ -287,8 +287,8 @@ Usuário (voz ou texto, com recortes de tela opcionais)
 
 Memória do agente (memoria.py — LangMem, em background, fora do caminho da resposta)
   ├── consultar_analista() → add_trace()   → guarda o trace do analista (SQL, erros, retries)
-  ├── fim do turno → finalizar_turno()     → ReflectionExecutor: extratores de lições e de preferências
-  └── turnos seguintes                     → lições no prompt do analista; preferências nos dois prompts
+  ├── fim do turno → finalizar_turno()     → ReflectionExecutor: extração única (lições, preferências e perfil)
+  └── turnos seguintes                     → lições no prompt do analista; preferências nos dois prompts; perfil no do orquestrador
 
 Daemon de agendamento (loop asyncio + threads, no mesmo processo do FastAPI)
   └── Executa o task_code salvo de cada tarefa — sem LLM (exceto ctx.analisar)
@@ -327,9 +327,9 @@ O modelo é o `MODEL_NAME` (padrão `gemini-3.8-flash`, via Vertex AI), instanci
 | Orquestrador | 0,4 | `THINKING_LEVEL_ORQUESTRADOR` | Roteamento e redação da resposta |
 | Orquestrador (roteamento) | 0,4 | `THINKING_LEVEL_ORQUESTRADOR_ROTEAMENTO` (opcional) | Só a 1ª chamada de cada turno (decidir a tool); sem a env, usa o papel acima |
 | Relatório | 0,4 | `THINKING_LEVEL_RELATORIO` (padrão `medium`) | `ctx.analisar`, que roda no daemon sem ninguém esperando |
-| Memória (extrator) | 0,1 | `THINKING_LEVEL_MEMORIA` (padrão `medium`) | Extratores de lições e de preferências da [memória do agente](#memória-do-agente--lições-do-banco-e-preferências-do-usuário), em background |
+| Memória (extrator) | 0,1 | `THINKING_LEVEL_MEMORIA` (padrão `medium`) | Extração única de lições, preferências e perfil da [memória do agente](#memória-do-agente--lições-do-banco-e-preferências-do-usuário), em background |
 
-Os níveis aceitos são `low`, `medium` e `high`; sem a env, vale o padrão do modelo. O `ChatVertexAI` é estendido (`ChatVertexAIThinkingLevel`) para enviar `thinking_level` pelo endpoint v1 e reinserir as `thought_signature` das chamadas de função, que o wrapper original descarta e que o Gemini 3 exige na chamada seguinte a qualquer tool call. Para chamadas de função que o modelo nunca gerou (o trustcall, motor do LangMem, reinjeta o documento de memória assim), a classe usa o valor de bypass documentado pelo Google (`skip_thought_signature_validator`). O modelo do extrator da memória ainda passa por `memoria.com_schemas_sem_null`, que tira o tipo `null` dos schemas das ferramentas do trustcall: o `langchain-google-vertexai` 2.1.2 não converte esse tipo para o Vertex.
+Os níveis aceitos são `low`, `medium` e `high`; sem a env, vale o padrão do modelo. O `ChatVertexAI` é estendido (`ChatVertexAIThinkingLevel`) para enviar `thinking_level` pelo endpoint v1 e reinserir as `thought_signature` das chamadas de função, que o wrapper original descarta e que o Gemini 3 exige na chamada seguinte a qualquer tool call. Para chamadas de função sem assinatura real, a classe usa o valor de bypass documentado pelo Google (`skip_thought_signature_validator`). A memória já dependeu disso (quando o trustcall reinjetava o documento como uma tool call), mas hoje nenhum fluxo conhecido precisa dele.
 
 ---
 
@@ -403,12 +403,13 @@ O checkpointer guarda a conversa de cada sessão. O que o agente aprende **entre
 
 ## Memória do agente — lições do banco e preferências do usuário
 
-Além do histórico de cada sessão (checkpointer), o agente aprende entre sessões. Ele **não grava nada**: depois de cada turno, extratores do **LangMem** (`create_memory_store_manager` + `ReflectionExecutor`, em `memoria.py`) leem o que aconteceu, em background, e atualizam dois documentos no `mfg.db`.
+Além do histórico de cada sessão (checkpointer), o agente aprende entre sessões. Ele **não grava nada**: depois de cada turno, **uma única chamada estruturada ao LLM** (`_Extrator`, em `memoria.py`) lê o que aconteceu junto com o conteúdo atual dos três documentos, em background, e devolve as mudanças (`MudancasMemoria`); o código as aplica (`aplicar_licoes`, `aplicar_preferencias`, `aplicar_perfil`) nos documentos do `mfg.db`. Como o mesmo modelo decide, na mesma chamada, em qual documento cada declaração entra, ela não vai para dois deles nem fica contraditória entre eles. Do **LangMem** só se usa o `ReflectionExecutor`, que agenda a extração e faz o debounce por sessão.
 
 | Documento | Namespace no store | Escopo | Quem lê | Conteúdo |
 | --- | --- | --- | --- | --- |
 | **Lições do banco** | `db_lessons / <dominio>` | Por domínio (compartilhado por todos os usuários) | Sub-agente analista (quem escreve o SQL) | Duas listas de texto, uma regra curta por item. `verificadas`: erro técnico corrigido, ou regra declarada pelo usuário como permanente (qual coluna ou dado usar, como calcular ou filtrar). `hipoteses`: contestação sem causa declarada, só com indício concreto no SQL ou no resultado |
-| **Preferências** | `users / <user_id> / preferences` | Por `user_id`, valendo em todos os domínios | Orquestrador (redige a resposta) e analista (gráficos) | Tipos de gráfico, formato e nível de detalhe das respostas, escopo consultado com frequência (só se aparecer em 2 ou mais turnos). Regras sobre qual dado usar ou como calcular são lições, não preferências |
+| **Preferências** | `users / <user_id> / <dominio> / preferences` | Por `user_id` dentro de cada domínio (não passam de um domínio para outro) | Orquestrador (redige a resposta) e analista (gráficos) | Uma lista de frases livres (`preferencias`), sem campos por assunto: cor, tipo de gráfico, formato, nível de detalhe, idioma etc. Só entra o que o usuário **declara** como permanente ("prefiro", "sempre que possível", "daqui para frente"); um pedido pontual ("faça um gráfico de barras") não é preferência, nem se repete, e nada é inferido por recorrência. Regras sobre qual dado usar ou como calcular são lições, não preferências |
+| **Perfil** | `users / <user_id> / <dominio> / profile` | Por `user_id` dentro de cada domínio | Só o orquestrador (se dirige à pessoa e ajusta o tom) | Quem é o usuário, só como ele mesmo contou: `nome`, `cargo`, `funcao_area`, `atuacao`, `local_atuacao`, `equipe_gestor` (texto curto, ou vazio) e `outros`, lista livre para o que não couber nos campos. Nunca inferido do que ele pergunta; nunca dados de contato nem sensíveis (e-mail, telefone, documentos, saúde, credenciais). Dá para corrigir e esquecer ("esqueça meu nome"). O perfil diz **quem** é a pessoa; as preferências, **como** ela quer receber os resultados |
 
 **O que nunca é gravado:** valores e resultados dos dados, cada pedido como registro, histórico de SQLs.
 
@@ -417,29 +418,28 @@ Os documentos ficam na tabela `store` do `SqliteStore` do LangGraph, dentro do p
 ### Fluxo
 
 1. `consultar_analista` guarda o trace do analista (SQL, erros, retries, com a saída cortada em 300 caracteres) via `memoria.add_trace`. O orquestrador só vê o texto final do analista, então é a única chance de capturar isso.
-2. No fim do turno, `memoria.finalizar_turno` fecha o registro e envia ao `ReflectionExecutor` (um por documento). O `thread_id` é o `session_id`: um turno novo substitui a extração ainda pendente da mesma sessão, e `MEMORIA_DELAY_SEGUNDOS` (padrão 30) é a espera antes de rodar. Turnos cancelados ou com erro são descartados. O extrator de lições só roda se a janela tiver trace do analista ou se o usuário declarar uma regra ("sempre", "nunca", "o correto é" e equivalentes em inglês e chinês); o de preferências só roda com `user_id`.
+2. No fim do turno, `memoria.finalizar_turno` fecha o registro e envia ao `ReflectionExecutor` (um só, para os três documentos). O `thread_id` é o `session_id`: um turno novo substitui a extração ainda pendente da mesma sessão, e `MEMORIA_DELAY_SEGUNDOS` (padrão 30) é a espera antes de rodar. Turnos cancelados ou com erro são descartados. Com `user_id` a extração roda em todo turno (uma chamada de LLM), porque uma declaração de preferência ou de perfil pode vir em qualquer mensagem. Sem `user_id` só há lições, e a extração só roda se a janela tiver trace do analista ou se o usuário declarar uma regra ("sempre", "nunca", "o correto é" e equivalentes em inglês e chinês).
 3. A janela enviada ao LLM tem os turnos ainda não extraídos **mais um turno de contexto** (marcado `[CONTEXTO, já processado]`), para que uma contestação chegue junto com a análise contestada mesmo que ela já tenha sido extraída antes. O ponteiro de turnos extraídos avança dentro da própria extração (`_Extrator`), só quando ela termina sem erro; se falhar, os turnos voltam na próxima extração da sessão.
-4. No turno seguinte, `bloco_licoes` entra no prompt do analista (depois do `dominio.md`) e `bloco_preferencias` nos prompts do orquestrador e do analista. As hipóteses entram rotuladas como tal, para confirmar antes de aplicar; as preferências entram como instruções do usuário.
+4. No turno seguinte, `bloco_licoes` entra no prompt do analista (depois do `dominio.md`) `bloco_preferencias` nos prompts do orquestrador e do analista e `bloco_perfil` só no do orquestrador. As hipóteses entram rotuladas como tal, para confirmar antes de aplicar; as preferências entram como instruções do usuário.
 
 ### Proteções e detalhes de integração
 
-- **Lições como texto, não como objetos.** O LangMem atualiza o documento com JSON Patch, via trustcall. No schema do trustcall, o valor de um patch que é objeto é um dicionário genérico (`additionalProperties`), que a chamada de função do Gemini não suporta: o modelo decidia certo o que gravar, mas mandava `{}` como lição, a validação falhava e o trustcall descartava a atualização em silêncio. Por isso as lições são listas de texto (o patch vira `add /verificadas/- "regra"`), como já eram as preferências.
-- **`null` nos schemas do trustcall.** O schema do `JsonPatch` admite `null` dentro de listas aninhadas, e o `langchain-google-vertexai 2.1.2` não converte isso para o Vertex (`Invalid enum value NULL for enum type ...Type`): a chamada falhava antes de sair da máquina e o trustcall repetia até estourar o limite de passos. O modelo do extrator é criado com `memoria.com_schemas_sem_null(...)`, que tira o tipo `null` dos schemas das ferramentas; os modelos do agente não mudam.
-- **`thought_signature` do Gemini 3.** O trustcall reinjeta o documento existente como uma chamada de função que o modelo nunca gerou, e o Vertex responde 400 sem `thought_signature`. A subclasse `ChatVertexAIThinkingLevel` usa o valor de bypass documentado pelo Google (`skip_thought_signature_validator`) para qualquer chamada de função sem assinatura real.
-- **Trava das lições.** Ao tentar corrigir um patch inválido, o trustcall chegou a sobrescrever uma lição verificada com a regra nova. `_Extrator` compara o documento antes e depois: uma lição verificada que sumiu, sem nenhuma lição parecida no novo (similaridade ≥ 0,6, o que indicaria só uma reescrita), é restaurada, e o evento vai para o log. O limite de 30 lições também é imposto aqui (descarta hipóteses primeiro). Como consequência, uma lição verificada só sai do banco por intervenção manual.
-- **`SqliteStore` e threads.** O store usa uma conexão única e exige autocommit (`isolation_level=None`); o manager faz buscas em paralelo e o chat lê o store em outras threads, então `_SqliteStoreSeguro` serializa as operações com um lock.
+- **Mudanças, não documentos.** O modelo não devolve os documentos, e sim `MudancasMemoria`: listas de itens novos, o texto exato do que retirar ou promover e, no perfil, campo e valor (`perfil_definir`; valor vazio apaga o campo). Trocar ou reescrever um item é retirar o antigo e acrescentar o novo. O código casa o texto citado com o item existente (similaridade ≥ 0,8), não duplica frase igual (≥ 0,9) e impõe os limites: 30 lições (descarta hipóteses primeiro), 20 preferências e 10 itens livres no perfil (descarta os mais antigos). Os documentos continuam listas de texto. Retirar uma lição verificada vai para o log como aviso.
+- **Sem JSON Patch.** Antes o LangMem (trustcall) editava os documentos por JSON Patch, o que obrigava a ter lições em lista de texto (o Gemini não gera um objeto como valor de patch), a tirar o `null` dos schemas (`com_schemas_sem_null`), a usar o bypass de `thought_signature` e a ter uma trava contra a sobrescrita de lições verificadas. Nada disso existe mais: quem retira uma lição agora é uma decisão explícita no resultado, e não um efeito colateral de um patch.
+- **`SqliteStore` e threads.** O store usa uma conexão única e exige autocommit (`isolation_level=None`); o extrator e o chat leem e gravam o store em threads diferentes, então `_SqliteStoreSeguro` serializa as operações com um lock.
 - **Shutdown.** O worker do `ReflectionExecutor` não é daemon: o `main.py` chama `memoria.encerrar()` no evento de shutdown, senão o processo não termina.
-- **Logs.** Para cada extração, o log mostra o `planned_edits` do extrator (o motivo de cada decisão, inclusive a de não gravar nada) e cada lição gravada ou retirada. Erros internos do trustcall vão para o logger `extraction`. `MEMORIA_DEBUG=1` loga também o payload enviado ao extrator.
-- Sem `user_id` não há preferências (só lições). Falha na extração ou na leitura nunca afeta a resposta do chat: tudo é try/except com log. A leitura é feita a cada chamada de LLM (consulta pequena ao SQLite), então uma lição nova vale já na próxima mensagem.
+- **Logs.** Para cada extração, o log mostra o `raciocinio` do extrator (o motivo da decisão, inclusive a de não gravar nada), cada documento atualizado e cada item retirado. `MEMORIA_DEBUG=1` loga também o payload enviado ao extrator.
+- **A conversa vale mais que a memória.** A extração roda em background, só 30 s depois do último turno da sessão (cada turno novo adia a anterior), então durante uma conversa ativa a memória fica atrasada em relação ao que o usuário acabou de dizer. Os blocos injetados avisam isso ao modelo: se o usuário trocou, desfez ou contrariou algo na conversa, ou se o pedido atual diz o contrário, vale a conversa. O orquestrador vê o histórico (as últimas `MAX_INTERACOES` interações) e acata a correção. O analista não tem histórico: para ele vale o pedido delegado, que o orquestrador redige, e a memória só complementa.
+- Sem `user_id` não há preferências nem perfil (só lições). Falha na extração ou na leitura nunca afeta a resposta do chat: tudo é try/except com log. A leitura é feita a cada chamada de LLM (consulta pequena ao SQLite), então uma lição nova vale já na próxima mensagem.
 
 ### Limites conhecidos
 
 - Validada na stack do `.venv` (Python 3.11, `langchain-core 0.3.86`, `langchain-google-vertexai 2.1.2`) com o Gemini 3.8 Flash no Vertex: cenários de teste (erro de coluna, regra declarada com e sem lição existente, contestação com e sem indício, pedido pontual, preferência) e uma conversa real no app. Ainda são poucos cenários; vale revisar os documentos por amostragem nas primeiras semanas.
 - O modelo trata as preferências como instruções, mas pode ignorá-las em parte.
+- A fronteira entre "pedido" e "preferência declarada" depende só do prompt do extrator (`PREFERENCIAS_INSTRUCOES`); não há validação em código. Documentos gravados no schema antigo (campos `graficos_preferidos`, `formato_resposta`, `escopo_frequente`) não são mais lidos.
 - As instruções do extrator têm exemplos de domínio fictícios (`producao`, `paradas`); trocar por casos reais do seu banco melhora o resultado.
-- As preferências valem em todos os domínios, mas o `escopo_frequente` (plantas, linhas, produtos) é de um domínio só: quem trabalha em dois domínios pode ver no prompt de um o escopo do outro.
 - Os turnos pendentes ficam em memória: um restart do app antes da extração perde o turno.
-- Se o `langchain-google-vertexai` ou o `langmem` forem atualizados, `com_schemas_sem_null` e o ajuste de `thought_signature` podem deixar de ser necessários (ou deixar de bastar): vale repetir os testes.
+- `langchain-google-vertexai` está fixado em `2.1.2` no `requirements.txt`. `tests/test_memoria_compat.py` (sem rede e sem LLM: `.venv/Scripts/python -m unittest discover -s tests`) trava as versões validadas do `langchain-google-vertexai` e do `langmem`, confere que o Vertex aceita o schema da saída estruturada do extrator, testa a mesclagem das mudanças e o bypass de `thought_signature`. Ao atualizar as bibliotecas, repita também uma conversa real com o Vertex.
 
 ---
 
@@ -997,7 +997,7 @@ Hoje o app sobe um único processo (`python run.py` ou `uvicorn main:app`, sem `
 
 - **LLM**: Gemini (padrão `gemini-3.8-flash`, configurável por `MODEL_NAME`) via Google Vertex AI
 - **Orquestração**: LangGraph 1.0+ (StateGraph, ToolNode, SqliteSaver)
-- **Memória de longo prazo**: LangMem (`create_memory_store_manager`, `ReflectionExecutor`; trustcall por baixo) sobre o `SqliteStore` do LangGraph
+- **Memória de longo prazo**: LangMem (só o `ReflectionExecutor`, que agenda a extração) sobre o `SqliteStore` do LangGraph
 - **API**: FastAPI + SSE (sse-starlette)
 - **Dados do domínio**: SQLAlchemy (modo `sql`) ou `requests` contra um endpoint GraphQL (modo `graphql`)
 - **Frontend**: Angular 19 (standalone components, signals), Chart.js (+ chartjs-chart-matrix para heatmaps), marked, html-to-image — ver [Frontend](#frontend--angular-19-standalone-components)

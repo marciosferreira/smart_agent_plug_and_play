@@ -1,15 +1,24 @@
 """
 Memória do agente: aprende sobre o banco e sobre o usuário a partir das conversas.
 
-Dois documentos, mantidos em background por extratores do LangMem
-(create_memory_store_manager + ReflectionExecutor), depois do turno, sem atrasar a resposta:
+Três documentos, mantidos em background depois do turno, sem atrasar a resposta:
 
   LIÇÕES        -> regras sobre como consultar o banco. Um documento por domínio (compartilhado
                    por todos os usuários), com duas listas de texto: `verificadas` e `hipoteses`.
                    Lido pelo sub-agente analista, que é quem escreve o SQL.
-  PREFERÊNCIAS  -> preferências de apresentação. Um documento por usuário, que vale em todos
-                   os domínios. Lido pelo orquestrador (que redige a resposta) e pelo analista
-                   (gráficos).
+  PREFERÊNCIAS  -> preferências que o usuário declarou ("prefiro", "sempre que possível"), em
+                   frases livres, sem campos por assunto. Um documento por usuário e por domínio
+                   (nada vaza de um domínio para outro). Lido pelo orquestrador (que redige a
+                   resposta) e pelo analista (gráficos).
+  PERFIL        -> quem é o usuário, como ele mesmo contou (nome, cargo, área, atuação, local,
+                   equipe ou gestor, e uma lista livre para o que não couber). Um documento por
+                   usuário e por domínio. Lido só pelo orquestrador, que se dirige à pessoa.
+
+Uma ÚNICA chamada estruturada ao LLM (`_Extrator`) lê a conversa e os três documentos e devolve
+as mudanças (`MudancasMemoria`); o código as aplica (`aplicar_*`). Como o mesmo modelo decide,
+na mesma chamada, em qual documento cada declaração entra, ela nunca vai para dois (nem
+contradiz um deles). Do LangMem só usamos o `ReflectionExecutor`, que agenda a extração em
+background e faz o debounce por sessão.
 
 O agente não grava nada: ele só lê. Os dados e valores das consultas nunca são gravados.
 Os documentos ficam no mfg.db, na tabela `store` do SqliteStore do LangGraph.
@@ -18,7 +27,8 @@ Fluxo no agent_multi.py:
   consultar_analista -> add_trace(): guarda o trace do analista (SQL, erros, retries), que
                         não aparece no histórico do orquestrador.
   fim do turno       -> finalizar_turno(): fecha o registro do turno e envia ao executor.
-  prompts            -> bloco_licoes() e bloco_preferencias() devolvem o texto a injetar.
+  prompts            -> bloco_licoes(), bloco_preferencias() e bloco_perfil() devolvem o texto
+                        a injetar.
   shutdown do app    -> encerrar(): o worker do ReflectionExecutor não é daemon.
 
 Variáveis de ambiente:
@@ -41,12 +51,9 @@ from collections import defaultdict
 from concurrent.futures import Future, wait
 from typing import Literal
 
-from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
-from langchain_core.runnables.config import patch_config
-from langgraph.config import get_config
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.store.sqlite import SqliteStore
-from langmem import ReflectionExecutor, create_memory_store_manager
+from langmem import ReflectionExecutor
 from pydantic import BaseModel, Field
 
 from db import DB_PATH
@@ -58,55 +65,16 @@ _MAX_ARGS = 800          # chars de entrada de ferramenta mostrados ao extrator
 _MAX_SAIDA = 300         # chars de saída de ferramenta (corta dados de produção)
 _MAX_RESPOSTA = 1500     # chars da resposta final mostrados ao extrator
 _MAX_TURNOS_GUARDADOS = 6
-_LICAO_PARECIDA = 0.6    # similaridade a partir da qual uma lição reescrita conta como a mesma
+MAX_PREFERENCIAS = 20
+MAX_OUTROS = 10          # itens livres do perfil
+_IGUAL = 0.9             # similaridade a partir da qual duas frases contam como a mesma
+_CITADA = 0.8            # mínimo para o texto citado pelo extrator casar com um item existente
 
 _NS_LICOES = "db_lessons"
-_NS_PREFERENCIAS = ("users", "{langgraph_user_id}", "preferences")
 
 
 def ativa() -> bool:
     return os.getenv("MEMORIA_ATIVA", "1").strip() != "0"
-
-
-def _sem_null(schema):
-    """Remove o tipo null de um JSON Schema (ver com_schemas_sem_null)."""
-    if isinstance(schema, list):
-        return [_sem_null(s) for s in schema]
-    if not isinstance(schema, dict):
-        return schema
-    saida = {}
-    for chave, valor in schema.items():
-        if chave in ("anyOf", "oneOf") and isinstance(valor, list):
-            opcoes = [_sem_null(o) for o in valor if not (isinstance(o, dict) and o.get("type") == "null")]
-            if len(opcoes) == 1:  # anyOf de uma opção só vira a própria opção
-                saida.update(opcoes[0])
-            else:
-                saida[chave] = opcoes
-        elif chave == "type" and isinstance(valor, list):
-            tipos = [t for t in valor if t != "null"]
-            saida[chave] = tipos[0] if len(tipos) == 1 else tipos
-        else:
-            saida[chave] = _sem_null(valor)
-    return saida
-
-
-def com_schemas_sem_null(cls):
-    """Subclasse do modelo de chat que tira o tipo null dos schemas das ferramentas.
-
-    O trustcall (motor do LangMem) descreve o valor de um JSON Patch com uniões que admitem
-    null dentro de listas aninhadas, e o langchain-google-vertexai 2.1.2 não converte isso
-    para o Vertex ("Invalid enum value NULL for enum type ...Type"): a chamada falha antes
-    de sair da máquina, o trustcall repete até o limite de passos e nada é gravado. Só o
-    modelo do extrator usa esta classe; os modelos do agente ficam como estão.
-    """
-    from langchain_core.utils.function_calling import convert_to_openai_tool
-
-    class _ModeloSemNull(cls):
-        def bind_tools(self, tools, **kwargs):
-            return super().bind_tools([_sem_null(convert_to_openai_tool(t)) for t in tools], **kwargs)
-
-    _ModeloSemNull.__name__ = f"{cls.__name__}SemNull"
-    return _ModeloSemNull
 
 
 def _delay() -> int:
@@ -127,11 +95,7 @@ def _seg(valor: str) -> str:
 class LicoesDoBanco(BaseModel):
     """Lições aprendidas sobre como consultar este banco de dados.
 
-    Duas listas de texto, e não uma lista de objetos: o LangMem atualiza o documento com
-    JSON Patch, e o Gemini não consegue gerar um objeto como valor de um patch (no schema
-    do trustcall esse valor é um dict genérico, com additionalProperties, que a chamada de
-    função do Gemini não suporta). Ele manda `{}` e a lição é descartada na validação.
-    Texto ele gera sem problema.
+    Duas listas de texto, uma regra curta por item.
     """
 
     verificadas: list[str] = Field(
@@ -154,131 +118,166 @@ class Licao(BaseModel):
 
 
 class PreferenciasUsuario(BaseModel):
-    """Preferências de apresentação do usuário."""
+    """Preferências do usuário, como frases livres.
 
-    graficos_preferidos: list[str] = Field(
-        default_factory=list, description="Tipos de gráfico que o usuário pede ou aprova."
+    Lista de texto, sem campos por assunto (cor, tipo de gráfico, formato...): ninguém prevê
+    as preferências de um usuário, e um campo novo a cada tipo de pedido não escala.
+    """
+
+    preferencias: list[str] = Field(
+        default_factory=list,
+        description="Preferências que o usuário DECLAROU como permanentes, uma frase curta "
+        "por item, nas palavras dele. Nunca inferidas de pedidos pontuais.",
     )
-    formato_resposta: str | None = Field(
-        None, description="Ex.: resumo curto primeiro, tabela, nível de detalhe."
+
+
+class PerfilUsuario(BaseModel):
+    """Quem é o usuário, só o que ele mesmo declarou.
+
+    Campos de texto simples (ou vazios) mais uma lista livre: a lista `outros` guarda o que
+    ninguém previu, sem exigir campo novo.
+    """
+
+    nome: str | None = Field(None, description="Como a pessoa quer ser chamada.")
+    cargo: str | None = Field(None, description="Cargo ou posição.")
+    funcao_area: str | None = Field(None, description="Função, área ou departamento.")
+    atuacao: str | None = Field(
+        None, description="O que faz no dia a dia e o que acompanha, em uma frase."
     )
-    escopo_frequente: list[str] = Field(
-        default_factory=list, description="Plantas, linhas ou produtos que ele consulta."
+    local_atuacao: str | None = Field(
+        None, description="Planta, site, região ou unidade de que cuida."
+    )
+    equipe_gestor: str | None = Field(None, description="Equipe a que pertence ou gestor.")
+    outros: list[str] = Field(
+        default_factory=list,
+        description="Outros fatos sobre a pessoa que ela declarou e não cabem nos campos "
+        "acima. Uma frase curta por item.",
     )
 
 
 # ---------------------------------------------------------------------------
-# Instruções dos extratores
+# Saída e instruções do extrator
 # ---------------------------------------------------------------------------
-LICOES_INSTRUCOES = """\
-Você mantém o documento de LIÇÕES sobre como consultar um banco de dados. As lições \
-ajudam um agente de análise a não repetir erros. Escreva as lições em português.
+class CampoPerfil(BaseModel):
+    campo: Literal["nome", "cargo", "funcao_area", "atuacao", "local_atuacao", "equipe_gestor"]
+    valor: str = Field(description="Novo valor, em texto curto. Texto vazio apaga o campo.")
 
-O documento tem duas listas de texto: "verificadas" (regras confirmadas) e "hipoteses" \
-(regras ainda não confirmadas). Cada item é um texto curto com a regra. Explique o \
-motivo de cada mudança em planned_edits, em uma frase.
 
-Você recebe as mensagens de um ou mais turnos: pedidos do usuário, chamadas de \
-ferramenta (SQL, erros, novas tentativas) e respostas do agente. Mensagens marcadas \
-com [CONTEXTO] já foram processadas antes; use-as só para entender o que o usuário \
-está contestando.
+class MudancasMemoria(BaseModel):
+    """As mudanças a aplicar nos três documentos. Cada declaração vai para UM só documento."""
 
-O QUE REGISTRAR (uma lição = uma regra curta e específica):
-1. Erro técnico verificado: a ferramenta devolveu erro (coluna ou tabela inexistente, \
-tipo errado, join inválido) e uma nova tentativa funcionou. Registre em "verificadas".
-2. Regra declarada pelo usuário como permanente: ele corrige o agente ou define como \
-proceder, com "sempre", "nunca" ou "o correto é", sobre QUAL dado ou coluna usar e COMO \
-calcular, filtrar ou somar (moeda, status, período padrão, exclusões). Registre mesmo \
-que ele a diga com "mostre" ou "apresente", e mesmo que a resposta anterior já esteja de \
-acordo com a regra: o que importa é que ele a declarou como permanente. Registre-a \
-SEMPRE que aparecer, mesmo que as mensagens não mostrem a análise que ele está \
-corrigindo e mesmo que a regra pareça específica de um cálculo ou de uma tabela: o \
-usuário sabe do que está falando, e você não precisa conferir a regra contra o SQL. \
-Esta é a fonte de lições mais importante. Registre em "verificadas".
-3. Contestação sem causa declarada: o usuário reclama ("esse total está estranho", \
-"refaz isso") sem dizer por quê. Registre uma hipótese em "hipoteses" SOMENTE se houver \
-indício concreto no SQL ou no resultado (join sem chave, filtro de período omitido, \
-agregação duplicando linhas). Sem indício concreto, NÃO registre nada.
+    raciocinio: str = Field(
+        description="Uma ou duas frases: o que você decidiu e por quê. Inclua os casos em que "
+        "decidiu não registrar nada."
+    )
+    licoes_verificadas_novas: list[str] = Field(
+        default_factory=list,
+        description="Lições novas confirmadas. Uma regra curta por item, sem dados nem valores.",
+    )
+    licoes_hipoteses_novas: list[str] = Field(
+        default_factory=list, description="Hipóteses novas, ainda não confirmadas."
+    )
+    licoes_promover: list[str] = Field(
+        default_factory=list,
+        description="Texto EXATO de hipóteses existentes que foram confirmadas.",
+    )
+    licoes_remover: list[str] = Field(
+        default_factory=list,
+        description="Texto EXATO de lições existentes que as mensagens contrariam. Para "
+        "reescrever uma lição, remova a antiga e acrescente a nova.",
+    )
+    preferencias_novas: list[str] = Field(default_factory=list)
+    preferencias_remover: list[str] = Field(
+        default_factory=list,
+        description="Texto EXATO de preferências existentes que o usuário trocou ou desfez.",
+    )
+    perfil_definir: list[CampoPerfil] = Field(default_factory=list)
+    perfil_outros_novos: list[str] = Field(default_factory=list)
+    perfil_outros_remover: list[str] = Field(
+        default_factory=list, description="Texto EXATO de itens existentes de `outros`."
+    )
 
-O QUE NÃO REGISTRAR:
+
+INSTRUCOES = """\
+Você mantém a memória de um agente que analisa dados para os usuários. A memória tem TRÊS \
+documentos, e você recebe o conteúdo atual deles e as mensagens de um ou mais turnos. \
+Devolva SÓ as mudanças necessárias, e deixe vazias as listas em que não há nada a mudar. \
+Escreva os itens em português, uma frase curta cada. Mensagens marcadas com [CONTEXTO] já \
+foram processadas antes; use-as só para entender o que o usuário diz.
+
+OS TRÊS DOCUMENTOS, e quando algo entra em cada um (uma declaração entra em UM só):
+
+1. LIÇÕES sobre o banco de dados (compartilhadas por todos os usuários). Ajudam o agente a \
+não repetir erros ao consultar. Entram:
+   a) Erro técnico verificado: a ferramenta devolveu erro (coluna ou tabela inexistente, \
+tipo errado, join inválido) e uma nova tentativa funcionou. Vai em licoes_verificadas_novas.
+   b) Regra declarada pelo usuário como permanente sobre QUAL dado, coluna, moeda ou filtro \
+usar e COMO calcular, filtrar, somar ou juntar ("sempre", "nunca", "o correto é"). Vale mesmo \
+que ele a diga com "mostre" ou "apresente". Registre-a SEMPRE que aparecer, mesmo que a regra \
+pareça específica de um cálculo: o usuário sabe do que fala. Vai em licoes_verificadas_novas.
+   c) Contestação sem causa declarada ("esse total está estranho, refaz"): registre uma \
+hipótese em licoes_hipoteses_novas SOMENTE se houver indício concreto no SQL ou no resultado \
+(join sem chave, filtro de período omitido, agregação duplicando linhas). Sem indício, nada.
+   Uma hipótese que reaparece ou que o usuário confirma vai em licoes_promover.
+
+2. PREFERÊNCIAS do usuário sobre COMO ele quer receber os resultados, e só o que ele DECLARA \
+como permanente: "prefiro", "sempre que possível", "por padrão", "daqui para frente", "a \
+partir de agora" ou equivalentes em inglês e chinês. Cor, tipo de gráfico, formato, nível de \
+detalhe, idioma, ordenação. Nunca por inferência, repetição ou aprovação.
+
+3. PERFIL: quem é o usuário, só o que ELE afirma sobre si ("meu nome é Márcio", "sou gerente \
+de supply", "cuido dos sites JAG e BPL", "respondo ao João"). Campos de perfil_definir: \
+nome (como quer ser chamado), cargo, funcao_area (função, área ou departamento), atuacao (o \
+que faz e acompanha, em uma frase), local_atuacao (planta, site, região), equipe_gestor. O \
+que não couber nos campos vai em perfil_outros_novos. Nunca deduza nada do que ele pergunta.
+
+ONDE CADA COISA VAI, nos casos de fronteira:
+- Qual dado, moeda, coluna, filtro ou cálculo usar é LIÇÃO, nunca preferência, mesmo dito \
+como "mostre em USD". Só a FORMA de apresentar é preferência.
+- Se ficar na dúvida entre lição e preferência, é lição. Nunca registre a mesma coisa em \
+dois documentos.
+
+NÃO REGISTRE EM NENHUM:
+- Pedidos e perguntas pontuais, mesmo repetidos ou explícitos: "faça um gráfico de barras", \
+"mostre em tabela", "nessa análise, só o site JAG". Pedir não é declarar.
 - Valores, resultados ou números dos dados.
-- Preferências sobre a FORMA de apresentar (tipo de gráfico, formato, nível de detalhe) \
-pertencem a outro documento. A escolha de qual dado, moeda, filtro ou cálculo usar NÃO \
-é preferência de apresentação: é lição.
-- Correções pontuais, válidas só para aquele pedido ("nessa análise, só o turno A").
-- Contestações cuja causa você não consegue sustentar com as mensagens recebidas.
+- Dados pessoais sensíveis ou de contato: e-mail, telefone, endereço, documentos, saúde, \
+religião, política, senhas ou credenciais, mesmo que o usuário os informe.
+- Informações sobre terceiros, exceto a equipe ou o gestor dele.
+- Contestações cuja causa você não sustenta com as mensagens.
 
 CONSOLIDAÇÃO:
-- Antes de adicionar, procure lição equivalente nas duas listas: se existir, atualize-a \
-em vez de duplicar.
-- Se uma hipótese reaparecer em outro episódio ou o usuário a confirmar, mova-a de \
-"hipoteses" para "verificadas".
-- NUNCA remova uma lição só para abrir espaço, nem porque ela não apareceu neste turno. \
-Remova apenas se as mensagens trouxerem evidência que a contraria.
-- As lições existentes NÃO indicam que o documento está completo: uma lição só impede \
-registrar a MESMA regra de novo. Avalie o turno contra os três critérios acima como se o \
-documento estivesse vazio, e só então compare com o que já existe.
-- Mantenha no máximo 30 lições no total.
+- Compare com o conteúdo atual antes de acrescentar: se já existe a mesma coisa, não repita.
+- Para trocar ou reescrever um item (mudou de cor, de cargo, de regra), cite o texto EXATO do \
+item antigo em *_remover e acrescente o novo. Para mudar um campo do perfil, use \
+perfil_definir (texto vazio apaga o campo).
+- Remova um item só se as mensagens trouxerem evidência que o contraria ou o usuário pedir \
+para esquecer ("esqueça meu nome", "não sou mais gerente"). Nunca para abrir espaço, nem \
+porque ele não apareceu neste turno.
+- Os documentos atuais NÃO indicam que a memória está completa: avalie as mensagens contra \
+os critérios acima como se os documentos estivessem vazios, e só então compare.
+- Limites: 30 lições no total, 20 preferências, 10 itens em perfil_outros.
 
-EXEMPLOS (os nomes são fictícios; use os nomes reais que aparecerem nas mensagens):
-
-Exemplo 1 (erro técnico verificado)
-Turno: o usuário pede "produção por linha na última semana". O agente executa um \
-SELECT usando a coluna "data" na tabela producao; a ferramenta responde "coluna data \
-não existe"; o agente refaz com "dt_producao" e funciona.
-Em "verificadas": "Na tabela producao, a coluna de data é dt_producao (não data)".
-
-Exemplo 2 (regra declarada, permanente)
-Turno: o agente entrega o OEE por linha. Usuário: "Está errado. Sempre desconsidere as \
-paradas programadas ao calcular o OEE."
-Em "verificadas": "Ao calcular OEE, desconsiderar paradas programadas".
-
-Exemplo 2b (regra permanente sobre qual dado usar, ditada como "mostre")
-Turno: o agente entrega o custo por fábrica. Usuário: "Sempre mostre o custo apenas em \
-USD, nunca somando moedas locais." (a resposta anterior pode até já estar em USD)
-Em "verificadas": "Apresentar e calcular o custo apenas em USD; nunca somar valores em \
-moedas locais".
-
-Exemplo 3 (correção pontual, não registrar)
-Turno: usuário: "Nessa análise, considere só os turnos completos."
-Nada a registrar: o pedido vale apenas para aquela análise.
-
-Exemplo 4 (contestação sem causa, com indício)
-Turno: o agente junta producao e paradas apenas por linha_id e entrega o total de \
-peças. Usuário: "Esse total está estranho, refaz."
-Em "hipoteses": "Ao juntar producao e paradas, incluir a data na chave do join; só \
-linha_id pode duplicar linhas".
-
-Exemplo 5 (contestação sem causa e sem indício, não registrar)
-Turno: o agente entrega a tabela de refugo por produto e o SQL parece correto. Usuário: \
-"Não gostei, faz de novo."
-Nada a registrar: não há indício concreto de causa nas mensagens.
-
-Exemplo 6 (preferência, não é lição)
-Turno: usuário: "Prefiro gráfico de barras."
-Nada a registrar neste documento.
-"""
-
-PREFERENCIAS_INSTRUCOES = """\
-Você mantém o documento de PREFERÊNCIAS de apresentação de um usuário que analisa dados \
-com um agente. Você recebe as mensagens de um ou mais turnos. Mensagens marcadas com \
-[CONTEXTO] já foram processadas antes.
-
-Registre apenas o que o usuário pediu, aprovou ou reutilizou:
-- graficos_preferidos: tipos de gráfico que ele pede de forma explícita ou aceita sem \
-contestar. Um pedido explícito já basta.
-- formato_resposta: formato e nível de detalhe das respostas que ele pede (resumo \
-primeiro, tabela, etc.).
-- escopo_frequente: plantas, linhas ou produtos SOMENTE se aparecerem em dois ou mais \
-turnos distintos. Um filtro que ele pede uma única vez ("nessa análise, só a planta X") \
-é pedido pontual: NÃO registre.
-
-Não registre: erros de consulta ao banco (outro documento), valores dos dados, pedidos \
-pontuais que ele não repete. Regras sobre dados e cálculos (moeda, filtros, colunas, \
-como somar ou juntar tabelas) pertencem ao documento de lições, não a este: aqui entra \
-só como o resultado é APRESENTADO. Atualize os campos existentes em vez de duplicar. Se \
-ele mudar de preferência, substitua o valor antigo; não remova preferências anteriores \
-sem que ele as contrarie.
+EXEMPLOS (nomes fictícios; use os reais das mensagens):
+- Erro: o agente consulta a coluna "data" de producao, a ferramenta diz que não existe e \
+refaz com "dt_producao". Lição verificada: "Na tabela producao, a coluna de data é \
+dt_producao (não data)".
+- "Sempre desconsidere as paradas programadas no OEE": lição verificada "Ao calcular OEE, \
+desconsiderar paradas programadas".
+- "Sempre mostre o custo em USD, nunca somando moedas locais": LIÇÃO verificada "Apresentar \
+e calcular o custo apenas em USD; nunca somar moedas locais". Não é preferência.
+- "Prefiro sempre gráficos na cor laranja": preferência "Gráficos na cor laranja".
+- "Faça um gráfico de barras" ou "Agora quero em linha": pedido pontual. Nada.
+- "Na verdade prefiro gráficos de linha", com "Usar gráficos de barras" já gravada: \
+preferencias_remover ["Usar gráficos de barras"] e preferencias_novas ["Usar gráficos de linha"].
+- "Me chame de Márcio, sou gerente de supply": perfil_definir nome=Márcio, cargo=Gerente de \
+supply.
+- "Toda segunda apresento esses números ao diretor": perfil_outros_novos \
+["Apresenta os números ao diretor toda segunda-feira"].
+- "Nessa análise, considere só os turnos completos": pontual. Nada.
+- "Esse total está estranho, refaz", com o SQL juntando producao e paradas só por linha_id: \
+hipótese "Ao juntar producao e paradas, incluir a data na chave do join".
+- "Não gostei, faz de novo", sem indício no SQL: nada.
 """
 
 
@@ -300,8 +299,7 @@ class _SqliteStoreSeguro(SqliteStore):
 
 
 _store: SqliteStore | None = None
-_exec_licoes: ReflectionExecutor | None = None
-_exec_prefs: ReflectionExecutor | None = None
+_executor: ReflectionExecutor | None = None
 
 
 def _ler_doc(namespace: tuple[str, ...], kind: str) -> tuple[str | None, dict]:
@@ -336,9 +334,9 @@ def ler_licoes(dominio: str) -> list[Licao]:
 
 
 def ler_preferencias(user_id: str, dominio: str) -> PreferenciasUsuario:
-    _, conteudo = _ler_doc(("users", _seg(user_id), "preferences"), "PreferenciasUsuario")
+    _, conteudo = _ler_doc(("users", _seg(user_id), _seg(dominio), "preferences"), "PreferenciasUsuario")
     try:
-        return PreferenciasUsuario(**conteudo)
+        return PreferenciasUsuario(preferencias=conteudo.get("preferencias") or [])
     except Exception:
         logger.warning("[memoria] preferências ilegíveis de %s; ignoradas", user_id)
         return PreferenciasUsuario()
@@ -347,6 +345,15 @@ def ler_preferencias(user_id: str, dominio: str) -> PreferenciasUsuario:
 # ---------------------------------------------------------------------------
 # Leitura: blocos para injetar nos prompts
 # ---------------------------------------------------------------------------
+def ler_perfil(user_id: str, dominio: str) -> PerfilUsuario:
+    _, conteudo = _ler_doc(("users", _seg(user_id), _seg(dominio), "profile"), "PerfilUsuario")
+    try:
+        return PerfilUsuario(**{k: v for k, v in conteudo.items() if k in PerfilUsuario.model_fields})
+    except Exception:
+        logger.warning("[memoria] perfil ilegível de %s; ignorado", user_id)
+        return PerfilUsuario()
+
+
 def bloco_licoes(dominio: str) -> str:
     """Texto das lições para o prompt do analista. Vazio se não houver nada."""
     if not ativa() or _store is None:
@@ -362,7 +369,11 @@ def bloco_licoes(dominio: str) -> str:
     provaveis = [l.regra for l in licoes if l.confianca == "provavel"]
     partes = ["\n\n## Lições aprendidas sobre este banco (memória de conversas anteriores)"]
     if verificadas:
-        partes.append("Regras confirmadas, siga-as:\n" + "\n".join(f"- {r}" for r in verificadas))
+        partes.append(
+            "Regras confirmadas, siga-as. Esta lista pode estar atrasada: se o pedido atual "
+            "trouxer uma regra diferente ou contrária, vale o pedido.\n"
+            + "\n".join(f"- {r}" for r in verificadas)
+        )
     if provaveis:
         partes.append(
             "Hipóteses ainda não confirmadas. Trate como dica, confirme antes de aplicar:\n"
@@ -380,72 +391,148 @@ def bloco_preferencias(user_id: str, dominio: str) -> str:
     except Exception:
         logger.warning("[memoria] falha ao ler preferências", exc_info=True)
         return ""
-    linhas = []
-    if p.graficos_preferidos:
-        linhas.append("- Gráficos que costuma pedir: " + ", ".join(p.graficos_preferidos))
-    if p.formato_resposta:
-        linhas.append(f"- Formato de resposta preferido: {p.formato_resposta}")
-    if p.escopo_frequente:
-        linhas.append("- Consulta com frequência: " + ", ".join(p.escopo_frequente))
+    linhas = [f"- {x}" for x in p.preferencias]
     if not linhas:
         return ""
     return (
         "\n\n## Preferências deste usuário (memória de conversas anteriores)\n"
-        "São instruções do usuário, não sugestões: siga-as em toda resposta, a menos que o "
-        "pedido atual diga o contrário.\n" + "\n".join(linhas)
+        "São instruções do usuário, não sugestões: siga-as em toda resposta. Esta lista pode "
+        "estar atrasada: o que o usuário disse NESTA conversa vale mais que ela. Se ele trocou, "
+        "desfez ou contrariou uma preferência na conversa, ou se o pedido atual diz o "
+        "contrário, siga a conversa.\n" + "\n".join(linhas)
+    )
+
+
+_ROTULOS_PERFIL = (
+    ("nome", "Nome"), ("cargo", "Cargo"), ("funcao_area", "Função/área"),
+    ("atuacao", "Atuação"), ("local_atuacao", "Local de atuação"), ("equipe_gestor", "Equipe/gestor"),
+)
+
+
+def bloco_perfil(user_id: str, dominio: str) -> str:
+    """Texto do perfil do usuário para o orquestrador. Vazio se não houver user_id ou nada gravado."""
+    if not ativa() or _store is None or not user_id:
+        return ""
+    try:
+        p = ler_perfil(user_id, dominio)
+    except Exception:
+        logger.warning("[memoria] falha ao ler perfil", exc_info=True)
+        return ""
+    linhas = [f"- {rotulo}: {getattr(p, campo)}" for campo, rotulo in _ROTULOS_PERFIL if getattr(p, campo)]
+    linhas += [f"- {x}" for x in p.outros]
+    if not linhas:
+        return ""
+    return (
+        "\n\n## Perfil deste usuário (o que ele mesmo contou em conversas anteriores)\n"
+        "Use para se dirigir a ele pelo nome e ajustar o tom. Não o repita nem o cite sem "
+        "necessidade, e não o trate como dado da análise. Pode estar atrasado: se nesta "
+        "conversa ele corrigiu ou mudou algo (nome, cargo, gestor), vale a conversa.\n"
+        + "\n".join(linhas)
     )
 
 
 # ---------------------------------------------------------------------------
-# Trava das lições
+# Aplicação das mudanças propostas pelo extrator
 # ---------------------------------------------------------------------------
 def _norm(txt: str) -> str:
     return " ".join(txt.lower().split())
 
 
-def aplicar_trava(antes: list[Licao], depois: list[Licao]) -> list[Licao]:
-    """Garante que o extrator não perca lições verificadas e respeite o limite de lições.
-
-    O LangMem reescreve o documento, e o trustcall, ao tentar corrigir um patch inválido,
-    chegou a sobrescrever uma lição verificada com a regra nova. Uma lição verificada que
-    sumiu, sem nenhuma lição parecida no documento novo (o que indicaria uma reescrita),
-    é restaurada.
-    """
-    resultado = list(depois)
-    for velha in antes:
-        if velha.confianca != "verificada":
-            continue
-        alvo = _norm(velha.regra)
-        mantida = any(
-            difflib.SequenceMatcher(None, alvo, _norm(n.regra)).ratio() >= _LICAO_PARECIDA
-            for n in resultado
-        )
-        if not mantida:
-            resultado.append(velha)
-            logger.warning("[memoria] lição verificada restaurada (o extrator a removeu): %s", velha.regra)
-    # limite imposto aqui, não só no prompt: descarta hipóteses primeiro, depois as mais antigas
-    while len(resultado) > MAX_LICOES:
-        idx = next((i for i, l in enumerate(resultado) if l.confianca == "provavel"), 0)
-        resultado.pop(idx)
-    return resultado
+def _achar(texto: str, itens: list[str], minimo: float) -> int | None:
+    """Índice do item mais parecido com `texto`, se a similaridade chegar a `minimo`."""
+    melhor, idx = 0.0, None
+    for i, item in enumerate(itens):
+        r = difflib.SequenceMatcher(None, _norm(texto), _norm(item)).ratio()
+        if r > melhor:
+            melhor, idx = r, i
+    return idx if melhor >= minimo else None
 
 
-def _log_diferenca(ns: tuple[str, ...], antes: list[Licao], depois: list[Licao]) -> None:
-    a = {(l.confianca, l.regra) for l in antes}
-    d = {(l.confianca, l.regra) for l in depois}
-    for confianca, regra in sorted(d - a):
-        logger.info("[memoria] lição %s gravada em %s: %s", confianca, "/".join(ns), regra)
-    for confianca, regra in sorted(a - d):
-        logger.info("[memoria] lição %s retirada de %s: %s", confianca, "/".join(ns), regra)
+def _retirar(itens: list[str], citados: list[str]) -> list[str]:
+    restantes = list(itens)
+    for c in citados:
+        i = _achar(c, restantes, _CITADA)
+        if i is None:
+            logger.info("[memoria] item a remover não encontrado: %s", c)
+        else:
+            logger.info("[memoria] item retirado: %s", restantes[i])
+            restantes.pop(i)
+    return restantes
+
+
+def _acrescentar(itens: list[str], novos: list[str], limite: int) -> list[str]:
+    resultado = list(itens)
+    for n in novos:
+        n = (n or "").strip()
+        if n and _achar(n, resultado, _IGUAL) is None:
+            resultado.append(n)
+    return resultado[-limite:]  # passou do limite: descarta os mais antigos
+
+
+def aplicar_licoes(doc: dict, m: MudancasMemoria) -> dict:
+    """Aplica as mudanças de lições. Retirar uma lição verificada vai para o log como aviso."""
+    verificadas = [x for x in (doc.get("verificadas") or []) if isinstance(x, str) and x.strip()]
+    hipoteses = [x for x in (doc.get("hipoteses") or []) if isinstance(x, str) and x.strip()]
+    for c in m.licoes_remover:
+        i, j = _achar(c, verificadas, _CITADA), _achar(c, hipoteses, _CITADA)
+        if i is not None:
+            logger.warning("[memoria] lição verificada retirada: %s", verificadas[i])
+            verificadas.pop(i)
+        elif j is not None:
+            logger.info("[memoria] hipótese retirada: %s", hipoteses[j])
+            hipoteses.pop(j)
+        else:
+            logger.info("[memoria] lição a remover não encontrada: %s", c)
+    for c in m.licoes_promover:
+        j = _achar(c, hipoteses, _CITADA)
+        if j is not None:
+            verificadas = _acrescentar(verificadas, [hipoteses.pop(j)], MAX_LICOES)
+    for n in m.licoes_verificadas_novas:
+        j = _achar(n, hipoteses, _IGUAL)
+        if j is not None:  # a hipótese virou regra confirmada
+            hipoteses.pop(j)
+        verificadas = _acrescentar(verificadas, [n], MAX_LICOES)
+    for n in m.licoes_hipoteses_novas:
+        if _achar(n, verificadas + hipoteses, _IGUAL) is None:
+            hipoteses = _acrescentar(hipoteses, [n], MAX_LICOES)
+    while len(verificadas) + len(hipoteses) > MAX_LICOES:  # descarta hipóteses primeiro
+        (hipoteses or verificadas).pop(0)
+    return {"verificadas": verificadas, "hipoteses": hipoteses}
+
+
+def aplicar_preferencias(doc: dict, m: MudancasMemoria) -> dict:
+    itens = [x for x in (doc.get("preferencias") or []) if isinstance(x, str) and x.strip()]
+    itens = _retirar(itens, m.preferencias_remover)
+    return {"preferencias": _acrescentar(itens, m.preferencias_novas, MAX_PREFERENCIAS)}
+
+
+def aplicar_perfil(doc: dict, m: MudancasMemoria) -> dict:
+    novo = {c: (doc.get(c) or None) for c in PerfilUsuario.model_fields if c != "outros"}
+    for d in m.perfil_definir:
+        novo[d.campo] = d.valor.strip() or None
+    outros = [x for x in (doc.get("outros") or []) if isinstance(x, str) and x.strip()]
+    outros = _retirar(outros, m.perfil_outros_remover)
+    novo["outros"] = _acrescentar(outros, m.perfil_outros_novos, MAX_OUTROS)
+    return novo
+
+
+def _gravar(ns: tuple[str, ...], kind: str, antes: dict, depois: dict) -> bool:
+    """Grava o documento se mudou. Devolve True se gravou."""
+    if depois == antes:
+        return False
+    chave, _ = _ler_doc(ns, kind)
+    _store.put(ns, chave or "default", {"kind": kind, "content": depois})
+    logger.info("[memoria] %s atualizado em %s", kind, "/".join(ns))
+    return True
 
 
 # ---------------------------------------------------------------------------
-# Extratores (o que o ReflectionExecutor executa)
+# Extrator (o que o ReflectionExecutor executa)
 # ---------------------------------------------------------------------------
 _traces: dict[str, list[str]] = defaultdict(list)    # session_id -> traces do turno em curso
 _turnos: dict[str, list[dict]] = defaultdict(list)   # session_id -> turnos recentes
 _base: dict[str, int] = defaultdict(int)             # session_id -> turnos já descartados do início
-_extraidos: dict[tuple[str, str], int] = defaultdict(int)  # (session_id, tipo) -> turnos extraídos (absoluto)
+_extraidos: dict[str, int] = defaultdict(int)        # session_id -> turnos extraídos (absoluto)
 _futuros: list[Future] = []
 _lock = threading.Lock()
 
@@ -455,68 +542,82 @@ def _cortar(txt: str, n: int) -> str:
     return txt if len(txt) <= n else txt[:n] + "…"
 
 
-class _LogDoPlano(BaseCallbackHandler):
-    """Registra no log o `planned_edits` do extrator, onde ele explica o motivo de cada
-    mudança (o documento não guarda o motivo)."""
+def _texto_conversa(msgs: list[dict]) -> str:
+    return "\n\n".join(
+        ("USUÁRIO: " if m["role"] == "user" else "AGENTE: ") + m["content"] for m in msgs
+    )
 
-    def __init__(self, tipo: str):
-        self.tipo = tipo
 
-    def on_llm_end(self, response, **kwargs):
-        for geracoes in response.generations:
-            for g in geracoes:
-                for tc in getattr(getattr(g, "message", None), "tool_calls", None) or []:
-                    plano = (tc.get("args") or {}).get("planned_edits")
-                    if plano:
-                        logger.info("[memoria] extrator de %s: %s", self.tipo, _cortar(plano, 600))
+def _conteudo_para_o_llm(msgs: list[dict], lic: dict, pref: dict, perfil: dict, tem_usuario: bool) -> str:
+    atuais = {"licoes": {"verificadas": lic.get("verificadas") or [], "hipoteses": lic.get("hipoteses") or []}}
+    if tem_usuario:
+        atuais["preferencias"] = pref.get("preferencias") or []
+        atuais["perfil"] = {
+            **{c: perfil.get(c) for c in PerfilUsuario.model_fields if c != "outros"},
+            "outros": perfil.get("outros") or [],
+        }
+    aviso = "" if tem_usuario else (
+        "\nNão há usuário identificado: preencha SÓ as listas de lições; deixe preferências e perfil vazios.\n"
+    )
+    return (
+        "DOCUMENTOS ATUAIS (JSON):\n" + json.dumps(atuais, ensure_ascii=False, indent=1)
+        + aviso + "\n\nMENSAGENS:\n" + _texto_conversa(msgs)
+    )
 
 
 class _Extrator:
-    """Envolve um manager do LangMem para o ReflectionExecutor, que só exige um atributo
-    `namespace` e um `invoke(payload)` (a config vem do contexto).
+    """Uma chamada estruturada ao LLM por extração; o código aplica o resultado.
+
+    O ReflectionExecutor só exige um atributo `namespace` (os namespaces reais dependem do
+    domínio e do usuário de cada extração, vindos de `_meta`) e um `invoke(payload)`.
 
     O ponteiro de turnos extraídos avança aqui dentro, antes de o Future ser concluído, e
     não num callback do Future: o `wait()` acorda antes de os callbacks rodarem, e um
     callback registrado com `_lock` preso numa tarefa já concluída rodaria na hora e
     travaria no mesmo lock."""
 
-    def __init__(self, manager, tipo: str, trava: bool = False):
-        self._manager = manager
-        self.namespace = manager.namespace
-        self._tipo = tipo
-        self._trava = trava
+    namespace = ()
+
+    def __init__(self, llm):
+        self._llm = llm.with_structured_output(MudancasMemoria)
 
     def invoke(self, payload, config=None):
         meta = payload.get("_meta") or {}
-        config = patch_config(config or get_config(), callbacks=[_LogDoPlano(self._tipo)])
-        entrada = {"messages": payload["messages"]}
         try:
-            if self._trava:
-                self._invoke_com_trava(entrada, config)
-            else:
-                self._manager.invoke(entrada, config)
+            self._extrair(payload["messages"], meta.get("user_id"), meta["dominio"])
         except Exception as e:
             # o ponteiro não avança: esses turnos voltam na próxima extração da sessão
-            logger.warning("[memoria] falha na extração de %s (sessão %s): %r",
-                           self._tipo, meta.get("sessao"), e)
+            logger.warning("[memoria] falha na extração (sessão %s): %r", meta.get("sessao"), e)
             return []
         with _lock:
-            chave = (meta.get("sessao"), self._tipo)
-            _extraidos[chave] = max(_extraidos[chave], meta.get("n_abs", 0))
-        logger.info("[memoria] extração de %s concluída (sessão %s)", self._tipo, meta.get("sessao"))
+            _extraidos[meta.get("sessao")] = max(_extraidos[meta.get("sessao")], meta.get("n_abs", 0))
+        logger.info("[memoria] extração concluída (sessão %s)", meta.get("sessao"))
         return []
 
-    def _invoke_com_trava(self, entrada, config) -> None:
-        ns = self.namespace(config)
-        _, antes_raw = _ler_doc(ns, "LicoesDoBanco")
-        antes = _licoes_do_conteudo(antes_raw)
-        self._manager.invoke(entrada, config)
-        chave, depois_raw = _ler_doc(ns, "LicoesDoBanco")
-        depois = _licoes_do_conteudo(depois_raw)
-        final = aplicar_trava(antes, depois)
-        if chave and final != depois:
-            _store.put(ns, chave, {"kind": "LicoesDoBanco", "content": _conteudo_das_licoes(final)})
-        _log_diferenca(ns, antes, final)
+    def _extrair(self, msgs: list[dict], user_id: str | None, dominio: str) -> None:
+        ns_lic = (_NS_LICOES, _seg(dominio))
+        ns_pref = ("users", _seg(user_id), _seg(dominio), "preferences") if user_id else None
+        ns_perf = ("users", _seg(user_id), _seg(dominio), "profile") if user_id else None
+        _, lic = _ler_doc(ns_lic, "LicoesDoBanco")
+        _, pref = _ler_doc(ns_pref, "PreferenciasUsuario") if user_id else (None, {})
+        _, perfil = _ler_doc(ns_perf, "PerfilUsuario") if user_id else (None, {})
+
+        conteudo = _conteudo_para_o_llm(msgs, lic, pref, perfil, bool(user_id))
+        if os.getenv("MEMORIA_DEBUG", "0").strip() == "1":
+            logger.info("[memoria] payload enviado ao extrator:\n%s", conteudo)
+        m = self._llm.invoke([SystemMessage(content=INSTRUCOES), HumanMessage(content=conteudo)])
+        if not isinstance(m, MudancasMemoria):
+            raise ValueError(f"o modelo não devolveu as mudanças estruturadas: {_cortar(repr(m), 200)}")
+        logger.info("[memoria] extrator: %s", _cortar(m.raciocinio, 600))
+
+        _gravar(ns_lic, "LicoesDoBanco", _normalizar_licoes(lic), aplicar_licoes(lic, m))
+        if user_id:
+            _gravar(ns_pref, "PreferenciasUsuario", pref, aplicar_preferencias(pref, m))
+            _gravar(ns_perf, "PerfilUsuario", perfil, aplicar_perfil(perfil, m))
+
+
+def _normalizar_licoes(doc: dict) -> dict:
+    return {"verificadas": list(doc.get("verificadas") or []), "hipoteses": list(doc.get("hipoteses") or [])}
 
 
 # ---------------------------------------------------------------------------
@@ -573,9 +674,8 @@ _DECLARA_REGRA = re.compile(
 )
 
 
-def _enviar(executor: ReflectionExecutor, tipo: str, sessao: str, turnos: list[dict], base: int,
-            config: dict, exige_trace: bool) -> None:
-    ja = _extraidos[(sessao, tipo)]
+def _enviar(sessao: str, user_id: str, dominio: str, turnos: list[dict], base: int) -> None:
+    ja = _extraidos[sessao]
     # um turno de contexto antes dos pendentes: a contestação chega junto com a análise
     # contestada, mesmo que ela já tenha sido extraída antes.
     inicio = max(0, ja - base - 1)
@@ -583,21 +683,22 @@ def _enviar(executor: ReflectionExecutor, tipo: str, sessao: str, turnos: list[d
     n_contexto = (ja - base) - inicio if ja > base else 0
     if not janela or ja >= base + len(turnos):
         return
-    # Extrair lições custa uma chamada de LLM por turno, então só se há o que aprender: um
-    # trace do analista (erro técnico, contestação) ou o usuário declarando uma regra
-    # permanente, o que pode acontecer num turno sem nenhuma consulta.
-    if exige_trace and not (
+    # Com usuário identificado a extração roda em todo turno: uma declaração de preferência ou
+    # de perfil pode vir em qualquer mensagem. Sem usuário só há lições, e extraí-las custa uma
+    # chamada de LLM, então só se há o que aprender: um trace do analista (erro técnico,
+    # contestação) ou o usuário declarando uma regra permanente.
+    if not user_id and not (
         any(t["trace"] for t in janela)
         or any(_DECLARA_REGRA.search(t["pergunta"]) for t in janela[n_contexto:])
     ):
         return
-    logger.info("[memoria] agendando extração de %s (sessão %s, %d turnos na janela)", tipo, sessao, len(janela))
-    msgs = _mensagens(janela, n_contexto)
-    if os.getenv("MEMORIA_DEBUG", "0").strip() == "1":
-        logger.info("[memoria] payload de %s: %s", tipo, json.dumps(msgs, ensure_ascii=False))
-    fut = executor.submit(
-        {"messages": msgs, "_meta": {"sessao": sessao, "n_abs": base + len(turnos)}},
-        config=config,
+    logger.info("[memoria] agendando extração (sessão %s, %d turnos na janela)", sessao, len(janela))
+    fut = _executor.submit(
+        {
+            "messages": _mensagens(janela, n_contexto),
+            "_meta": {"sessao": sessao, "n_abs": base + len(turnos), "user_id": user_id, "dominio": dominio},
+        },
+        config={"configurable": {}},
         after_seconds=_delay(),
         thread_id=sessao,
     )
@@ -619,16 +720,7 @@ def finalizar_turno(session_id: str, user_id: str, dominio: str, pergunta: str, 
                 excesso = len(lista) - _MAX_TURNOS_GUARDADOS
                 del lista[:excesso]
                 _base[session_id] += excesso
-            turnos, base = list(lista), _base[session_id]
-            _enviar(
-                _exec_licoes, "licoes", session_id, turnos, base,
-                {"configurable": {"database_id": _seg(dominio)}}, exige_trace=True,
-            )
-            if user_id:
-                _enviar(
-                    _exec_prefs, "prefs", session_id, turnos, base,
-                    {"configurable": {"langgraph_user_id": _seg(user_id)}}, exige_trace=False,
-                )
+            _enviar(session_id, user_id, dominio, list(lista), _base[session_id])
     except Exception:
         logger.warning("[memoria] falha ao agendar a extração", exc_info=True)
 
@@ -638,33 +730,14 @@ def finalizar_turno(session_id: str, user_id: str, dominio: str, pergunta: str, 
 # ---------------------------------------------------------------------------
 def init(llm) -> None:
     """Chamada em init_multi_agent com o modelo do extrator."""
-    global _store, _exec_licoes, _exec_prefs
+    global _store, _executor
     try:
         # conexão própria: o worker do executor roda em outra thread. O SqliteStore exige
         # autocommit (isolation_level=None) porque ele mesmo abre as transações.
         conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, isolation_level=None)
         store = _SqliteStoreSeguro(conn)
         store.setup()
-        licoes_manager = create_memory_store_manager(
-            llm,
-            schemas=[LicoesDoBanco],
-            default=LicoesDoBanco(),
-            instructions=LICOES_INSTRUCOES,
-            enable_inserts=False,
-            namespace=(_NS_LICOES, "{database_id}"),
-            store=store,
-        )
-        prefs_manager = create_memory_store_manager(
-            llm,
-            schemas=[PreferenciasUsuario],
-            default=PreferenciasUsuario(),
-            instructions=PREFERENCIAS_INSTRUCOES,
-            enable_inserts=False,
-            namespace=_NS_PREFERENCIAS,
-            store=store,
-        )
-        _exec_licoes = ReflectionExecutor(_Extrator(licoes_manager, "licoes", trava=True), store=store)
-        _exec_prefs = ReflectionExecutor(_Extrator(prefs_manager, "prefs"), store=store)
+        _executor = ReflectionExecutor(_Extrator(llm), store=store)
         _store = store
         logger.info("[memoria] %s", "ativa" if ativa() else "desligada (MEMORIA_ATIVA=0)")
     except Exception:
@@ -683,9 +756,8 @@ def aguardar(timeout: float = 120) -> None:
 def encerrar() -> None:
     """Chamada no shutdown do app: o worker do ReflectionExecutor não é daemon, então sem
     isto o processo não termina. Extrações já agendadas rodam antes de o worker sair."""
-    for ex in (_exec_licoes, _exec_prefs):
-        if ex is not None:
-            try:
-                ex.shutdown(wait=False)
-            except Exception:
-                logger.warning("[memoria] falha ao encerrar o executor", exc_info=True)
+    if _executor is not None:
+        try:
+            _executor.shutdown(wait=False)
+        except Exception:
+            logger.warning("[memoria] falha ao encerrar o executor", exc_info=True)
