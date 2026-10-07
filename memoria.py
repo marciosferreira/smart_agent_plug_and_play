@@ -5,10 +5,11 @@ Dois documentos, mantidos em background por extratores do LangMem
 (create_memory_store_manager + ReflectionExecutor), depois do turno, sem atrasar a resposta:
 
   LIÇÕES        -> regras sobre como consultar o banco. Um documento por domínio (compartilhado
-                   por todos os usuários). Cada lição tem confiança "verificada" ou "provavel".
+                   por todos os usuários), com duas listas de texto: `verificadas` e `hipoteses`.
                    Lido pelo sub-agente analista, que é quem escreve o SQL.
-  PREFERÊNCIAS  -> preferências de apresentação. Um documento por usuário e domínio. Lido
-                   pelo orquestrador (que redige a resposta) e pelo analista (gráficos).
+  PREFERÊNCIAS  -> preferências de apresentação. Um documento por usuário, que vale em todos
+                   os domínios. Lido pelo orquestrador (que redige a resposta) e pelo analista
+                   (gráficos).
 
 O agente não grava nada: ele só lê. Os dados e valores das consultas nunca são gravados.
 Os documentos ficam no mfg.db, na tabela `store` do SqliteStore do LangGraph.
@@ -23,23 +24,26 @@ Fluxo no agent_multi.py:
 Variáveis de ambiente:
   MEMORIA_ATIVA              "0" desliga leitura e extração (padrão: ligada)
   MEMORIA_DELAY_SEGUNDOS     espera depois do último turno antes de extrair (padrão: 30)
+  MEMORIA_DEBUG              "1" loga o payload enviado ao extrator
   THINKING_LEVEL_MEMORIA     nível de raciocínio do extrator (padrão: medium; ver init_multi_agent)
 """
 
 from __future__ import annotations
 
 import difflib
-import functools
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 from collections import defaultdict
 from concurrent.futures import Future, wait
 from typing import Literal
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.runnables.config import patch_config
 from langgraph.config import get_config
 from langgraph.store.sqlite import SqliteStore
 from langmem import ReflectionExecutor, create_memory_store_manager
@@ -64,6 +68,47 @@ def ativa() -> bool:
     return os.getenv("MEMORIA_ATIVA", "1").strip() != "0"
 
 
+def _sem_null(schema):
+    """Remove o tipo null de um JSON Schema (ver com_schemas_sem_null)."""
+    if isinstance(schema, list):
+        return [_sem_null(s) for s in schema]
+    if not isinstance(schema, dict):
+        return schema
+    saida = {}
+    for chave, valor in schema.items():
+        if chave in ("anyOf", "oneOf") and isinstance(valor, list):
+            opcoes = [_sem_null(o) for o in valor if not (isinstance(o, dict) and o.get("type") == "null")]
+            if len(opcoes) == 1:  # anyOf de uma opção só vira a própria opção
+                saida.update(opcoes[0])
+            else:
+                saida[chave] = opcoes
+        elif chave == "type" and isinstance(valor, list):
+            tipos = [t for t in valor if t != "null"]
+            saida[chave] = tipos[0] if len(tipos) == 1 else tipos
+        else:
+            saida[chave] = _sem_null(valor)
+    return saida
+
+
+def com_schemas_sem_null(cls):
+    """Subclasse do modelo de chat que tira o tipo null dos schemas das ferramentas.
+
+    O trustcall (motor do LangMem) descreve o valor de um JSON Patch com uniões que admitem
+    null dentro de listas aninhadas, e o langchain-google-vertexai 2.1.2 não converte isso
+    para o Vertex ("Invalid enum value NULL for enum type ...Type"): a chamada falha antes
+    de sair da máquina, o trustcall repete até o limite de passos e nada é gravado. Só o
+    modelo do extrator usa esta classe; os modelos do agente ficam como estão.
+    """
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    class _ModeloSemNull(cls):
+        def bind_tools(self, tools, **kwargs):
+            return super().bind_tools([_sem_null(convert_to_openai_tool(t)) for t in tools], **kwargs)
+
+    _ModeloSemNull.__name__ = f"{cls.__name__}SemNull"
+    return _ModeloSemNull
+
+
 def _delay() -> int:
     try:
         return int(float(os.getenv("MEMORIA_DELAY_SEGUNDOS", "30")))
@@ -79,21 +124,33 @@ def _seg(valor: str) -> str:
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
-class Licao(BaseModel):
-    """Uma regra aprendida sobre como consultar o banco."""
-
-    regra: str = Field(description="Regra curta e específica, sem dados nem valores.")
-    confianca: Literal["verificada", "provavel"] = Field(
-        description="verificada: erro técnico ou causa declarada pelo usuário. "
-        "provavel: hipótese após contestação sem causa declarada."
-    )
-    motivo: str = Field(description="O que aconteceu, em uma frase, sem dados.")
-
-
 class LicoesDoBanco(BaseModel):
-    """Lições aprendidas sobre como consultar este banco de dados."""
+    """Lições aprendidas sobre como consultar este banco de dados.
 
-    licoes: list[Licao] = Field(default_factory=list, description="No máximo 30.")
+    Duas listas de texto, e não uma lista de objetos: o LangMem atualiza o documento com
+    JSON Patch, e o Gemini não consegue gerar um objeto como valor de um patch (no schema
+    do trustcall esse valor é um dict genérico, com additionalProperties, que a chamada de
+    função do Gemini não suporta). Ele manda `{}` e a lição é descartada na validação.
+    Texto ele gera sem problema.
+    """
+
+    verificadas: list[str] = Field(
+        default_factory=list,
+        description="Regras confirmadas: erro técnico corrigido ou regra declarada pelo "
+        "usuário como permanente. Uma regra curta por item, sem dados nem valores.",
+    )
+    hipoteses: list[str] = Field(
+        default_factory=list,
+        description="Hipóteses ainda não confirmadas: contestação sem causa declarada, com "
+        "indício concreto no SQL ou no resultado. Uma por item.",
+    )
+
+
+class Licao(BaseModel):
+    """Uma lição como o app a lê; o documento guarda só as duas listas de LicoesDoBanco."""
+
+    regra: str
+    confianca: Literal["verificada", "provavel"]
 
 
 class PreferenciasUsuario(BaseModel):
@@ -117,6 +174,10 @@ LICOES_INSTRUCOES = """\
 Você mantém o documento de LIÇÕES sobre como consultar um banco de dados. As lições \
 ajudam um agente de análise a não repetir erros. Escreva as lições em português.
 
+O documento tem duas listas de texto: "verificadas" (regras confirmadas) e "hipoteses" \
+(regras ainda não confirmadas). Cada item é um texto curto com a regra. Explique o \
+motivo de cada mudança em planned_edits, em uma frase.
+
 Você recebe as mensagens de um ou mais turnos: pedidos do usuário, chamadas de \
 ferramenta (SQL, erros, novas tentativas) e respostas do agente. Mensagens marcadas \
 com [CONTEXTO] já foram processadas antes; use-as só para entender o que o usuário \
@@ -124,17 +185,20 @@ está contestando.
 
 O QUE REGISTRAR (uma lição = uma regra curta e específica):
 1. Erro técnico verificado: a ferramenta devolveu erro (coluna ou tabela inexistente, \
-tipo errado, join inválido) e uma nova tentativa funcionou. Confiança "verificada".
+tipo errado, join inválido) e uma nova tentativa funcionou. Registre em "verificadas".
 2. Regra declarada pelo usuário como permanente: ele corrige o agente ou define como \
 proceder, com "sempre", "nunca" ou "o correto é", sobre QUAL dado ou coluna usar e COMO \
 calcular, filtrar ou somar (moeda, status, período padrão, exclusões). Registre mesmo \
 que ele a diga com "mostre" ou "apresente", e mesmo que a resposta anterior já esteja de \
-acordo com a regra: o que importa é que ele a declarou como permanente. Confiança \
-"verificada".
+acordo com a regra: o que importa é que ele a declarou como permanente. Registre-a \
+SEMPRE que aparecer, mesmo que as mensagens não mostrem a análise que ele está \
+corrigindo e mesmo que a regra pareça específica de um cálculo ou de uma tabela: o \
+usuário sabe do que está falando, e você não precisa conferir a regra contra o SQL. \
+Esta é a fonte de lições mais importante. Registre em "verificadas".
 3. Contestação sem causa declarada: o usuário reclama ("esse total está estranho", \
-"refaz isso") sem dizer por quê. Registre uma hipótese com confiança "provavel" SOMENTE \
-se houver indício concreto no SQL ou no resultado (join sem chave, filtro de período \
-omitido, agregação duplicando linhas). Sem indício concreto, NÃO registre nada.
+"refaz isso") sem dizer por quê. Registre uma hipótese em "hipoteses" SOMENTE se houver \
+indício concreto no SQL ou no resultado (join sem chave, filtro de período omitido, \
+agregação duplicando linhas). Sem indício concreto, NÃO registre nada.
 
 O QUE NÃO REGISTRAR:
 - Valores, resultados ou números dos dados.
@@ -145,15 +209,16 @@ pertencem a outro documento. A escolha de qual dado, moeda, filtro ou cálculo u
 - Contestações cuja causa você não consegue sustentar com as mensagens recebidas.
 
 CONSOLIDAÇÃO:
-- Antes de adicionar, procure lição equivalente: se existir, atualize-a em vez de duplicar.
-- Se uma hipótese "provavel" reaparecer em outro episódio ou o usuário a confirmar, \
-passe-a a "verificada".
+- Antes de adicionar, procure lição equivalente nas duas listas: se existir, atualize-a \
+em vez de duplicar.
+- Se uma hipótese reaparecer em outro episódio ou o usuário a confirmar, mova-a de \
+"hipoteses" para "verificadas".
 - NUNCA remova uma lição só para abrir espaço, nem porque ela não apareceu neste turno. \
 Remova apenas se as mensagens trouxerem evidência que a contraria.
 - As lições existentes NÃO indicam que o documento está completo: uma lição só impede \
 registrar a MESMA regra de novo. Avalie o turno contra os três critérios acima como se o \
 documento estivesse vazio, e só então compare com o que já existe.
-- Mantenha no máximo 30 lições.
+- Mantenha no máximo 30 lições no total.
 
 EXEMPLOS (os nomes são fictícios; use os nomes reais que aparecerem nas mensagens):
 
@@ -161,20 +226,18 @@ Exemplo 1 (erro técnico verificado)
 Turno: o usuário pede "produção por linha na última semana". O agente executa um \
 SELECT usando a coluna "data" na tabela producao; a ferramenta responde "coluna data \
 não existe"; o agente refaz com "dt_producao" e funciona.
-Lição: regra "Na tabela producao, a coluna de data é dt_producao (não data)"; confianca \
-"verificada"; motivo "erro de coluna inexistente corrigido na nova tentativa".
+Em "verificadas": "Na tabela producao, a coluna de data é dt_producao (não data)".
 
-Exemplo 2 (causa declarada, permanente)
+Exemplo 2 (regra declarada, permanente)
 Turno: o agente entrega o OEE por linha. Usuário: "Está errado. Sempre desconsidere as \
 paradas programadas ao calcular o OEE."
-Lição: regra "Ao calcular OEE, desconsiderar paradas programadas"; confianca \
-"verificada"; motivo "usuário declarou a regra como permanente".
+Em "verificadas": "Ao calcular OEE, desconsiderar paradas programadas".
 
 Exemplo 2b (regra permanente sobre qual dado usar, ditada como "mostre")
 Turno: o agente entrega o custo por fábrica. Usuário: "Sempre mostre o custo apenas em \
 USD, nunca somando moedas locais." (a resposta anterior pode até já estar em USD)
-Lição: regra "Apresentar e calcular o custo apenas em USD; nunca somar valores em moedas \
-locais"; confianca "verificada"; motivo "usuário declarou a regra como permanente".
+Em "verificadas": "Apresentar e calcular o custo apenas em USD; nunca somar valores em \
+moedas locais".
 
 Exemplo 3 (correção pontual, não registrar)
 Turno: usuário: "Nessa análise, considere só os turnos completos."
@@ -183,9 +246,8 @@ Nada a registrar: o pedido vale apenas para aquela análise.
 Exemplo 4 (contestação sem causa, com indício)
 Turno: o agente junta producao e paradas apenas por linha_id e entrega o total de \
 peças. Usuário: "Esse total está estranho, refaz."
-Lição: regra "Ao juntar producao e paradas, incluir a data na chave do join; só \
-linha_id pode duplicar linhas"; confianca "provavel"; motivo "análise contestada; o \
-join por linha_id apenas pode ter duplicado linhas".
+Em "hipoteses": "Ao juntar producao e paradas, incluir a data na chave do join; só \
+linha_id pode duplicar linhas".
 
 Exemplo 5 (contestação sem causa e sem indício, não registrar)
 Turno: o agente entrega a tabela de refugo por produto e o SQL parece correto. Usuário: \
@@ -252,13 +314,25 @@ def _ler_doc(namespace: tuple[str, ...], kind: str) -> tuple[str | None, dict]:
     return None, {}
 
 
+def _licoes_do_conteudo(conteudo: dict) -> list[Licao]:
+    licoes = []
+    for campo, confianca in (("verificadas", "verificada"), ("hipoteses", "provavel")):
+        for regra in conteudo.get(campo) or []:
+            if isinstance(regra, str) and regra.strip():
+                licoes.append(Licao(regra=regra.strip(), confianca=confianca))
+    return licoes
+
+
+def _conteudo_das_licoes(licoes: list[Licao]) -> dict:
+    return {
+        "verificadas": [l.regra for l in licoes if l.confianca == "verificada"],
+        "hipoteses": [l.regra for l in licoes if l.confianca == "provavel"],
+    }
+
+
 def ler_licoes(dominio: str) -> list[Licao]:
     _, conteudo = _ler_doc((_NS_LICOES, _seg(dominio)), "LicoesDoBanco")
-    try:
-        return [Licao(**d) for d in conteudo.get("licoes", [])]
-    except Exception:
-        logger.warning("[memoria] documento de lições ilegível em %s; ignorado", dominio)
-        return []
+    return _licoes_do_conteudo(conteudo)
 
 
 def ler_preferencias(user_id: str, dominio: str) -> PreferenciasUsuario:
@@ -332,9 +406,10 @@ def _norm(txt: str) -> str:
 def aplicar_trava(antes: list[Licao], depois: list[Licao]) -> list[Licao]:
     """Garante que o extrator não perca lições verificadas e respeite o limite de lições.
 
-    O LangMem reescreve o documento e, em teste, o Gemini 3.8 Flash chegou a apagar lições
-    verificadas ao registrar uma nova. Uma lição verificada que sumiu, sem nenhuma lição
-    parecida no documento novo (o que indicaria uma reescrita), é restaurada.
+    O LangMem reescreve o documento, e o trustcall, ao tentar corrigir um patch inválido,
+    chegou a sobrescrever uma lição verificada com a regra nova. Uma lição verificada que
+    sumiu, sem nenhuma lição parecida no documento novo (o que indicaria uma reescrita),
+    é restaurada.
     """
     resultado = list(depois)
     for velha in antes:
@@ -355,38 +430,17 @@ def aplicar_trava(antes: list[Licao], depois: list[Licao]) -> list[Licao]:
     return resultado
 
 
-class _ExtratorLicoes:
-    """Envolve o manager de lições do LangMem com a trava. O ReflectionExecutor só exige um
-    atributo `namespace` e um `invoke(payload)` (a config vem do contexto)."""
-
-    def __init__(self, manager):
-        self._manager = manager
-        self.namespace = manager.namespace
-
-    def invoke(self, payload, config=None):
-        config = config or get_config()
-        ns = self.namespace(config)
-        _, antes_raw = _ler_doc(ns, "LicoesDoBanco")
-        try:
-            antes = [Licao(**d) for d in antes_raw.get("licoes", [])]
-        except Exception:
-            antes = []
-        resultado = self._manager.invoke(payload, config)
-        try:
-            chave, depois_raw = _ler_doc(ns, "LicoesDoBanco")
-            depois = [Licao(**d) for d in depois_raw.get("licoes", [])]
-            final = aplicar_trava(antes, depois)
-            if chave and [l.model_dump() for l in final] != [l.model_dump() for l in depois]:
-                _store.put(ns, chave, {"kind": "LicoesDoBanco", "content": {"licoes": [l.model_dump() for l in final]}})
-            if len(final) != len(antes):
-                logger.info("[memoria] lições de %s atualizadas (%d -> %d)", "/".join(ns), len(antes), len(final))
-        except Exception:
-            logger.warning("[memoria] falha ao aplicar a trava das lições", exc_info=True)
-        return resultado
+def _log_diferenca(ns: tuple[str, ...], antes: list[Licao], depois: list[Licao]) -> None:
+    a = {(l.confianca, l.regra) for l in antes}
+    d = {(l.confianca, l.regra) for l in depois}
+    for confianca, regra in sorted(d - a):
+        logger.info("[memoria] lição %s gravada em %s: %s", confianca, "/".join(ns), regra)
+    for confianca, regra in sorted(a - d):
+        logger.info("[memoria] lição %s retirada de %s: %s", confianca, "/".join(ns), regra)
 
 
 # ---------------------------------------------------------------------------
-# Registro dos turnos
+# Extratores (o que o ReflectionExecutor executa)
 # ---------------------------------------------------------------------------
 _traces: dict[str, list[str]] = defaultdict(list)    # session_id -> traces do turno em curso
 _turnos: dict[str, list[dict]] = defaultdict(list)   # session_id -> turnos recentes
@@ -401,6 +455,73 @@ def _cortar(txt: str, n: int) -> str:
     return txt if len(txt) <= n else txt[:n] + "…"
 
 
+class _LogDoPlano(BaseCallbackHandler):
+    """Registra no log o `planned_edits` do extrator, onde ele explica o motivo de cada
+    mudança (o documento não guarda o motivo)."""
+
+    def __init__(self, tipo: str):
+        self.tipo = tipo
+
+    def on_llm_end(self, response, **kwargs):
+        for geracoes in response.generations:
+            for g in geracoes:
+                for tc in getattr(getattr(g, "message", None), "tool_calls", None) or []:
+                    plano = (tc.get("args") or {}).get("planned_edits")
+                    if plano:
+                        logger.info("[memoria] extrator de %s: %s", self.tipo, _cortar(plano, 600))
+
+
+class _Extrator:
+    """Envolve um manager do LangMem para o ReflectionExecutor, que só exige um atributo
+    `namespace` e um `invoke(payload)` (a config vem do contexto).
+
+    O ponteiro de turnos extraídos avança aqui dentro, antes de o Future ser concluído, e
+    não num callback do Future: o `wait()` acorda antes de os callbacks rodarem, e um
+    callback registrado com `_lock` preso numa tarefa já concluída rodaria na hora e
+    travaria no mesmo lock."""
+
+    def __init__(self, manager, tipo: str, trava: bool = False):
+        self._manager = manager
+        self.namespace = manager.namespace
+        self._tipo = tipo
+        self._trava = trava
+
+    def invoke(self, payload, config=None):
+        meta = payload.get("_meta") or {}
+        config = patch_config(config or get_config(), callbacks=[_LogDoPlano(self._tipo)])
+        entrada = {"messages": payload["messages"]}
+        try:
+            if self._trava:
+                self._invoke_com_trava(entrada, config)
+            else:
+                self._manager.invoke(entrada, config)
+        except Exception as e:
+            # o ponteiro não avança: esses turnos voltam na próxima extração da sessão
+            logger.warning("[memoria] falha na extração de %s (sessão %s): %r",
+                           self._tipo, meta.get("sessao"), e)
+            return []
+        with _lock:
+            chave = (meta.get("sessao"), self._tipo)
+            _extraidos[chave] = max(_extraidos[chave], meta.get("n_abs", 0))
+        logger.info("[memoria] extração de %s concluída (sessão %s)", self._tipo, meta.get("sessao"))
+        return []
+
+    def _invoke_com_trava(self, entrada, config) -> None:
+        ns = self.namespace(config)
+        _, antes_raw = _ler_doc(ns, "LicoesDoBanco")
+        antes = _licoes_do_conteudo(antes_raw)
+        self._manager.invoke(entrada, config)
+        chave, depois_raw = _ler_doc(ns, "LicoesDoBanco")
+        depois = _licoes_do_conteudo(depois_raw)
+        final = aplicar_trava(antes, depois)
+        if chave and final != depois:
+            _store.put(ns, chave, {"kind": "LicoesDoBanco", "content": _conteudo_das_licoes(final)})
+        _log_diferenca(ns, antes, final)
+
+
+# ---------------------------------------------------------------------------
+# Registro dos turnos
+# ---------------------------------------------------------------------------
 def renderizar_trace(messages: list[BaseMessage]) -> str:
     """Resume as mensagens do analista (SQL, erros, retries) em texto curto, sem dados."""
     linhas = []
@@ -445,23 +566,11 @@ def _mensagens(turnos: list[dict], n_contexto: int) -> list[dict]:
     return msgs
 
 
-def _marcar(sessao: str, tipo: str, n_abs: int, fut: Future) -> None:
-    """Callback do executor: avança o ponteiro de turnos extraídos só se a extração rodou."""
-    with _lock:
-        if fut in _futuros:
-            _futuros.remove(fut)
-    if fut.cancelled():
-        return
-    exc = fut.exception()
-    if exc is not None:
-        logger.warning("[memoria] falha na extração (%s, sessão %s): %r", tipo, sessao, exc)
-        return
-    if fut.result() is None:  # tarefa substituída por um submit mais novo
-        logger.info("[memoria] extração %s da sessão %s substituída por uma mais nova", tipo, sessao)
-        return
-    logger.info("[memoria] extração %s concluída (sessão %s, %d turnos)", tipo, sessao, n_abs)
-    with _lock:
-        _extraidos[(sessao, tipo)] = max(_extraidos[(sessao, tipo)], n_abs)
+# Palavras com que o usuário declara uma regra permanente (pt, en, zh, os idiomas do app).
+_DECLARA_REGRA = re.compile(
+    r"\b(sempre|nunca|jamais|o correto é|a regra é|always|never|the correct)\b|总是|永远|一直|从不|务必",
+    re.IGNORECASE,
+)
 
 
 def _enviar(executor: ReflectionExecutor, tipo: str, sessao: str, turnos: list[dict], base: int,
@@ -474,20 +583,26 @@ def _enviar(executor: ReflectionExecutor, tipo: str, sessao: str, turnos: list[d
     n_contexto = (ja - base) - inicio if ja > base else 0
     if not janela or ja >= base + len(turnos):
         return
-    if exige_trace and not any(t["trace"] for t in janela):
+    # Extrair lições custa uma chamada de LLM por turno, então só se há o que aprender: um
+    # trace do analista (erro técnico, contestação) ou o usuário declarando uma regra
+    # permanente, o que pode acontecer num turno sem nenhuma consulta.
+    if exige_trace and not (
+        any(t["trace"] for t in janela)
+        or any(_DECLARA_REGRA.search(t["pergunta"]) for t in janela[n_contexto:])
+    ):
         return
-    logger.info("[memoria] agendando extração %s (sessão %s, %d turnos na janela)", tipo, sessao, len(janela))
+    logger.info("[memoria] agendando extração de %s (sessão %s, %d turnos na janela)", tipo, sessao, len(janela))
     msgs = _mensagens(janela, n_contexto)
     if os.getenv("MEMORIA_DEBUG", "0").strip() == "1":
-        logger.info("[memoria] payload %s: %s", tipo, json.dumps(msgs, ensure_ascii=False))
+        logger.info("[memoria] payload de %s: %s", tipo, json.dumps(msgs, ensure_ascii=False))
     fut = executor.submit(
-        {"messages": msgs},
+        {"messages": msgs, "_meta": {"sessao": sessao, "n_abs": base + len(turnos)}},
         config=config,
         after_seconds=_delay(),
         thread_id=sessao,
     )
+    _futuros[:] = [f for f in _futuros if not f.done()]
     _futuros.append(fut)
-    fut.add_done_callback(functools.partial(_marcar, sessao, tipo, base + len(turnos)))
 
 
 def finalizar_turno(session_id: str, user_id: str, dominio: str, pergunta: str, resposta: str) -> None:
@@ -548,8 +663,8 @@ def init(llm) -> None:
             namespace=_NS_PREFERENCIAS,
             store=store,
         )
-        _exec_licoes = ReflectionExecutor(_ExtratorLicoes(licoes_manager), store=store)
-        _exec_prefs = ReflectionExecutor(prefs_manager, store=store)
+        _exec_licoes = ReflectionExecutor(_Extrator(licoes_manager, "licoes", trava=True), store=store)
+        _exec_prefs = ReflectionExecutor(_Extrator(prefs_manager, "prefs"), store=store)
         _store = store
         logger.info("[memoria] %s", "ativa" if ativa() else "desligada (MEMORIA_ATIVA=0)")
     except Exception:

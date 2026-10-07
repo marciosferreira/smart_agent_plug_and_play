@@ -4012,7 +4012,9 @@ def init_multi_agent(project: str, location: str, model_name: str, credentials=N
 
         # Extrator da memória do agente (ver memoria.py): roda em background depois do turno,
         # então pode raciocinar um pouco mais que o chat, mas é uma tarefa de classificação.
-        memoria.init(ChatVertexAI(
+        # com_schemas_sem_null: os schemas do trustcall têm null aninhado, que esta versão do
+        # langchain-google-vertexai não converte para o Vertex.
+        memoria.init(memoria.com_schemas_sem_null(ChatVertexAI)(
             model_name=model_name,
             project=project,
             location=location,
