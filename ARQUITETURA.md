@@ -791,7 +791,7 @@ Toda a API vive num único `FastAPI` (`main.py`), sem prefixo/versionamento (`/c
 
 Pontos que um novo desenvolvedor precisa saber antes de expor isso além do `localhost`:
 
-- **HTTP puro dentro do container.** O `uvicorn` (ver `Dockerfile`/`run.py`) não termina TLS — ele serve HTTP simples na porta 8000. Em produção (o `Dockerfile` é feito para EasyPanel), HTTPS é responsabilidade da camada na frente do container (reverse proxy/PaaS) — a aplicação em si não sabe nem precisa saber que existe TLS.
+- **HTTP puro.** O `uvicorn` (ver `run.py`) não termina TLS — ele serve HTTP simples na porta 8000. Em produção, HTTPS é responsabilidade da camada na frente do app (reverse proxy/PaaS) — a aplicação em si não sabe nem precisa saber que existe TLS.
 - **CORS totalmente aberto, mas só relevante para consumidores externos.** `CORSMiddleware` está configurado com `allow_origins=["*"]` e `allow_methods=["GET", "POST"]` (`main.py`) — note que `DELETE`, `PUT` e `PATCH` não estão liberados. Isso não afeta o dashboard Angular porque ele é servido **same-origin** (o próprio FastAPI serve o `index.html` na raiz — ver [Frontend](#frontend--angular-19-standalone-components)), então suas chamadas `DELETE`, `PUT` e `PATCH` nunca passam por preflight de CORS. Só importa se algum dia um cliente rodando em outra origem precisar chamar essas rotas.
 - **Sem autenticação na API.** Não há API key, JWT nem sessão de servidor — nenhuma rota valida quem está fazendo a chamada. O único controle de acesso é a separação de dados por `user_id` (ver [Identidade do usuário](#identidade-do-usuário-user_id--como-é-coletada-e-usada)), e esse `user_id` é um query param em texto puro, não assinado — qualquer cliente que descubra/adivinhe o `user_id` de outra pessoa consegue ler os dados dela. O modelo de segurança inteiro depende do app host controlar quem recebe qual `user_id`.
 - **Algumas rotas nem aplicam o filtro por `user_id`.** Quem souber o identificador acessa: `/chat/history` e `DELETE /chat/sessions/{id}` (por `session_id`), `/chart/{id}`, `/pdf/{id}` e `/excel/{id}` (por UUID), `/dashboard-widgets/{id}/data`, `/reports/{task_id}` e as rotas `/tasks/code-audit*`, que operam sobre o domínio inteiro.
@@ -853,7 +853,7 @@ As variáveis podem vir do ambiente ou de um arquivo `.env` na raiz (carregado n
 | `DATABASE_URL` | Sobrepõe `database.url` do `settings.yml` (modo `sql`) — tem precedência total | — |
 | `GRAPHQL_TOKEN`, `NEW_AGE_API_KEY`... | Segredos referenciados por `${VAR}` no bloco `graphql` do `settings.yml`; o nome depende do domínio | — |
 | `CONFIG_DIR` | Pasta do pack de configuração, se não for `config/` na raiz | `config/` |
-| `DB_PATH` | Caminho do banco local do app (`mfg.db`) — em produção (Docker/EasyPanel) aponta para um volume montado, ex. `/data/mfg.db` | `<raiz do projeto>/mfg.db` |
+| `DB_PATH` | Caminho do banco local do app (`mfg.db`) — em produção pode apontar para uma pasta de dados fora do código, ex. `/data/mfg.db` | `<raiz do projeto>/mfg.db` |
 | `PROJECT_ID` | Projeto GCP para o Vertex AI — sem ele o chat IA fica desabilitado | — |
 | `LOCATION` | Região do Vertex AI | `us-central1` |
 | `MODEL_NAME` | Modelo Gemini usado por todos os papéis do agente e pela transcrição | `gemini-3.8-flash` |
@@ -883,7 +883,7 @@ cd frontend && npm start # frontend — http://localhost:4200, com proxy para o 
 
 Acesse `http://localhost:4200` durante o desenvolvimento — é o Angular com hot-reload. `http://localhost:8000` sozinho só serve o frontend se `npm run build` já tiver sido rodado (ver [Frontend](#frontend--angular-19-standalone-components)).
 
-**"Produção local"** (um único processo, caminho igual ao do Docker):
+**"Produção local"** (um único processo):
 
 ```bash
 cd frontend && npm run build && cd ..
@@ -952,7 +952,7 @@ Em produção, `main.py` **não roda o Angular** — ele só serve os arquivos e
 - `GET /` devolve `frontend/dist/frontend/browser/index.html` (`FileResponse`)
 - Um `StaticFiles` é montado em `/` para os demais arquivos do build (JS/CSS com hash, `favicon.ico`, `i18n/`) — **registrado por último no arquivo**, depois de todas as rotas de API, para que o Starlette resolva as rotas explícitas (`/chat`, `/tasks`, etc.) antes de cair no mount
 
-Isso significa: **rodar `python run.py` sem antes rodar `npm run build` serve uma tela em branco** (o backend loga um warning e a rota `/` devolve um `index.html` inexistente). O `Dockerfile` cuida disso automaticamente com um estágio `node:20-slim` que roda `npm ci && npm run build` antes do estágio Python final, que só copia o resultado (`frontend/dist/frontend/browser/`) — a imagem final não tem Node, só o build já pronto.
+Isso significa: **rodar `python run.py` sem antes rodar `npm run build` serve uma tela em branco** (o backend loga um warning e a rota `/` devolve um `index.html` inexistente). O build gera `frontend/dist/frontend/browser/`, que o FastAPI serve; em produção só esse resultado é necessário, não o Node.
 
 ---
 
@@ -972,9 +972,9 @@ Vários pontos do sistema guardam estado em `dict`s Python globais dentro do pro
 Dois pontos de comportamento que também valem registro:
 
 - **O daemon executa as tarefas em sequência.** Cada tick percorre as tarefas vencidas uma a uma, e uma execução lenta (até o timeout de 10 minutos) atrasa as seguintes. Só o ▶ manual roda em thread própria.
-- **`reports/` mora fora do volume de dados.** O diretório fica ao lado do código (`/app/reports` no container), enquanto o `Dockerfile` só prevê o volume `/data` para o `mfg.db`. Num redeploy que recrie o container, os `metadata.json` com `status: pending_send` somem, a menos que esse caminho também seja montado como volume (os PDFs em si estão no `mfg.db`).
+- **`reports/` mora fora do volume de dados.** O diretório fica ao lado do código, enquanto o `mfg.db` pode estar em outra pasta (`DB_PATH`). Num redeploy que recrie a pasta do código, os `metadata.json` com `status: pending_send` somem, a menos que esse caminho seja preservado (os PDFs em si estão no `mfg.db`).
 
-Hoje o deploy de referência (`Dockerfile`) sobe um único processo (`uvicorn main:app`, sem `--workers`), o que é consistente com essas premissas. Se o requisito mudar para múltiplas réplicas, os `dict`s em memória precisam virar algo compartilhado (Redis, por exemplo) e o daemon precisa de um único dono antes disso funcionar corretamente — não é só trocar a infra.
+Hoje o app sobe um único processo (`python run.py` ou `uvicorn main:app`, sem `--workers`), o que é consistente com essas premissas. Se o requisito mudar para múltiplas réplicas, os `dict`s em memória precisam virar algo compartilhado (Redis, por exemplo) e o daemon precisa de um único dono antes disso funcionar corretamente — não é só trocar a infra.
 
 ---
 

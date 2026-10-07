@@ -24,8 +24,8 @@ import os
 # Ao implementar, resolver:
 #   - destinatário: scheduled_tasks.email só é preenchido por schedule_task/update_scheduled_task;
 #     o pipeline de criação (node_criar_tarefa, em agent_multi.py) não o extrai do pedido;
-#   - REPORTS_DIR fica ao lado do código (/app/reports no Docker), fora do volume /data do
-#     mfg.db: o estado 'pending_send' se perde num redeploy (montar volume ou mover para o banco);
+#   - REPORTS_DIR fica ao lado do código, fora da pasta do mfg.db (DB_PATH): o estado
+#     'pending_send' se perde se a pasta do código for recriada (preservar o caminho ou mover para o banco);
 #   - BACKEND_URL (padrão http://localhost:8000) monta os links dos anexos: em produção precisa
 #     ser a URL pública.
 REPORTS_DIR = Path(__file__).parent.parent / "reports"
