@@ -2168,6 +2168,7 @@ def _build_sub_agent(llm):
         bloco_memoria = (
             memoria.bloco_licoes(_dom)
             + memoria.bloco_convencoes(_uid, _dom)
+            + memoria.bloco_estrategias(_dom)
             + memoria.bloco_preferencias(_uid, _dom)
         )
         msgs = [SystemMessage(

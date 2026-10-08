@@ -1,7 +1,7 @@
 """
 Memória do agente: aprende sobre o banco e sobre o usuário a partir das conversas.
 
-Quatro documentos, mantidos em background depois do turno, sem atrasar a resposta:
+Cinco documentos, mantidos em background depois do turno, sem atrasar a resposta:
 
   LIÇÕES        -> regras sobre como consultar o banco. Um documento por domínio (compartilhado
                    por todos os usuários), com duas listas de texto: `verificadas` e `hipoteses`.
@@ -19,7 +19,13 @@ Quatro documentos, mantidos em background depois do turno, sem atrasar a respost
                    equipe ou gestor, e uma lista livre para o que não couber). Um documento por
                    usuário e por domínio. Lido só pelo orquestrador, que se dirige à pessoa.
 
-Uma ÚNICA chamada estruturada ao LLM (`_Extrator`) lê a conversa e os quatro documentos e devolve
+  ESTRATÉGIAS   -> COMO abordar certos tipos de análise, reforçado pelos 👍 e 👎 dos usuários:
+                   `boas` (abordagens aprovadas) e `evitar` (rejeitadas), cada uma com a contagem
+                   de avaliações e de usuários distintos. Um documento por domínio, compartilhado.
+                   Descreve a abordagem, nunca resultados numéricos. Lido pelo analista. Só é
+                   gravado quando há um 👍 ou 👎 na janela da extração.
+
+Uma ÚNICA chamada estruturada ao LLM (`_Extrator`) lê a conversa e os documentos e devolve
 uma lista de operações (`MudancasMemoria`: destino, ação, texto antigo e texto novo); o código as
 aplica por casamento de texto (`aplicar_operacoes`). Como o mesmo modelo decide, na mesma
 chamada, em qual documento cada declaração entra, ela nunca vai para dois (nem contradiz um deles). Do LangMem só usamos o `ReflectionExecutor`, que agenda a extração em
@@ -39,6 +45,8 @@ Fluxo no agent_multi.py:
 Variáveis de ambiente:
   MEMORIA_ATIVA              "0" desliga leitura e extração (padrão: ligada)
   MEMORIA_DELAY_SEGUNDOS     espera depois do último turno antes de extrair (padrão: 30)
+  MEMORIA_MIN_USUARIOS       usuários distintos que uma estratégia precisa ter para entrar no
+                             prompt do analista (padrão: 1; suba para exigir corroboração)
   MEMORIA_DEBUG              "1" loga o payload enviado ao extrator
   THINKING_LEVEL_MEMORIA     nível de raciocínio do extrator (padrão: medium; ver init_multi_agent)
 """
@@ -46,6 +54,7 @@ Variáveis de ambiente:
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import logging
 import os
@@ -53,6 +62,7 @@ import re
 import sqlite3
 import threading
 from collections import defaultdict
+from datetime import date
 from concurrent.futures import Future, wait
 from typing import Literal
 
@@ -61,13 +71,14 @@ from langgraph.store.sqlite import SqliteStore
 from langmem import ReflectionExecutor
 from pydantic import BaseModel, Field
 
-from db import DB_PATH
-from feedback import inicio_comparavel, marca_da_nota
+from db import DB_PATH, guardar_abordagem
+from feedback import inicio_comparavel, marca_da_nota, tem_sinal
 
 logger = logging.getLogger(__name__)
 
 MAX_LICOES = 30
 _MAX_ARGS = 800          # chars de entrada de ferramenta mostrados ao extrator
+_MAX_ARGS_ABORDAGEM = 1200  # idem, no resumo da abordagem guardado por resposta
 _MAX_SAIDA = 300         # chars de saída de ferramenta (corta dados de produção)
 _RESPOSTA_CABECA = 500   # chars do começo da resposta final mostrados ao extrator
 _RESPOSTA_CAUDA = 1800   # chars do fim: é onde ficam os blocos de parâmetros e de dados
@@ -75,11 +86,13 @@ _MAX_TURNOS_GUARDADOS = 6
 MAX_PREFERENCIAS = 20
 MAX_OUTROS = 10          # itens livres do perfil
 MAX_CONVENCOES = 20
+MAX_ESTRATEGIAS = 25     # por lista (boas e evitar)
 _IGUAL = 0.9             # similaridade a partir da qual duas frases contam como a mesma
 _CITADA = 0.8            # mínimo para o texto citado pelo extrator casar (de forma aproximada) com um item
 _EMPATE = 0.05           # dois itens assim de parecidos com a citação: ambíguo, não mexe em nenhum
 
 _NS_LICOES = "db_lessons"
+_NS_ESTRATEGIAS = "strategies"
 
 
 def ativa() -> bool:
@@ -184,7 +197,7 @@ class PerfilUsuario(BaseModel):
 Destino = Literal[
     "licao_verificada", "licao_hipotese", "convencao_pessoal", "preferencia", "perfil_outros",
     "perfil_nome", "perfil_cargo", "perfil_funcao_area", "perfil_atuacao",
-    "perfil_local_atuacao", "perfil_equipe_gestor",
+    "perfil_local_atuacao", "perfil_equipe_gestor", "estrategia_boa", "estrategia_evitar",
 ]
 
 
@@ -215,7 +228,7 @@ class MudancasMemoria(BaseModel):
 
 
 INSTRUCOES = """\
-Você mantém a memória de um agente que analisa dados para os usuários. A memória tem QUATRO \
+Você mantém a memória de um agente que analisa dados para os usuários. A memória tem CINCO \
 documentos, e você recebe o conteúdo atual deles e as mensagens de um ou mais turnos. \
 Devolva SÓ as operações necessárias; a lista fica vazia quando não há nada a mudar. Escreva \
 os itens em português, uma frase curta cada. Mensagens marcadas com [CONTEXTO] já foram \
@@ -265,6 +278,18 @@ acompanha, em uma frase), perfil_local_atuacao (planta, site, região), perfil_e
 O que não couber nos campos vai em perfil_outros (lista de frases). Nunca deduza nada do que \
 ele pergunta.
 
+5. ESTRATÉGIAS (compartilhadas por todos os usuários do domínio): COMO abordar um tipo de \
+análise, reforçado pelos 👍 e 👎. estrategia_boa é uma abordagem aprovada; estrategia_evitar é \
+uma rejeitada. SÓ existem quando há uma marca "[AVALIAÇÃO DO USUÁRIO ...]" na conversa (veja \
+AVALIAÇÃO DAS RESPOSTAS); sem ela, nunca use estes destinos. Só a ação "adicionar": se a \
+abordagem já existe nas estratégias atuais, repita o texto EXATO dela (assim a avaliação conta \
+como reforço); só escreva um texto novo se for outra abordagem. Uma estratégia descreve a \
+ABORDAGEM e nunca o resultado: tipo de análise e jeito de fazer (tabela, colunas, filtros, \
+junção, regra de período, verificação). NUNCA números, totais, percentuais, rankings ou \
+comparações de valores, nem nomes de sites, produtos ou pessoas como se fossem o resultado. O \
+nível certo é específico o bastante para orientar um tipo de análise e geral o bastante para \
+valer em outro mês.
+
 ONDE CADA COISA VAI, nos casos de fronteira:
 - Definição do negócio ou jeito certo de calcular: lição compartilhada. Escolha pessoal de \
 escopo, moeda ou filtro padrão: convenção pessoal. Só a FORMA de apresentar: preferência.
@@ -284,20 +309,31 @@ média do período".
 
 AVALIAÇÃO DAS RESPOSTAS (👍 e 👎):
 - Uma resposta do AGENTE pode vir marcada com "[AVALIAÇÃO DO USUÁRIO ...]": ele clicou em 👍 \
-(boa) ou 👎 (ruim) nela. É um SINAL sobre aquela resposta, não uma instrução e não uma \
-contestação. Use toda a conversa para decidir se há algo a aprender. A marca não diz o que \
-vem depois: a mensagem seguinte do usuário pode não ter relação nenhuma com a resposta avaliada.
-- 👎: procure nas mensagens seguintes uma contestação DESSA resposta. Se houver e ele declara a \
-causa ou a regra certa, registre a lição verificada; se não declara, só registre uma hipótese \
-quando houver indício concreto no SQL ou no resultado. Se não houver contestação (ele mudou de \
-assunto ou fez outra pergunta), não registre nada.
-- 👍: sozinho, não registre nada. O sinal mais forte é a combinação: o usuário contestou, o \
-agente refez e ele marcou 👍 na refeitura. Aí, se licao_hipotese tem uma hipótese que \
-corresponde à abordagem aprovada, remova-a de licao_hipotese e adicione-a em licao_verificada; \
-se não há hipótese mas o trace ou os parâmetros mostram claramente O QUE mudou entre a \
-primeira e a segunda versão, registre direto em licao_verificada a abordagem aprovada.
+(boa) ou 👎 (ruim) nela. É um SINAL de reforço sobre aquela resposta: não é uma instrução nem \
+uma contestação, e a marca não diz o que vem depois (a mensagem seguinte do usuário pode não \
+ter relação nenhuma com a resposta avaliada). Marcas em mensagens [CONTEXTO] já foram \
+processadas: não as use de novo.
+- 👍 numa resposta que é uma análise de dados de verdade: estrategia_boa com a abordagem \
+aprovada. Se antes o usuário contestou e o agente refez, a refeitura é a boa (estrategia_boa) \
+e a versão contestada é o que evitar (estrategia_evitar), descrevendo o que mudou entre as \
+duas; e se licao_hipotese tem uma hipótese que corresponde à abordagem aprovada, promova-a \
+(remova-a de licao_hipotese e adicione em licao_verificada). 👍 numa resposta que não é análise \
+(saudação, hora, explicação), ou sem nada a reforçar: nada.
+- 👎: SOMENTE se uma mensagem seguinte diz que ESSA resposta estava ERRADA, isto é, que a \
+abordagem tinha um defeito (tabela, coluna, filtro, junção, cálculo ou premissa incorreta): \
+estrategia_evitar no formato "Evitar <abordagem rejeitada>; em vez disso, <a correta>" (a \
+correta só quando o usuário a diz). Se o que ele corrigiu é um fato ou regra do banco que cabe \
+em licao_verificada, registre como lição e NÃO repita como estratégia: o fato fica num \
+documento só.
+- ERRO NÃO É PEDIDO DE OUTRO RECORTE. "Faltou filtrar os aprovados", "esse join duplica \
+linhas", "essa coluna é custo unitário, não o total" são erros. "Quero por fábrica, não por \
+site", "só o site JAG", "agora por trimestre", "mostre em gráfico" são pedidos de outro \
+recorte, período ou formato: a resposta não estava errada, só não era o que ele queria agora. \
+Não registre, mesmo com 👎.
+- 👎 seguido de outra pergunta, sem relação, ou sem explicação do que estava errado: nada.
 - Uma aprovação escrita com clareza depois da refeitura ("agora sim", "é isso mesmo", "está \
-correto") vale como o 👍. "Obrigado" ou "ok" não contam.
+correto") reforça como o 👍, mas só nas lições (promover uma hipótese a verificada): não cria \
+estratégia, pois estratégia exige o clique. "Obrigado" ou "ok" não contam.
 - Nenhuma avaliação, sozinha, cria convenção, preferência ou perfil.
 
 NÃO REGISTRE EM NENHUM:
@@ -318,7 +354,8 @@ usuário pedir para esquecer ("esqueça meu nome", "não sou mais gerente"). Nun
 espaço, nem porque ele não apareceu neste turno.
 - Os documentos atuais NÃO indicam que a memória está completa: avalie as mensagens contra \
 os critérios acima como se os documentos estivessem vazios, e só então compare.
-- Limites: 30 lições, 20 convenções pessoais, 20 preferências, 10 itens em perfil_outros.
+- Limites: 30 lições, 20 convenções pessoais, 20 preferências, 10 itens em perfil_outros, e no \
+máximo 3 operações de estratégia por vez.
 
 EXEMPLOS (nomes fictícios; use os reais das mensagens):
 - Erro: o agente consulta a coluna "data" de producao, a ferramenta diz que não existe e \
@@ -359,19 +396,23 @@ perfil_cargo, adicionar, novo "Gerente de supply".
 - "Esse total está estranho, refaz", com o SQL juntando producao e paradas só por linha_id: \
 licao_hipotese, adicionar, novo "Ao juntar producao e paradas, incluir a data na chave do join".
 - "Não gostei, faz de novo", sem indício no SQL: operacoes vazia.
-- Resposta marcada como ruim (👎) e a mensagem seguinte: "o custo tem que considerar só os \
-registros aprovados": licao_verificada, adicionar, novo "Para custo, considerar apenas \
-registros com status aprovado".
-- Resposta marcada como ruim (👎) e a mensagem seguinte: "não gostei, tenta de novo", sem \
-indício no SQL: operacoes vazia.
-- Resposta marcada como ruim (👎) e a mensagem seguinte é outra pergunta, sem relação (por \
-exemplo, "que horas são?" ou uma consulta sobre outro assunto): operacoes vazia.
-- O usuário contesta ("esse total está estranho, refaz"), o agente refaz usando a vigência \
-mais recente e a refeitura vem marcada com 👍, com a hipótese "Para taxa horária por site, \
-usar a vigência mais recente" em licao_hipotese: licao_hipotese, remover, antigo (texto \
-exato da hipótese); licao_verificada, adicionar, novo (a mesma regra).
-- Resposta marcada como boa (👍), sem nenhuma contestação antes: operacoes vazia.
+- "Agora sim, é isso mesmo", depois de refazer usando a vigência mais recente, com a hipótese \
+"Para taxa horária por site, usar a vigência mais recente" em licao_hipotese: licao_hipotese, \
+remover, antigo (texto exato da hipótese); licao_verificada, adicionar, novo (a mesma regra).
 - "Ótimo, obrigado", sem hipótese correspondente: operacoes vazia.
+- 👍 numa resposta cuja abordagem agregou dl_cost_by_cm_usd por site filtrando APPROVED no \
+último mês fechado: estrategia_boa, adicionar, novo "Para custo de mão de obra por site, \
+agregar dl_cost_by_cm_usd por site, filtrando status aprovado, no último mês fiscal fechado". \
+Os valores da resposta (totais, percentuais) ficam de fora.
+- 👎 e a mensagem seguinte "está errado, você somou o custo unitário como se fosse o total \
+desembolsado": estrategia_evitar, adicionar, novo "Evitar somar dl_cost_by_cm_usd como custo \
+total desembolsado; em vez disso, tratá-lo como custo unitário por produto".
+- 👎 e a mensagem seguinte "faltou filtrar só os aprovados", sendo um fato do banco: \
+licao_verificada "Para custo, considerar apenas registros com status aprovado", sem estratégia.
+- 👎 e a mensagem seguinte "quero por fábrica, não por site": pedido de outro recorte. \
+operacoes vazia.
+- 👎 e a mensagem seguinte é outra pergunta, sem relação ("que horas são?"): operacoes vazia.
+- 👍 em "Bom dia! Como posso ajudar?": operacoes vazia.
 """
 
 
@@ -574,8 +615,9 @@ _DESTINOS_CAMPO = {
 # A convenção pessoal vem antes da lição: na dúvida entre as duas, vale a que só afeta o usuário.
 _PRIORIDADE = [
     "convencao_pessoal", "licao_verificada", "licao_hipotese", *_DESTINOS_CAMPO,
-    "perfil_outros", "preferencia",
+    "perfil_outros", "preferencia", "estrategia_boa", "estrategia_evitar",
 ]
+_DESTINOS_ESTRATEGIA = {"estrategia_boa", "estrategia_evitar"}  # tratados à parte (documento compartilhado)
 _DESTINOS_DO_USUARIO = {"convencao_pessoal", "preferencia", "perfil_outros", *_DESTINOS_CAMPO}
 
 
@@ -702,6 +744,8 @@ def aplicar_operacoes(
         },
     }
     for op in _sem_duplicata_entre_destinos(ops):
+        if op.destino in _DESTINOS_ESTRATEGIA:
+            continue
         if not tem_usuario and op.destino in _DESTINOS_DO_USUARIO:
             continue
         if op.destino in _DESTINOS_CAMPO:
@@ -715,6 +759,164 @@ def aplicar_operacoes(
     docs["convencoes"]["convencoes"] = docs["convencoes"]["convencoes"][-MAX_CONVENCOES:]
     docs["perfil"]["outros"] = docs["perfil"]["outros"][-MAX_OUTROS:]
     return docs["licoes"], docs["preferencias"], docs["perfil"], docs["convencoes"]
+
+
+# ---------------------------------------------------------------------------
+# Estratégias (reforçadas por 👍 e 👎)
+# ---------------------------------------------------------------------------
+_DATAS = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\bQ\d\s*,?\s*(?:FY)?\s*\d{4}\b|\bFY\s?\d{2,4}\b", re.IGNORECASE)
+_VALOR = re.compile(r"\d+[.,]\d+|\d\s*%|[$€£¥]\s*\d|R\$\s*\d")
+
+
+def _parece_valor(texto: str) -> bool:
+    """True se o texto traz cara de resultado numérico (decimais, percentuais, moeda). Datas e
+    períodos fiscais (2026-09-01, Q2,2026, FY2026) são tirados antes. É uma rede de segurança:
+    a estratégia descreve a abordagem, e os números mudam."""
+    return bool(_VALOR.search(_DATAS.sub(" ", texto)))
+
+
+def _min_usuarios() -> int:
+    try:
+        return max(1, int(os.getenv("MEMORIA_MIN_USUARIOS", "1")))
+    except ValueError:
+        return 1
+
+
+def _hash_usuario(user_id: str, dominio: str) -> str:
+    """Identifica o usuário distinto sem guardar o id no documento compartilhado."""
+    return hashlib.sha256(f"{user_id}|{dominio}".encode()).hexdigest()[:12]
+
+
+def _entradas(lista) -> list[dict]:
+    saida = []
+    for e in lista or []:
+        if isinstance(e, dict) and isinstance(e.get("texto"), str) and e["texto"].strip():
+            saida.append({
+                "texto": e["texto"].strip(),
+                "n": int(e.get("n") or 1),
+                "usuarios": [str(u) for u in (e.get("usuarios") or [])],
+                "ultima": str(e.get("ultima") or ""),
+            })
+    return saida
+
+
+def _normalizar_estrategias(doc: dict) -> dict:
+    return {"boas": _entradas(doc.get("boas")), "evitar": _entradas(doc.get("evitar"))}
+
+
+def aplicar_estrategias(doc: dict, ops: list[Operacao], usuario: str, hoje: str | None = None) -> dict:
+    """Aplica as estratégias propostas (`destino` estrategia_boa ou estrategia_evitar, texto em
+    `novo`). Uma abordagem que já existe (mesmo texto, ou muito parecido) é reforçada: soma uma
+    avaliação e, se o usuário é novo, um usuário distinto. Texto com cara de resultado numérico é
+    descartado. Cada lista guarda no máximo MAX_ESTRATEGIAS entradas, e as de avaliação mais
+    antiga saem primeiro."""
+    hoje = hoje or date.today().isoformat()
+    novo = _normalizar_estrategias(doc)
+    for op in ops:
+        texto = (op.novo or "").strip()
+        if not texto:
+            continue
+        if _parece_valor(texto):
+            logger.warning("[memoria] estratégia descartada, parece trazer resultado numérico: %s", texto)
+            continue
+        lista = novo["boas" if op.destino == "estrategia_boa" else "evitar"]
+        i = _casar(texto, [e["texto"] for e in lista])
+        if i is None:
+            lista.append({"texto": texto, "n": 1, "usuarios": [usuario], "ultima": hoje})
+        else:
+            e = lista[i]
+            e["n"] += 1
+            e["ultima"] = hoje
+            if usuario not in e["usuarios"]:
+                e["usuarios"].append(usuario)
+    for chave in novo:
+        novo[chave] = sorted(novo[chave], key=lambda e: e["ultima"])[-MAX_ESTRATEGIAS:]
+    return novo
+
+
+def validar_estrategias(ops: list[Operacao], msgs: list[dict], tem_usuario: bool) -> list[Operacao]:
+    """Estratégia exige usuário e um 👍/👎 na janela (é o clique que reforça), só a ação
+    `adicionar`, e no máximo 3 por vez. O resto é descartado, com aviso no log."""
+    if not ops:
+        return []
+    if not tem_usuario or not tem_sinal(msgs):
+        logger.warning("[memoria] estratégia descartada: sem usuário ou sem 👍/👎 na janela")
+        return []
+    validas = [o for o in ops if o.acao == "adicionar"]
+    if len(validas) != len(ops):
+        logger.warning("[memoria] estratégia com ação diferente de adicionar foi descartada")
+    return validas[:3]
+
+
+def estrategias_visiveis(doc: dict) -> tuple[list[dict], list[dict]]:
+    """(boas, evitar) que entram no prompt do analista: com usuários distintos suficientes
+    (MEMORIA_MIN_USUARIOS) e sem uma abordagem parecida, igualmente ou mais avaliada, na lista
+    oposta (abordagem contestada: some do prompt até um lado ganhar)."""
+    d = _normalizar_estrategias(doc)
+    minimo = _min_usuarios()
+
+    def contestada(e: dict, oposta: list[dict]) -> bool:
+        return any(
+            _semelhanca(e["texto"], o["texto"]) >= _IGUAL and len(o["usuarios"]) >= len(e["usuarios"])
+            for o in oposta
+        )
+
+    boas = [e for e in d["boas"] if len(e["usuarios"]) >= minimo and not contestada(e, d["evitar"])]
+    evitar = [e for e in d["evitar"] if len(e["usuarios"]) >= minimo and not contestada(e, d["boas"])]
+    return boas, evitar
+
+
+def bloco_estrategias(dominio: str) -> str:
+    """Texto das estratégias para o prompt do analista. Vazio se não houver nada visível."""
+    if not ativa() or _store is None:
+        return ""
+    try:
+        _, doc = _ler_doc((_NS_ESTRATEGIAS, _seg(dominio)), "Estrategias")
+        boas, evitar = estrategias_visiveis(doc)
+    except Exception:
+        logger.warning("[memoria] falha ao ler estratégias", exc_info=True)
+        return ""
+    if not boas and not evitar:
+        return ""
+
+    def linha(e: dict) -> str:
+        n = len(e["usuarios"])
+        return f"- {e['texto']} ({n} usuário{'s' if n != 1 else ''})"
+
+    partes = [
+        "\n\n## Abordagens aprendidas com a avaliação dos usuários (memória compartilhada)\n"
+        "São sugestões de COMO abordar certos tipos de análise, vindas de 👍 e 👎 dos usuários, e "
+        "não regras do banco: o dominio.md e as lições confirmadas valem mais, e o pedido atual "
+        "vale mais que tudo. Descrevem a abordagem, nunca resultados. O número é de usuários "
+        "distintos que avaliaram: com poucos, trate como dica a confirmar."
+    ]
+    if boas:
+        partes.append("Abordagens aprovadas (prefira-as quando o pedido for do mesmo tipo):\n"
+                      + "\n".join(linha(e) for e in boas))
+    if evitar:
+        partes.append("Abordagens rejeitadas (evite-as):\n" + "\n".join(linha(e) for e in evitar))
+    return "\n".join(partes)
+
+
+_ERRO = re.compile(r"^\s*(erro|error|traceback)\b", re.IGNORECASE)
+
+
+def renderizar_abordagem(messages: list[BaseMessage]) -> str:
+    """Resumo da ABORDAGEM do analista: o que ele chamou (consultas, scripts) e se deu certo.
+    Os valores devolvidos ficam de fora; só as mensagens de erro entram (cortadas)."""
+    linhas = []
+    for m in messages:
+        if isinstance(m, AIMessage):
+            for tc in getattr(m, "tool_calls", None) or []:
+                args = json.dumps(tc.get("args", {}), ensure_ascii=False)
+                linhas.append(f"- {tc.get('name')}: {_cortar(args, _MAX_ARGS_ABORDAGEM)}")
+        elif isinstance(m, ToolMessage):
+            conteudo = m.content if isinstance(m.content, str) else str(m.content)
+            linhas.append(f"  -> ERRO: {_cortar(conteudo, 160)}" if _ERRO.match(conteudo) else "  -> ok")
+    return "\n".join(linhas)
+
+
+_abordagens: dict[str, list[str]] = defaultdict(list)  # session_id -> abordagens do turno em curso
 
 
 def _gravar(ns: tuple[str, ...], kind: str, antes: dict, depois: dict) -> bool:
@@ -760,12 +962,13 @@ def _texto_conversa(msgs: list[dict]) -> str:
 
 
 def _conteudo_para_o_llm(
-    msgs: list[dict], lic: dict, pref: dict, perfil: dict, conv: dict, tem_usuario: bool
+    msgs: list[dict], lic: dict, pref: dict, perfil: dict, conv: dict, est: dict, tem_usuario: bool
 ) -> str:
     atuais = {"licoes": {"verificadas": lic.get("verificadas") or [], "hipoteses": lic.get("hipoteses") or []}}
     if tem_usuario:
         atuais["convencoes_pessoais"] = conv.get("convencoes") or []
         atuais["preferencias"] = pref.get("preferencias") or []
+        atuais["estrategias"] = {k: [e["texto"] for e in v] for k, v in _normalizar_estrategias(est).items()}
         atuais["perfil"] = {
             **{c: perfil.get(c) for c in PerfilUsuario.model_fields if c != "outros"},
             "outros": perfil.get("outros") or [],
@@ -818,8 +1021,10 @@ class _Extrator:
         _, pref = _ler_doc(ns_pref, "PreferenciasUsuario") if user_id else (None, {})
         _, perfil = _ler_doc(ns_perf, "PerfilUsuario") if user_id else (None, {})
         _, conv = _ler_doc(ns_conv, "ConvencoesDoUsuario") if user_id else (None, {})
+        ns_est = (_NS_ESTRATEGIAS, _seg(dominio))
+        _, est = _ler_doc(ns_est, "Estrategias") if user_id else (None, {})
 
-        conteudo = _conteudo_para_o_llm(msgs, lic, pref, perfil, conv, bool(user_id))
+        conteudo = _conteudo_para_o_llm(msgs, lic, pref, perfil, conv, est, bool(user_id))
         if os.getenv("MEMORIA_DEBUG", "0").strip() == "1":
             logger.info("[memoria] payload enviado ao extrator:\n%s", conteudo)
         m = self._llm.invoke([SystemMessage(content=INSTRUCOES), HumanMessage(content=conteudo)])
@@ -827,9 +1032,16 @@ class _Extrator:
             raise ValueError(f"o modelo não devolveu as mudanças estruturadas: {_cortar(repr(m), 200)}")
         logger.info("[memoria] extrator: %s", _cortar(m.raciocinio, 600))
 
-        lic_novo, pref_novo, perfil_novo, conv_novo = aplicar_operacoes(
-            m.operacoes, lic, pref, perfil, conv, bool(user_id)
+        ops = _sem_duplicata_entre_destinos(list(m.operacoes))  # a lição vence a estratégia igual
+        ops_estrategia = validar_estrategias(
+            [o for o in ops if o.destino in _DESTINOS_ESTRATEGIA], msgs, bool(user_id)
         )
+        lic_novo, pref_novo, perfil_novo, conv_novo = aplicar_operacoes(
+            [o for o in ops if o.destino not in _DESTINOS_ESTRATEGIA], lic, pref, perfil, conv, bool(user_id)
+        )
+        if ops_estrategia:
+            _gravar(ns_est, "Estrategias", _normalizar_estrategias(est),
+                    aplicar_estrategias(est, ops_estrategia, _hash_usuario(user_id, dominio)))
         _gravar(ns_lic, "LicoesDoBanco", _normalizar_licoes(lic), lic_novo)
         if user_id:
             _gravar(ns_pref, "PreferenciasUsuario", _normalizar_prefs(pref), pref_novo)
@@ -879,9 +1091,12 @@ def add_trace(session_id: str, messages: list[BaseMessage]) -> None:
         return
     try:
         trace = renderizar_trace(messages)
-        if trace:
-            with _lock:
+        abordagem = renderizar_abordagem(messages)
+        with _lock:
+            if trace:
                 _traces[session_id].append(trace)
+            if abordagem:
+                _abordagens[session_id].append(abordagem)
     except Exception:
         logger.warning("[memoria] falha ao registrar trace", exc_info=True)
 
@@ -890,6 +1105,7 @@ def descartar_turno(session_id: str) -> None:
     """Turno cancelado ou com erro: descarta o trace acumulado."""
     with _lock:
         _traces.pop(session_id, None)
+        _abordagens.pop(session_id, None)
 
 
 def _mensagens(turnos: list[dict], n_contexto: int) -> list[dict]:
@@ -960,24 +1176,32 @@ def finalizar_turno(session_id: str, user_id: str, dominio: str, pergunta: str, 
     try:
         with _lock:
             trace = "\n".join(_traces.pop(session_id, []))
+            abordagem = "\n".join(_abordagens.pop(session_id, []))
             lista = _turnos[session_id]
-            lista.append({"pergunta": pergunta, "trace": trace, "resposta": _resumir_resposta(resposta)})
+            resumo = _resumir_resposta(resposta)
+            lista.append({"pergunta": pergunta, "trace": trace, "resposta": resumo, "abordagem": abordagem})
             if len(lista) > _MAX_TURNOS_GUARDADOS:
                 excesso = len(lista) - _MAX_TURNOS_GUARDADOS
                 del lista[:excesso]
                 _base[session_id] += excesso
             _enviar(session_id, user_id, dominio, list(lista), _base[session_id])
+        if abordagem:  # guardado no banco: a avaliação do usuário o copia para o conjunto de dados
+            try:
+                guardar_abordagem(session_id, inicio_comparavel(resposta), abordagem)
+            except Exception:
+                logger.warning("[memoria] falha ao guardar a abordagem", exc_info=True)
     except Exception:
         logger.warning("[memoria] falha ao agendar a extração", exc_info=True)
 
 
 def avaliar_resposta(session_id: str, user_id: str, dominio: str, inicio_resposta: str, nota: str) -> bool:
-    """O usuário clicou em 👍 (`up`) ou 👎 (`down`) numa resposta. É só um sinal: o turno é
-    marcado e a extração da sessão é reagendada com ele na janela (e os dois anteriores como
-    contexto), para o extrator decidir, olhando a conversa toda, se há algo a aprender. Se o
-    usuário seguir conversando antes dos 30 s de espera, a extração seguinte absorve esta
-    (mesmo thread_id). Devolve True se achou o turno em memória."""
-    if not ativa() or _store is None or _executor is None or nota not in ("up", "down"):
+    """O usuário clicou em 👍 (`up`) ou 👎 (`down`) numa resposta. É um sinal de reforço para o
+    extrator único: o turno é marcado e a extração da sessão é reagendada com ele na janela (e os
+    dois anteriores como contexto), para o extrator decidir, olhando a conversa toda, o que há a
+    reforçar. Se o usuário seguir conversando antes dos 30 s de espera, a extração seguinte
+    absorve esta (mesmo thread_id), já com as mensagens que vêm depois. Devolve True se achou o
+    turno em memória; senão (muito antigo, ou depois de um restart) a avaliação só fica no banco."""
+    if not ativa() or _store is None or _executor is None or not user_id or nota not in ("up", "down"):
         return False
     inicio = (inicio_resposta or "").strip()
     if not inicio:

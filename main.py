@@ -21,7 +21,10 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from db import avaliacoes_da_sessao, get_db, init_db, migrate_db, registrar_avaliacao, save_dashboard_widget_order
+from db import (
+    avaliacoes_da_sessao, buscar_abordagem, get_db, init_db, migrate_db, registrar_avaliacao,
+    save_dashboard_widget_order,
+)
 import db_config
 
 try:
@@ -467,7 +470,7 @@ async def chat_history(session_id: str = "default"):
 async def chat_feedback(req: FeedbackRequest):
     """Botões 👍 e 👎 de uma resposta de dados. Toda avaliação é gravada (pergunta, resposta e
     nota; depois de um 👎, também a mensagem seguinte do usuário) para melhorar o agente depois.
-    Para a memória, 👍 e 👎 são só sinais: o extrator lê a conversa e decide se há algo a aprender."""
+    Para a memória, 👍 e 👎 são sinais de reforço (ver memoria.avaliar_resposta)."""
     path = "/chat/feedback"
     if not is_multi_agent_ready():
         return JSONResponse(status_code=503, content=_error_body(503, "ServiceUnavailable", "Agente IA não configurado.", path))
@@ -485,13 +488,23 @@ async def chat_feedback(req: FeedbackRequest):
     if tag and tag["dominio"] and tag["dominio"] != db_config.dominio_filename():
         return JSONResponse(status_code=404, content=_error_body(404, "NotFound", "Sessão de outro domínio.", path))
     turno = turnos[indice]
+
+    def abordagem_de(t):
+        return buscar_abordagem(req.session_id, feedback.inicio_comparavel(t["resposta"] or ""))
+
     anterior = registrar_avaliacao(
         req.session_id, indice, req.user_id, db_config.dominio_filename(), req.rating,
-        turno["usuario"], turno["resposta"], turno["analista"],
+        turno["usuario"], turno["resposta"], turno["analista"], abordagem_de(turno),
     )
-    if anterior != req.rating:  # só um sinal para a memória: ela decide se há algo a aprender
-        memoria.avaliar_resposta(req.session_id, req.user_id, db_config.dominio_filename(), req.reply_start, req.rating)
-    return {"ok": True, "turn": indice, "rating": req.rating, "anterior": anterior}
+    tratado = None
+    if anterior != req.rating:
+        # Para a memória, o clique é um sinal de reforço: marca o turno e reagenda a extração de
+        # sempre. Turno que já saiu da memória (muito antigo, ou após um restart) só fica no banco.
+        agendada = memoria.avaliar_resposta(
+            req.session_id, req.user_id, db_config.dominio_filename(), req.reply_start, req.rating
+        )
+        tratado = "agendada" if agendada else "so_registrada"
+    return {"ok": True, "turn": indice, "rating": req.rating, "anterior": anterior, "memoria": tratado}
 
 
 @app.get("/chat/sessions")
@@ -561,6 +574,7 @@ async def delete_chat_session(session_id: str):
                     pass
             conn.execute("DELETE FROM session_dominio WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM feedback_respostas WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM abordagens WHERE session_id = ?", (session_id,))
             conn.commit()
         import chart_store as cs
         cs.delete_charts_for_session(session_id)

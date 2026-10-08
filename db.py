@@ -86,6 +86,7 @@ def migrate_db():
                 pergunta            TEXT,
                 resposta            TEXT,
                 analista            INTEGER NOT NULL DEFAULT 0,
+                abordagem           TEXT,
                 mensagem_seguinte   TEXT,
                 mensagem_seguinte_em TEXT,
                 created_at          TEXT    NOT NULL,
@@ -102,6 +103,17 @@ def migrate_db():
             "ALTER TABLE feedback_respostas ADD COLUMN mensagem_seguinte TEXT",
             "ALTER TABLE feedback_respostas ADD COLUMN mensagem_seguinte_em TEXT",
             "ALTER TABLE feedback_respostas ADD COLUMN updated_at TEXT",
+            "ALTER TABLE feedback_respostas ADD COLUMN abordagem TEXT",
+            # resumo da abordagem de cada resposta de dados (consultas feitas e se deram certo, sem
+            # os valores devolvidos). chave = começo normalizado da resposta (feedback.inicio_comparavel).
+            # Serve ao aprendizado por avaliação e ao conjunto de dados de treino.
+            """CREATE TABLE IF NOT EXISTS abordagens (
+                session_id TEXT NOT NULL,
+                chave      TEXT NOT NULL,
+                texto      TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, chave)
+            )""",
             # marca cada sessão de chat com o domínio ativo no primeiro turno
             """CREATE TABLE IF NOT EXISTS session_dominio (
                 session_id TEXT PRIMARY KEY,
@@ -172,8 +184,30 @@ def prepend_dashboard_widget_order(user_id: "str | None", widget_id: str) -> Non
     save_dashboard_widget_order(user_id, dominio, ids)
 
 
+def guardar_abordagem(session_id: str, chave: str, texto: str) -> None:
+    """Guarda o resumo da abordagem de uma resposta de dados (ver memoria.renderizar_abordagem)."""
+    if not chave or not (texto or "").strip():
+        return
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO abordagens (session_id, chave, texto, created_at) VALUES (?,?,?,?)",
+            (session_id, chave, texto, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.commit()
+
+
+def buscar_abordagem(session_id: str, chave: str) -> str | None:
+    if not chave:
+        return None
+    with get_db() as conn:
+        r = conn.execute(
+            "SELECT texto FROM abordagens WHERE session_id = ? AND chave = ?", (session_id, chave)
+        ).fetchone()
+    return r["texto"] if r else None
+
+
 def registrar_avaliacao(session_id: str, turn: int, user_id: str, dominio: str, rating: str,
-                        pergunta: str, resposta: str, analista: bool) -> str | None:
+                        pergunta: str, resposta: str, analista: bool, abordagem: str | None = None) -> str | None:
     """Grava a nota (`up` ou `down`) do usuário para a resposta do turno. Há uma nota por
     resposta: trocar de 👍 para 👎 atualiza a mesma linha (a mensagem seguinte, se houver, fica).
     Devolve a nota anterior, ou None se é a primeira."""
@@ -190,8 +224,8 @@ def registrar_avaliacao(session_id: str, turn: int, user_id: str, dominio: str, 
         else:
             conn.execute(
                 "INSERT INTO feedback_respostas (session_id, turn, user_id, dominio, rating, pergunta, resposta,"
-                " analista, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                (session_id, turn, user_id, dominio, rating, pergunta, resposta, int(bool(analista)), agora),
+                " analista, abordagem, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (session_id, turn, user_id, dominio, rating, pergunta, resposta, int(bool(analista)), abordagem, agora),
             )
         conn.commit()
     return antes["rating"] if antes else None

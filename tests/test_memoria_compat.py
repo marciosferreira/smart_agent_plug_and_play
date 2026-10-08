@@ -284,8 +284,165 @@ class AvaliacaoDeResposta(unittest.TestCase):
         self.assertIsNone(feedback.localizar_resposta(turnos, ""))
 
 
-class AvaliacaoNaMemoria(unittest.TestCase):
-    """memoria.avaliar_resposta: 👍 e 👎 são sinais; a extração é reagendada com o turno avaliado."""
+def _est(destino, texto):
+    return Operacao(destino=destino, acao="adicionar", novo=texto)
+
+
+class EstrategiasReforcadas(unittest.TestCase):
+    """Estratégias compartilhadas (boas e evitar): reforço, filtro de números, visibilidade."""
+
+    def test_reforca_a_mesma_abordagem_e_conta_usuarios_distintos(self):
+        t = "Para custo por site, agregar dl_cost_by_cm_usd por site filtrando status aprovado"
+        doc = memoria.aplicar_estrategias({}, [_est("estrategia_boa", t)], "u1", hoje="2026-10-01")
+        doc = memoria.aplicar_estrategias(doc, [_est("estrategia_boa", t.lower() + ".")], "u1", hoje="2026-10-02")
+        self.assertEqual((doc["boas"][0]["n"], len(doc["boas"][0]["usuarios"])), (2, 1))
+        doc = memoria.aplicar_estrategias(doc, [_est("estrategia_boa", t)], "u2", hoje="2026-10-03")
+        self.assertEqual((len(doc["boas"]), doc["boas"][0]["n"], len(doc["boas"][0]["usuarios"])), (1, 3, 2))
+        self.assertEqual(doc["boas"][0]["ultima"], "2026-10-03")
+
+    def test_abordagem_diferente_vira_entrada_nova(self):
+        doc = memoria.aplicar_estrategias({}, [_est("estrategia_boa", "Agregar o custo por site, filtrando aprovados")], "u1")
+        doc = memoria.aplicar_estrategias(doc, [_est("estrategia_boa", "Calcular a taxa horária pela vigência mais recente")], "u1")
+        self.assertEqual(len(doc["boas"]), 2)
+
+    def test_descarta_estrategia_com_resultado_numerico_mas_aceita_datas(self):
+        doc = memoria.aplicar_estrategias({}, [
+            _est("estrategia_boa", "O site BPL concentrou 88,6% do custo"),
+            _est("estrategia_boa", "O custo total foi de $798,76"),
+            _est("estrategia_boa", "Para o último mês fechado (2026-09-01 a 2026-09-30, Q2,2026), agregar por site"),
+        ], "u1")
+        self.assertEqual([e["texto"] for e in doc["boas"]],
+                         ["Para o último mês fechado (2026-09-01 a 2026-09-30, Q2,2026), agregar por site"])
+
+    def test_limite_por_lista_descarta_as_de_avaliacao_mais_antiga(self):
+        doc = {"boas": [{"texto": f"abordagem numero {i} " + "z" * i * 3, "n": 1, "usuarios": ["u"],
+                         "ultima": f"2026-01-{i + 1:02d}"} for i in range(memoria.MAX_ESTRATEGIAS)]}
+        novo = memoria.aplicar_estrategias(doc, [_est("estrategia_boa", "uma abordagem nova e bem diferente")], "u1",
+                                           hoje="2026-10-01")
+        self.assertEqual(len(novo["boas"]), memoria.MAX_ESTRATEGIAS)
+        self.assertEqual(novo["boas"][-1]["texto"], "uma abordagem nova e bem diferente")
+
+    def test_visibilidade_respeita_o_minimo_de_usuarios(self):
+        from unittest import mock
+
+        doc = {"boas": [{"texto": "Agregar por site", "n": 1, "usuarios": ["u1"], "ultima": "2026-10-01"}]}
+        with mock.patch.dict("os.environ", {"MEMORIA_MIN_USUARIOS": "1"}):
+            self.assertEqual(len(memoria.estrategias_visiveis(doc)[0]), 1)  # padrão: já na primeira avaliação
+        with mock.patch.dict("os.environ", {"MEMORIA_MIN_USUARIOS": "2"}):
+            self.assertEqual(memoria.estrategias_visiveis(doc)[0], [])
+            doc["boas"][0]["usuarios"].append("u2")
+            self.assertEqual(len(memoria.estrategias_visiveis(doc)[0]), 1)
+
+    def test_abordagem_contestada_some_ate_um_lado_ganhar(self):
+        def e(texto, n):
+            return {"texto": texto, "n": n, "usuarios": [f"u{i}" for i in range(n)], "ultima": "2026-10-01"}
+
+        igual = {"boas": [e("Somar dl_cost_by_cm_usd como custo total", 1)],
+                 "evitar": [e("Somar dl_cost_by_cm_usd como custo total", 1)]}
+        self.assertEqual(memoria.estrategias_visiveis(igual), ([], []))
+        ganha_boa = {"boas": [e("Somar dl_cost_by_cm_usd como custo total", 2)],
+                     "evitar": [e("Somar dl_cost_by_cm_usd como custo total", 1)]}
+        boas, evitar = memoria.estrategias_visiveis(ganha_boa)
+        self.assertEqual((len(boas), evitar), (1, []))
+
+    def test_resumo_da_abordagem_leva_as_consultas_e_o_resultado_ok_ou_erro_sem_valores(self):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        msgs = [
+            AIMessage("", tool_calls=[{"name": "executar_graphql_agregado", "args": {"table": "fact", "group_by": "site_id"}, "id": "1"}]),
+            ToolMessage("Erro ao executar GraphQL: coluna inexistente", tool_call_id="1", name="executar_graphql_agregado"),
+            AIMessage("", tool_calls=[{"name": "executar_graphql_agregado", "args": {"table": "fact", "group_by": "site"}, "id": "2"}]),
+            ToolMessage('[{"groupKey": "BPL", "metricValue": 708.0}]', tool_call_id="2", name="executar_graphql_agregado"),
+        ]
+        resumo = memoria.renderizar_abordagem(msgs)
+        self.assertIn("group_by", resumo)
+        self.assertIn("ERRO: Erro ao executar GraphQL", resumo)
+        self.assertNotIn("708", resumo)
+        self.assertNotIn("BPL", resumo)
+
+
+class BlocoDeEstrategias(unittest.TestCase):
+    def setUp(self):
+        import sqlite3
+
+        from langgraph.store.sqlite import SqliteStore
+
+        self._antigo = memoria._store
+        conn = sqlite3.connect(":memory:", check_same_thread=False, isolation_level=None)
+        memoria._store = SqliteStore(conn)
+        memoria._store.setup()
+
+    def tearDown(self):
+        memoria._store = self._antigo
+
+    def test_bloco_mostra_a_confianca_e_so_o_dominio_certo(self):
+        memoria._store.put(("strategies", "dom_a_md"), "default", {"kind": "Estrategias", "content": {
+            "boas": [{"texto": "Agregar o custo por site, filtrando aprovados", "n": 3, "usuarios": ["a", "b"], "ultima": "2026-10-01"}],
+            "evitar": [{"texto": "Somar custo unitário como total", "n": 1, "usuarios": ["a"], "ultima": "2026-10-01"}],
+        }})
+        bloco = memoria.bloco_estrategias("dom_a.md")
+        self.assertIn("- Agregar o custo por site, filtrando aprovados (2 usuários)", bloco)
+        self.assertIn("- Somar custo unitário como total (1 usuário)", bloco)
+        self.assertIn("o dominio.md e as lições confirmadas valem mais", bloco)
+        self.assertIn("nunca resultados", bloco)
+        self.assertEqual(memoria.bloco_estrategias("dom_b.md"), "")
+
+
+class EstrategiaExigeSinal(unittest.TestCase):
+    """Estratégia só entra com um 👍/👎 na janela, e a lição vence a estratégia igual."""
+
+    COM_SINAL = [{"role": "user", "content": "Qual o custo?"},
+                 {"role": "assistant", "content": "Custo por site... " + feedback.MARCA_BOA}]
+    SO_CONTEXTO = [{"role": "user", "content": "[CONTEXTO, já processado] Qual o custo?"},
+                   {"role": "assistant", "content": "[CONTEXTO, já processado] Custo... " + feedback.MARCA_BOA}]
+    SEM_SINAL = [{"role": "user", "content": "Qual o custo?"}, {"role": "assistant", "content": "Custo por site..."}]
+
+    def test_sem_sinal_na_janela_a_estrategia_cai(self):
+        ops = [_est("estrategia_boa", "Agregar por site")]
+        self.assertEqual(memoria.validar_estrategias(ops, self.SEM_SINAL, True), [])
+        self.assertEqual(memoria.validar_estrategias(ops, self.SO_CONTEXTO, True), [])  # sinal já processado
+
+    def test_com_sinal_e_usuario_a_estrategia_passa(self):
+        ops = [_est("estrategia_boa", "Agregar por site")]
+        self.assertEqual(memoria.validar_estrategias(ops, self.COM_SINAL, True), ops)
+        self.assertEqual(memoria.validar_estrategias(ops, self.COM_SINAL, False), [])  # sem usuário
+
+    def test_so_a_acao_adicionar_e_no_maximo_tres(self):
+        ops = [_est("estrategia_boa", f"abordagem {i}") for i in range(5)]
+        ops.append(Operacao(destino="estrategia_evitar", acao="remover", antigo="x"))
+        validas = memoria.validar_estrategias(ops, self.COM_SINAL, True)
+        self.assertEqual(len(validas), 3)
+        self.assertTrue(all(o.acao == "adicionar" for o in validas))
+
+    def test_a_mesma_frase_em_licao_e_estrategia_fica_so_na_licao(self):
+        frase = "Para custo, considerar apenas registros com status aprovado"
+        ops = memoria._sem_duplicata_entre_destinos([
+            _est("estrategia_evitar", frase + "."),
+            Operacao(destino="licao_verificada", acao="adicionar", novo=frase),
+        ])
+        self.assertEqual([o.destino for o in ops], ["licao_verificada"])
+
+    def test_estrategia_nao_chega_ao_aplicador_dos_outros_documentos(self):
+        lic, pref, perfil, conv = aplicar_operacoes([_est("estrategia_boa", "Agregar por site")], {}, {}, {}, {}, True)
+        self.assertEqual((lic["verificadas"], pref["preferencias"], conv["convencoes"]), ([], [], []))
+
+
+class PromptDoExtratorUnico(unittest.TestCase):
+    def test_regras_das_estrategias_estao_no_prompt(self):
+        for trecho in ("NUNCA números", "ERRO NÃO É PEDIDO DE OUTRO RECORTE",
+                       "Evitar <abordagem rejeitada>; em vez disso", "texto EXATO",
+                       "SÓ existem quando há uma marca", "NÃO repita como estratégia"):
+            with self.subTest(trecho=trecho):
+                self.assertIn(trecho, memoria.INSTRUCOES)
+
+    def test_destinos_de_estrategia_existem_no_schema_e_o_vertex_o_aceita(self):
+        self.assertIn("estrategia_boa", str(Operacao.model_json_schema()))
+        modelo = _modelo(agent_multi._chat_vertex_with_thinking_level()).bind_tools([MudancasMemoria])
+        modelo.bound._prepare_request_gemini([HumanMessage("x")], **modelo.kwargs)
+
+
+class AvaliacaoComoSinal(unittest.TestCase):
+    """memoria.avaliar_resposta: 👍/👎 marcam o turno e reagendam a extração de sempre."""
 
     class _ExecutorFalso:
         def __init__(self):
@@ -333,20 +490,20 @@ class AvaliacaoNaMemoria(unittest.TestCase):
         self._avalia("Refeito só com aprovados", "up")
         envio = memoria._executor.envios[-1]
         self.assertEqual(envio["thread_id"], self.sessao)  # substitui a extração pendente da sessão
-        conteudo = " ".join(m["content"] for m in envio["payload"]["messages"])
-        self.assertIn(feedback.MARCA_BOA, conteudo)
+        self.assertIn(feedback.MARCA_BOA, " ".join(m["content"] for m in envio["payload"]["messages"]))
+        self.assertTrue(feedback.tem_sinal(envio["payload"]["messages"]))
 
     def test_turno_ja_extraido_volta_a_janela_com_dois_turnos_de_contexto(self):
         memoria._extraidos[self.sessao] = 3  # tudo já foi extraído
         self._avalia("Refeito só com aprovados", "up")  # o turno do meio
         msgs = memoria._executor.envios[-1]["payload"]["messages"]
-        self.assertEqual(len(msgs), 6)                       # os três turnos
-        self.assertTrue(msgs[0]["content"].startswith("[CONTEXTO"))  # o anterior é contexto
-        self.assertFalse(msgs[2]["content"].startswith("[CONTEXTO"))  # o avaliado conta como novo
-        self.assertFalse(msgs[4]["content"].startswith("[CONTEXTO"))  # e o que veio depois também
-        self.assertIn(feedback.MARCA_BOA, msgs[3]["content"])
+        self.assertEqual(len(msgs), 6)
+        self.assertTrue(msgs[0]["content"].startswith("[CONTEXTO"))      # o anterior é contexto
+        self.assertFalse(msgs[2]["content"].startswith("[CONTEXTO"))     # o avaliado conta como novo
+        self.assertFalse(msgs[4]["content"].startswith("[CONTEXTO"))     # e o que veio depois também
+        self.assertTrue(feedback.tem_sinal(msgs))
 
-    def test_avaliacao_sem_nada_a_extrair_do_resto_nao_perde_o_sinal_do_ultimo_turno(self):
+    def test_avaliar_o_ultimo_turno_ja_extraido_nao_perde_o_sinal(self):
         memoria._extraidos[self.sessao] = 3
         self._avalia("São 10h", "down")
         msgs = memoria._executor.envios[-1]["payload"]["messages"]
@@ -357,10 +514,30 @@ class AvaliacaoNaMemoria(unittest.TestCase):
         self.assertFalse(self._avalia("resposta que não está aqui", "down"))
         self.assertFalse(self._avalia("", "down"))
         self.assertFalse(self._avalia("Custo por site", "talvez"))
+        self.assertFalse(self._avalia("Custo por site", "up", user=""))
         self.assertFalse(memoria.avaliar_resposta("outra_sessao", "321", "dom.md", "Custo por site", "up"))
         memoria._store = None
         self.assertFalse(self._avalia("Custo por site", "up"))
         self.assertEqual(memoria._executor.envios, [])
+
+    def test_o_resumo_da_abordagem_vai_para_o_banco(self):
+        from unittest import mock
+
+        memoria._abordagens[self.sessao].append("- executar_graphql: {...}\n  -> ok")
+        with mock.patch.object(memoria, "guardar_abordagem") as guardar:
+            memoria.finalizar_turno(self.sessao, "321", "dom.md", "Outra pergunta", "Refeito só com aprovados.")
+        chave, texto = guardar.call_args[0][1:]
+        self.assertEqual(chave, feedback.inicio_comparavel("Refeito só com aprovados."))
+        self.assertIn("executar_graphql", texto)
+
+
+class SinalNaJanela(unittest.TestCase):
+    def test_tem_sinal_ignora_o_que_e_contexto_ou_so_do_usuario(self):
+        marca = feedback.MARCA_RUIM
+        self.assertTrue(feedback.tem_sinal([{"role": "assistant", "content": "resposta " + marca}]))
+        self.assertFalse(feedback.tem_sinal([{"role": "assistant", "content": "[CONTEXTO, já processado] r " + marca}]))
+        self.assertFalse(feedback.tem_sinal([{"role": "user", "content": "digitei " + marca}]))
+        self.assertFalse(feedback.tem_sinal([]))
 
 
 class BancoDeAvaliacoes(unittest.TestCase):
@@ -427,6 +604,20 @@ class BancoDeAvaliacoes(unittest.TestCase):
         self._avalia(rating="up")
         r = self._linha()
         self.assertEqual((r["rating"], r["mensagem_seguinte"]), ("up", "faltou filtrar por aprovados"))
+
+    def test_resumo_da_abordagem_guarda_e_busca_por_sessao_e_chave(self):
+        self.db.guardar_abordagem("321_a", "chave1", "- consulta X\n  -> ok")
+        self.db.guardar_abordagem("321_a", "chave1", "- consulta Y\n  -> ok")  # troca, não duplica
+        self.assertEqual(self.db.buscar_abordagem("321_a", "chave1"), "- consulta Y\n  -> ok")
+        self.assertIsNone(self.db.buscar_abordagem("321_b", "chave1"))
+        self.assertIsNone(self.db.buscar_abordagem("321_a", ""))
+        self.db.guardar_abordagem("321_a", "", "sem chave")
+        self.assertIsNone(self.db.buscar_abordagem("321_a", ""))
+
+    def test_a_avaliacao_guarda_a_abordagem_junto(self):
+        self.db.registrar_avaliacao("321_a", 0, "321", "dom.md", "up", "Qual o custo?", "Custo: BPL 10.", True,
+                                    "- consulta X\n  -> ok")
+        self.assertEqual(self._linha()["abordagem"], "- consulta X\n  -> ok")
 
     def test_migracao_renomeia_a_coluna_antiga_sem_perder_dados(self):
         import sqlite3
