@@ -4,6 +4,7 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { ArtifactChatMessage, ChatMessage, ThinkingChatMessage } from '../../core/models/chat.model';
 import { artifactUrl } from '../../core/models/artifact.model';
 import { TranslateService } from '../../core/services/translate.service';
+import { ChatService } from '../../core/services/chat.service';
 import { TranslatePipe } from '../../core/pipes/translate.pipe';
 
 const ARTIFACT_ICONS: Record<string, string> = { chart: '📈', pdf: '📄', excel: '📊' };
@@ -18,7 +19,42 @@ const ARTIFACT_LABEL_KEYS: Record<string, string> = { pdf: 'artifacts.typePdf', 
       @case ('text') {
         <div class="chat-msg" [ngClass]="asText.role">
           <div class="msg-bubble" [innerHTML]="trust(asText.html)"></div>
-          <div class="msg-time">{{ asText.time }}</div>
+          <div class="msg-time">
+            {{ asText.time }}
+            @if (asText.role === 'assistant' && asText.rateable) {
+              <button
+                type="button"
+                class="msg-rate up"
+                [class.active]="asText.rating === 'up'"
+                [title]="'chat.rateUpTip' | translate"
+                [attr.aria-label]="'chat.rateUpTip' | translate"
+                [attr.aria-pressed]="asText.rating === 'up'"
+                (click)="chat.rateReply(asText.id, 'up')"
+              >
+                <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
+                  <path d="M5 7v6.5M5 7l2.6-4.4c.9-.2 1.9.5 1.7 1.5L8.9 6.5h3.3c.9 0 1.5.8 1.3 1.6l-.9 4.2c-.1.7-.7 1.2-1.4 1.2H5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                  <path d="M2.5 7H5v6.5H2.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="msg-rate down"
+                [class.active]="asText.rating === 'down'"
+                [title]="'chat.rateDownTip' | translate"
+                [attr.aria-label]="'chat.rateDownTip' | translate"
+                [attr.aria-pressed]="asText.rating === 'down'"
+                (click)="chat.rateReply(asText.id, 'down')"
+              >
+                <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true" style="transform: rotate(180deg)">
+                  <path d="M5 7v6.5M5 7l2.6-4.4c.9-.2 1.9.5 1.7 1.5L8.9 6.5h3.3c.9 0 1.5.8 1.3 1.6l-.9 4.2c-.1.7-.7 1.2-1.4 1.2H5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                  <path d="M2.5 7H5v6.5H2.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+                </svg>
+              </button>
+            }
+          </div>
+          @if (asText.role === 'assistant' && asText.rating === 'down') {
+            <div class="msg-rate-hint">{{ 'chat.rateDownHint' | translate }}</div>
+          }
         </div>
       }
       @case ('artifact') {
@@ -82,6 +118,7 @@ const ARTIFACT_LABEL_KEYS: Record<string, string> = { pdf: 'artifacts.typePdf', 
 export class ChatMessageComponent {
   @Input({ required: true }) message!: ChatMessage;
   private readonly translate = inject(TranslateService);
+  protected readonly chat = inject(ChatService);
 
   constructor(private readonly sanitizer: DomSanitizer) {}
 

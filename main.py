@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from db import get_db, init_db, migrate_db, save_dashboard_widget_order
+from db import avaliacoes_da_sessao, get_db, init_db, migrate_db, registrar_avaliacao, save_dashboard_widget_order
 import db_config
 
 try:
@@ -40,6 +40,9 @@ from agent_multi import (
 )
 from scheduler.daemon import scheduler_loop, _execute_task
 import chart_store as cs
+from typing import Literal
+
+import feedback
 import memoria
 
 _CHART_RE = re.compile(r'\[chart:([a-f0-9\-]{36})\]')
@@ -215,6 +218,13 @@ class ChatRequest(BaseModel):
     session_id: str = "default"
     user_id: str = ""
     lang: str = ""
+
+
+class FeedbackRequest(BaseModel):
+    session_id: str
+    user_id: str = ""
+    reply_start: str  # começo normalizado (feedback.inicio_comparavel) da resposta avaliada
+    rating: Literal["up", "down"]
 
 
 class CancelRequest(BaseModel):
@@ -406,8 +416,13 @@ async def chat_history(session_id: str = "default"):
         from langchain_core.messages import HumanMessage, AIMessage
         result = []
         pending_thinking: list[dict] = []
+        avaliacoes = avaliacoes_da_sessao(session_id)
+        turn_idx = -1            # índice da mensagem do usuário a que a resposta pertence
+        usou_analista = False    # a resposta é de dados (o front mostra o botão "resposta correta")
         for msg in state.get("channel_values", {}).get("messages", []):
             if isinstance(msg, HumanMessage):
+                turn_idx += 1
+                usou_analista = False
                 content = msg.content
                 if isinstance(content, list):
                     content = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
@@ -420,6 +435,8 @@ async def chat_history(session_id: str = "default"):
 
                 tool_calls = getattr(msg, "tool_calls", None) or []
                 if tool_calls:
+                    if any(tc.get("name") == "consultar_analista" for tc in tool_calls):
+                        usou_analista = True
                     # AIMessage intermediária (chamou tool) — vira etapa de "pensamento",
                     # nunca um balão de resposta próprio (era a causa do bug: cada uma
                     # dessas mensagens virava um balão separado ao recarregar o histórico).
@@ -433,7 +450,10 @@ async def chat_history(session_id: str = "default"):
                     continue
 
                 final_text = _extract_text_content(msg)
-                entry: dict = {"role": "assistant", "content": _embed_charts(final_text)}
+                entry: dict = {
+                    "role": "assistant", "content": _embed_charts(final_text),
+                    "turn": turn_idx, "data": usou_analista, "rating": avaliacoes.get(turn_idx),
+                }
                 if pending_thinking:
                     entry["thinking"] = pending_thinking
                     pending_thinking = []
@@ -441,6 +461,37 @@ async def chat_history(session_id: str = "default"):
         return result
     except Exception:
         return []
+
+
+@app.post("/chat/feedback")
+async def chat_feedback(req: FeedbackRequest):
+    """Botões 👍 e 👎 de uma resposta de dados. Toda avaliação é gravada (pergunta, resposta e
+    nota; depois de um 👎, também a mensagem seguinte do usuário) para melhorar o agente depois.
+    Para a memória, 👍 e 👎 são só sinais: o extrator lê a conversa e decide se há algo a aprender."""
+    path = "/chat/feedback"
+    if not is_multi_agent_ready():
+        return JSONResponse(status_code=503, content=_error_body(503, "ServiceUnavailable", "Agente IA não configurado.", path))
+    if not req.user_id or not req.session_id.startswith(f"{req.user_id}_"):
+        return JSONResponse(status_code=403, content=_error_body(403, "Forbidden", "Sessão não pertence ao usuário.", path))
+    from agent_multi import _checkpointer
+    state = _checkpointer.get({"configurable": {"thread_id": req.session_id}}) if _checkpointer else None
+    mensagens = (state or {}).get("channel_values", {}).get("messages", [])
+    turnos = feedback.montar_turnos(mensagens)
+    indice = feedback.localizar_resposta(turnos, req.reply_start)
+    if indice is None:
+        return JSONResponse(status_code=404, content=_error_body(404, "NotFound", "Resposta não encontrada na sessão.", path))
+    with get_db() as conn:
+        tag = conn.execute("SELECT dominio FROM session_dominio WHERE session_id = ?", (req.session_id,)).fetchone()
+    if tag and tag["dominio"] and tag["dominio"] != db_config.dominio_filename():
+        return JSONResponse(status_code=404, content=_error_body(404, "NotFound", "Sessão de outro domínio.", path))
+    turno = turnos[indice]
+    anterior = registrar_avaliacao(
+        req.session_id, indice, req.user_id, db_config.dominio_filename(), req.rating,
+        turno["usuario"], turno["resposta"], turno["analista"],
+    )
+    if anterior != req.rating:  # só um sinal para a memória: ela decide se há algo a aprender
+        memoria.avaliar_resposta(req.session_id, req.user_id, db_config.dominio_filename(), req.reply_start, req.rating)
+    return {"ok": True, "turn": indice, "rating": req.rating, "anterior": anterior}
 
 
 @app.get("/chat/sessions")
@@ -509,6 +560,7 @@ async def delete_chat_session(session_id: str):
                 except Exception:
                     pass
             conn.execute("DELETE FROM session_dominio WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM feedback_respostas WHERE session_id = ?", (session_id,))
             conn.commit()
         import chart_store as cs
         cs.delete_charts_for_session(session_id)

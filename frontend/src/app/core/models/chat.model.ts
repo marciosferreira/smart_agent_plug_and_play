@@ -2,7 +2,12 @@ export interface ChatHistoryEntry {
   role: 'user' | 'assistant';
   content: string;
   thinking?: { text: string; isTool: boolean }[];
+  /** Só nas respostas do assistente: resposta de dados (mostra os botões 👍 e 👎) e a nota dada. */
+  data?: boolean;
+  rating?: ChatRating | null;
 }
+
+export type ChatRating = 'up' | 'down';
 
 export interface ChatSession {
   session_id: string;
@@ -18,7 +23,7 @@ export type ChatStreamEvent =
   | { type: 'widget_added' }
   | { type: 'widget_updated'; widget_id: string }
   | { type: 'widget_deleted'; widget_id: string }
-  | { type: 'reply'; text: string }
+  | { type: 'reply'; text: string; data?: boolean }
   | { type: 'cancelled' }
   | { type: 'error'; text: string };
 
@@ -34,6 +39,11 @@ export interface TextChatMessage {
   role: 'user' | 'assistant' | 'error';
   html: string;
   time: string;
+  /** Texto original da resposta (markdown), usado para identificá-la ao avaliar. */
+  raw?: string;
+  /** Resposta de dados: mostra os botões 👍 e 👎. */
+  rateable?: boolean;
+  rating?: ChatRating;
 }
 
 export interface ThinkingChatMessage {

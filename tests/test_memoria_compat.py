@@ -16,6 +16,7 @@ from google.auth.credentials import AnonymousCredentials
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 import agent_multi
+import feedback
 import memoria
 from memoria import MAX_CONVENCOES, MAX_LICOES, MudancasMemoria, Operacao, aplicar_operacoes
 
@@ -241,6 +242,217 @@ class ResumoDaResposta(unittest.TestCase):
         self.assertTrue(resumo.endswith(bloco))
         self.assertIn("[...]", resumo)
         self.assertLess(len(resumo), 2400)
+
+
+class AvaliacaoDeResposta(unittest.TestCase):
+    """Módulo feedback.py: identificar a resposta avaliada pelo usuário."""
+
+    def _mensagens(self):
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        return [
+            HumanMessage("Qual o custo por site?"),
+            AIMessage("", tool_calls=[{"name": "consultar_analista", "args": {}, "id": "1"}]),
+            ToolMessage("ok", tool_call_id="1", name="consultar_analista"),
+            AIMessage("Custo por site: BPL 10, MAN 20.\n[chart:3f8a1b]\n**Parâmetros da análise:** período X"),
+            HumanMessage("Está errado, use só aprovados."),
+            AIMessage("", tool_calls=[{"name": "consultar_analista", "args": {}, "id": "2"}]),
+            ToolMessage("ok", tool_call_id="2", name="consultar_analista"),
+            AIMessage("Refeito só com aprovados: BPL 8, MAN 15.\n**Parâmetros da análise:** status aprovado"),
+            HumanMessage("Que horas são?"),
+            AIMessage("São 10h."),
+        ]
+
+    def test_montar_turnos_marca_respostas_de_dados(self):
+        turnos = feedback.montar_turnos(self._mensagens())
+        self.assertEqual([t["analista"] for t in turnos], [True, True, False])
+        self.assertEqual(turnos[0]["usuario"], "Qual o custo por site?")
+        self.assertTrue(turnos[1]["resposta"].startswith("Refeito só com aprovados"))
+        self.assertEqual(turnos[2]["resposta"], "São 10h.")
+
+    def test_inicio_comparavel_ignora_artefatos_e_espacos(self):
+        no_checkpoint = "Custo por site: BPL 10.\n[chart:3f8a1b]\nfim"
+        no_front = "Custo por site:   BPL 10.\n\n![gráfico](/chart/3f8a1b)\nfim"
+        self.assertEqual(feedback.inicio_comparavel(no_checkpoint), feedback.inicio_comparavel(no_front))
+
+    def test_localizar_resposta_pelo_inicio_normalizado(self):
+        turnos = feedback.montar_turnos(self._mensagens())
+        inicio_do_front = feedback.inicio_comparavel("Custo por site: BPL 10, MAN 20.\n![gráfico](/chart/3f8a1b)\nxx")
+        self.assertEqual(feedback.localizar_resposta(turnos, inicio_do_front[:30]), 0)
+        self.assertEqual(feedback.localizar_resposta(turnos, "Refeito só com aprovados"), 1)
+        self.assertIsNone(feedback.localizar_resposta(turnos, "texto que nunca existiu"))
+        self.assertIsNone(feedback.localizar_resposta(turnos, ""))
+
+
+class AvaliacaoNaMemoria(unittest.TestCase):
+    """memoria.avaliar_resposta: 👍 e 👎 são sinais; a extração é reagendada com o turno avaliado."""
+
+    class _ExecutorFalso:
+        def __init__(self):
+            self.envios = []
+
+        def submit(self, payload, config=None, after_seconds=0, thread_id=None):
+            from concurrent.futures import Future
+
+            self.envios.append({"payload": payload, "thread_id": thread_id})
+            return Future()
+
+    def setUp(self):
+        self._store, self._executor = memoria._store, memoria._executor
+        memoria._store = object()
+        memoria._executor = self._ExecutorFalso()
+        self.sessao = "321_teste_avaliacao"
+        memoria._turnos[self.sessao] = [
+            {"pergunta": "Qual o custo por site?", "trace": "", "resposta": "Custo por site: BPL 10, MAN 20."},
+            {"pergunta": "Esse total está estranho, refaz.", "trace": "", "resposta": "Refeito só com aprovados: BPL 8."},
+            {"pergunta": "Que horas são?", "trace": "", "resposta": "São 10h."},
+        ]
+        memoria._base[self.sessao] = 0
+        memoria._extraidos[self.sessao] = 0
+
+    def tearDown(self):
+        for d in (memoria._turnos, memoria._base, memoria._extraidos):
+            d.pop(self.sessao, None)
+        memoria._store, memoria._executor = self._store, self._executor
+
+    def _avalia(self, inicio, nota, user="321"):
+        return memoria.avaliar_resposta(self.sessao, user, "dom.md", inicio, nota)
+
+    def test_a_marca_e_neutra_e_so_vai_no_turno_avaliado(self):
+        self.assertTrue(self._avalia("Refeito só com aprovados", "up"))
+        msgs = memoria._mensagens(memoria._turnos[self.sessao], 0)
+        self.assertIn(feedback.MARCA_BOA, msgs[3]["content"])
+        self.assertNotIn("AVALIAÇÃO", msgs[1]["content"] + msgs[5]["content"])
+        self.assertNotIn("mensagem seguinte", feedback.MARCA_BOA + feedback.MARCA_RUIM)  # não presume nada
+
+    def test_thumbs_down_usa_a_marca_de_ruim(self):
+        self._avalia("Custo por site", "down")
+        self.assertIn(feedback.MARCA_RUIM, memoria._mensagens(memoria._turnos[self.sessao], 0)[1]["content"])
+
+    def test_turno_ainda_nao_extraido_reagenda_a_extracao_da_sessao_com_a_marca(self):
+        self._avalia("Refeito só com aprovados", "up")
+        envio = memoria._executor.envios[-1]
+        self.assertEqual(envio["thread_id"], self.sessao)  # substitui a extração pendente da sessão
+        conteudo = " ".join(m["content"] for m in envio["payload"]["messages"])
+        self.assertIn(feedback.MARCA_BOA, conteudo)
+
+    def test_turno_ja_extraido_volta_a_janela_com_dois_turnos_de_contexto(self):
+        memoria._extraidos[self.sessao] = 3  # tudo já foi extraído
+        self._avalia("Refeito só com aprovados", "up")  # o turno do meio
+        msgs = memoria._executor.envios[-1]["payload"]["messages"]
+        self.assertEqual(len(msgs), 6)                       # os três turnos
+        self.assertTrue(msgs[0]["content"].startswith("[CONTEXTO"))  # o anterior é contexto
+        self.assertFalse(msgs[2]["content"].startswith("[CONTEXTO"))  # o avaliado conta como novo
+        self.assertFalse(msgs[4]["content"].startswith("[CONTEXTO"))  # e o que veio depois também
+        self.assertIn(feedback.MARCA_BOA, msgs[3]["content"])
+
+    def test_avaliacao_sem_nada_a_extrair_do_resto_nao_perde_o_sinal_do_ultimo_turno(self):
+        memoria._extraidos[self.sessao] = 3
+        self._avalia("São 10h", "down")
+        msgs = memoria._executor.envios[-1]["payload"]["messages"]
+        self.assertFalse(msgs[-1]["content"].startswith("[CONTEXTO"))
+        self.assertIn(feedback.MARCA_RUIM, msgs[-1]["content"])
+
+    def test_nao_agenda_quando_nao_ha_o_que_marcar(self):
+        self.assertFalse(self._avalia("resposta que não está aqui", "down"))
+        self.assertFalse(self._avalia("", "down"))
+        self.assertFalse(self._avalia("Custo por site", "talvez"))
+        self.assertFalse(memoria.avaliar_resposta("outra_sessao", "321", "dom.md", "Custo por site", "up"))
+        memoria._store = None
+        self.assertFalse(self._avalia("Custo por site", "up"))
+        self.assertEqual(memoria._executor.envios, [])
+
+
+class BancoDeAvaliacoes(unittest.TestCase):
+    """db.py: o conjunto pergunta, resposta, nota e mensagem seguinte, num banco temporário."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        import db
+
+        self.db = db
+        self._antigo = db.DB_PATH
+        self._dir = tempfile.TemporaryDirectory()
+        db.DB_PATH = Path(self._dir.name) / "teste.db"
+        db.migrate_db()
+
+    def tearDown(self):
+        self.db.DB_PATH = self._antigo
+        self._dir.cleanup()
+
+    def _avalia(self, sessao="321_a", turn=1, rating="down", resposta="Custo: BPL 10."):
+        return self.db.registrar_avaliacao(sessao, turn, "321", "dom.md", rating, "Qual o custo?", resposta, True)
+
+    def _linha(self):
+        with self.db.get_db() as conn:
+            return dict(conn.execute("SELECT * FROM feedback_respostas").fetchone())
+
+    def test_grava_o_conjunto_completo(self):
+        self.assertIsNone(self._avalia(rating="up"))
+        r = self._linha()
+        self.assertEqual((r["pergunta"], r["resposta"], r["rating"], r["analista"], r["dominio"], r["user_id"]),
+                         ("Qual o custo?", "Custo: BPL 10.", "up", 1, "dom.md", "321"))
+        self.assertIsNone(r["mensagem_seguinte"])
+
+    def test_trocar_a_nota_atualiza_a_mesma_linha_e_devolve_a_anterior(self):
+        self._avalia(rating="up")
+        self.assertEqual(self._avalia(rating="down"), "up")
+        self.assertEqual(self.db.avaliacoes_da_sessao("321_a"), {1: "down"})
+        with self.db.get_db() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM feedback_respostas").fetchone()[0], 1)
+
+    def test_guarda_literalmente_a_proxima_mensagem_depois_do_thumbs_down(self):
+        """Pode ser uma contestação ou outra pergunta: o banco não presume que contesta."""
+        self._avalia(rating="down")
+        self.assertEqual(self.db.anexar_mensagem_seguinte("321_a", "Que horas são?"), 1)
+        self.assertEqual(self.db.anexar_mensagem_seguinte("321_a", "O custo tem que ser só aprovado."), 0)
+        r = self._linha()
+        self.assertEqual(r["mensagem_seguinte"], "Que horas são?")
+        self.assertTrue(r["mensagem_seguinte_em"])
+
+    def test_thumbs_up_e_outras_sessoes_nao_recebem_a_mensagem(self):
+        self._avalia(sessao="321_a", turn=0, rating="up")
+        self._avalia(sessao="321_b", turn=0, rating="down")
+        self.assertEqual(self.db.anexar_mensagem_seguinte("321_a", "uma pergunta nova"), 0)
+        self.assertEqual(self.db.anexar_mensagem_seguinte("321_a", ""), 0)
+        with self.db.get_db() as conn:
+            msgs = {r["session_id"]: r["mensagem_seguinte"] for r in conn.execute("SELECT * FROM feedback_respostas")}
+        self.assertEqual(msgs, {"321_a": None, "321_b": None})
+
+    def test_trocar_para_up_mantem_a_mensagem_ja_guardada(self):
+        self._avalia(rating="down")
+        self.db.anexar_mensagem_seguinte("321_a", "faltou filtrar por aprovados")
+        self._avalia(rating="up")
+        r = self._linha()
+        self.assertEqual((r["rating"], r["mensagem_seguinte"]), ("up", "faltou filtrar por aprovados"))
+
+    def test_migracao_renomeia_a_coluna_antiga_sem_perder_dados(self):
+        import sqlite3
+
+        self._dir.cleanup()
+        import tempfile
+        from pathlib import Path
+
+        self._dir = tempfile.TemporaryDirectory()
+        self.db.DB_PATH = Path(self._dir.name) / "legado.db"
+        conn = sqlite3.connect(self.db.DB_PATH)
+        conn.execute("CREATE TABLE feedback_respostas (session_id TEXT NOT NULL, turn INTEGER NOT NULL, user_id TEXT,"
+                     " dominio TEXT, rating TEXT NOT NULL DEFAULT 'up', pergunta TEXT, resposta TEXT,"
+                     " analista INTEGER NOT NULL DEFAULT 0, comentario TEXT, comentario_em TEXT,"
+                     " created_at TEXT NOT NULL, updated_at TEXT, PRIMARY KEY (session_id, turn))")
+        conn.execute("INSERT INTO feedback_respostas (session_id, turn, rating, comentario, created_at)"
+                     " VALUES ('321_x', 0, 'down', 'texto antigo', '2026-01-01 00:00:00')")
+        conn.commit()
+        conn.close()
+        self.db.migrate_db()
+        with self.db.get_db() as c:
+            colunas = [r["name"] for r in c.execute("PRAGMA table_info(feedback_respostas)")]
+            linha = dict(c.execute("SELECT * FROM feedback_respostas").fetchone())
+        self.assertIn("mensagem_seguinte", colunas)
+        self.assertNotIn("comentario", colunas)
+        self.assertEqual(linha["mensagem_seguinte"], "texto antigo")
 
 
 class DuplicataEntreDestinos(unittest.TestCase):

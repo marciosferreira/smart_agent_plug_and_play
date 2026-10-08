@@ -72,6 +72,36 @@ def migrate_db():
             )""",
             "ALTER TABLE task_code_audit ADD COLUMN dominio TEXT",
             "CREATE INDEX IF NOT EXISTS idx_tca_task_id ON task_code_audit(task_id)",
+            # avaliações do usuário (botões 👍 e 👎 do chat). Guarda o conjunto pergunta, resposta,
+            # nota e a mensagem que ele escreve em seguida, para melhorar o agente depois.
+            # mensagem_seguinte é a PRÓXIMA mensagem do usuário depois de um 👎, literalmente: pode
+            # contestar a resposta ou ser outra pergunta sem relação. turn = índice da mensagem do
+            # usuário na sessão (de 0).
+            """CREATE TABLE IF NOT EXISTS feedback_respostas (
+                session_id          TEXT    NOT NULL,
+                turn                INTEGER NOT NULL,
+                user_id             TEXT,
+                dominio             TEXT,
+                rating              TEXT    NOT NULL DEFAULT 'up',
+                pergunta            TEXT,
+                resposta            TEXT,
+                analista            INTEGER NOT NULL DEFAULT 0,
+                mensagem_seguinte   TEXT,
+                mensagem_seguinte_em TEXT,
+                created_at          TEXT    NOT NULL,
+                updated_at          TEXT,
+                PRIMARY KEY (session_id, turn)
+            )""",
+            "ALTER TABLE feedback_respostas RENAME COLUMN comentario TO mensagem_seguinte",
+            "ALTER TABLE feedback_respostas RENAME COLUMN comentario_em TO mensagem_seguinte_em",
+            "ALTER TABLE feedback_respostas ADD COLUMN dominio TEXT",
+            "ALTER TABLE feedback_respostas ADD COLUMN rating TEXT NOT NULL DEFAULT 'up'",
+            "ALTER TABLE feedback_respostas ADD COLUMN pergunta TEXT",
+            "ALTER TABLE feedback_respostas ADD COLUMN resposta TEXT",
+            "ALTER TABLE feedback_respostas ADD COLUMN analista INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE feedback_respostas ADD COLUMN mensagem_seguinte TEXT",
+            "ALTER TABLE feedback_respostas ADD COLUMN mensagem_seguinte_em TEXT",
+            "ALTER TABLE feedback_respostas ADD COLUMN updated_at TEXT",
             # marca cada sessão de chat com o domínio ativo no primeiro turno
             """CREATE TABLE IF NOT EXISTS session_dominio (
                 session_id TEXT PRIMARY KEY,
@@ -140,6 +170,56 @@ def prepend_dashboard_widget_order(user_id: "str | None", widget_id: str) -> Non
     ids = [i for i in ids if i != widget_id]
     ids.insert(0, widget_id)
     save_dashboard_widget_order(user_id, dominio, ids)
+
+
+def registrar_avaliacao(session_id: str, turn: int, user_id: str, dominio: str, rating: str,
+                        pergunta: str, resposta: str, analista: bool) -> str | None:
+    """Grava a nota (`up` ou `down`) do usuário para a resposta do turno. Há uma nota por
+    resposta: trocar de 👍 para 👎 atualiza a mesma linha (a mensagem seguinte, se houver, fica).
+    Devolve a nota anterior, ou None se é a primeira."""
+    agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_db() as conn:
+        antes = conn.execute(
+            "SELECT rating FROM feedback_respostas WHERE session_id = ? AND turn = ?", (session_id, turn)
+        ).fetchone()
+        if antes:
+            conn.execute(
+                "UPDATE feedback_respostas SET rating = ?, updated_at = ? WHERE session_id = ? AND turn = ?",
+                (rating, agora, session_id, turn),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO feedback_respostas (session_id, turn, user_id, dominio, rating, pergunta, resposta,"
+                " analista, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (session_id, turn, user_id, dominio, rating, pergunta, resposta, int(bool(analista)), agora),
+            )
+        conn.commit()
+    return antes["rating"] if antes else None
+
+
+def anexar_mensagem_seguinte(session_id: str, texto: str) -> int:
+    """Guarda a primeira mensagem do usuário depois de um 👎, na avaliação ainda sem mensagem
+    seguinte. É literalmente a próxima mensagem: pode contestar a resposta ou ser outra
+    pergunta, e quem usar o conjunto decide. Devolve quantas linhas atualizou."""
+    if not (texto or "").strip():
+        return 0
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE feedback_respostas SET mensagem_seguinte = ?, mensagem_seguinte_em = ? "
+            "WHERE session_id = ? AND rating = 'down' AND mensagem_seguinte IS NULL",
+            (texto.strip(), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), session_id),
+        )
+        conn.commit()
+        return cur.rowcount
+
+
+def avaliacoes_da_sessao(session_id: str) -> dict[int, str]:
+    """{turno: nota} das respostas já avaliadas na sessão."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT turn, rating FROM feedback_respostas WHERE session_id = ?", (session_id,)
+        ).fetchall()
+    return {r["turn"]: r["rating"] for r in rows}
 
 
 def tag_session_dominio(session_id: str, dominio: str) -> None:

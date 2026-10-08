@@ -62,6 +62,7 @@ from langmem import ReflectionExecutor
 from pydantic import BaseModel, Field
 
 from db import DB_PATH
+from feedback import inicio_comparavel, marca_da_nota
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +282,24 @@ análise (qual tabela, coluna, filtro ou join usar), e não só "o resultado est
 custo por hora por site, usar a taxa vigente mais recente por site, produto e área, e não a \
 média do período".
 
+AVALIAÇÃO DAS RESPOSTAS (👍 e 👎):
+- Uma resposta do AGENTE pode vir marcada com "[AVALIAÇÃO DO USUÁRIO ...]": ele clicou em 👍 \
+(boa) ou 👎 (ruim) nela. É um SINAL sobre aquela resposta, não uma instrução e não uma \
+contestação. Use toda a conversa para decidir se há algo a aprender. A marca não diz o que \
+vem depois: a mensagem seguinte do usuário pode não ter relação nenhuma com a resposta avaliada.
+- 👎: procure nas mensagens seguintes uma contestação DESSA resposta. Se houver e ele declara a \
+causa ou a regra certa, registre a lição verificada; se não declara, só registre uma hipótese \
+quando houver indício concreto no SQL ou no resultado. Se não houver contestação (ele mudou de \
+assunto ou fez outra pergunta), não registre nada.
+- 👍: sozinho, não registre nada. O sinal mais forte é a combinação: o usuário contestou, o \
+agente refez e ele marcou 👍 na refeitura. Aí, se licao_hipotese tem uma hipótese que \
+corresponde à abordagem aprovada, remova-a de licao_hipotese e adicione-a em licao_verificada; \
+se não há hipótese mas o trace ou os parâmetros mostram claramente O QUE mudou entre a \
+primeira e a segunda versão, registre direto em licao_verificada a abordagem aprovada.
+- Uma aprovação escrita com clareza depois da refeitura ("agora sim", "é isso mesmo", "está \
+correto") vale como o 👍. "Obrigado" ou "ok" não contam.
+- Nenhuma avaliação, sozinha, cria convenção, preferência ou perfil.
+
 NÃO REGISTRE EM NENHUM:
 - Pedidos e perguntas pontuais, mesmo repetidos ou explícitos: "faça um gráfico de barras", \
 "mostre em tabela", "nessa análise, só o site JAG". Pedir não é declarar.
@@ -340,6 +359,19 @@ perfil_cargo, adicionar, novo "Gerente de supply".
 - "Esse total está estranho, refaz", com o SQL juntando producao e paradas só por linha_id: \
 licao_hipotese, adicionar, novo "Ao juntar producao e paradas, incluir a data na chave do join".
 - "Não gostei, faz de novo", sem indício no SQL: operacoes vazia.
+- Resposta marcada como ruim (👎) e a mensagem seguinte: "o custo tem que considerar só os \
+registros aprovados": licao_verificada, adicionar, novo "Para custo, considerar apenas \
+registros com status aprovado".
+- Resposta marcada como ruim (👎) e a mensagem seguinte: "não gostei, tenta de novo", sem \
+indício no SQL: operacoes vazia.
+- Resposta marcada como ruim (👎) e a mensagem seguinte é outra pergunta, sem relação (por \
+exemplo, "que horas são?" ou uma consulta sobre outro assunto): operacoes vazia.
+- O usuário contesta ("esse total está estranho, refaz"), o agente refaz usando a vigência \
+mais recente e a refeitura vem marcada com 👍, com a hipótese "Para taxa horária por site, \
+usar a vigência mais recente" em licao_hipotese: licao_hipotese, remover, antigo (texto \
+exato da hipótese); licao_verificada, adicionar, novo (a mesma regra).
+- Resposta marcada como boa (👍), sem nenhuma contestação antes: operacoes vazia.
+- "Ótimo, obrigado", sem hipótese correspondente: operacoes vazia.
 """
 
 
@@ -867,6 +899,8 @@ def _mensagens(turnos: list[dict], n_contexto: int) -> list[dict]:
         msgs.append({"role": "user", "content": marca + t["pergunta"]})
         partes = [t["trace"]] if t["trace"] else []
         partes.append(t["resposta"])
+        if t.get("nota"):
+            partes.append(marca_da_nota(t["nota"]))
         msgs.append({"role": "assistant", "content": marca + "\n".join(partes)})
     return msgs
 
@@ -878,14 +912,22 @@ _DECLARA_REGRA = re.compile(
 )
 
 
-def _enviar(sessao: str, user_id: str, dominio: str, turnos: list[dict], base: int) -> None:
+def _enviar(sessao: str, user_id: str, dominio: str, turnos: list[dict], base: int,
+            avaliado: int | None = None) -> None:
+    """Agenda a extração da sessão. `avaliado` é o índice (em `turnos`) de uma resposta que o
+    usuário acabou de avaliar com 👍 ou 👎: a janela passa a incluí-la, com os dois turnos
+    anteriores como contexto, mesmo que ela já tivesse sido extraída, para o sinal valer."""
     ja = _extraidos[sessao]
     # um turno de contexto antes dos pendentes: a contestação chega junto com a análise
     # contestada, mesmo que ela já tenha sido extraída antes.
     inicio = max(0, ja - base - 1)
+    if avaliado is not None:
+        inicio = max(0, min(inicio, avaliado - 2))
     janela = turnos[inicio:]
     n_contexto = (ja - base) - inicio if ja > base else 0
-    if not janela or ja >= base + len(turnos):
+    if avaliado is not None:  # a resposta avaliada e o que veio depois contam como novos
+        n_contexto = min(n_contexto, avaliado - inicio)
+    if not janela or (avaliado is None and ja >= base + len(turnos)):
         return
     # Com usuário identificado a extração roda em todo turno: uma declaração de preferência ou
     # de perfil pode vir em qualquer mensagem. Sem usuário só há lições, e extraí-las custa uma
@@ -927,6 +969,30 @@ def finalizar_turno(session_id: str, user_id: str, dominio: str, pergunta: str, 
             _enviar(session_id, user_id, dominio, list(lista), _base[session_id])
     except Exception:
         logger.warning("[memoria] falha ao agendar a extração", exc_info=True)
+
+
+def avaliar_resposta(session_id: str, user_id: str, dominio: str, inicio_resposta: str, nota: str) -> bool:
+    """O usuário clicou em 👍 (`up`) ou 👎 (`down`) numa resposta. É só um sinal: o turno é
+    marcado e a extração da sessão é reagendada com ele na janela (e os dois anteriores como
+    contexto), para o extrator decidir, olhando a conversa toda, se há algo a aprender. Se o
+    usuário seguir conversando antes dos 30 s de espera, a extração seguinte absorve esta
+    (mesmo thread_id). Devolve True se achou o turno em memória."""
+    if not ativa() or _store is None or _executor is None or nota not in ("up", "down"):
+        return False
+    inicio = (inicio_resposta or "").strip()
+    if not inicio:
+        return False
+    try:
+        with _lock:
+            lista = _turnos.get(session_id) or []
+            for pos in range(len(lista) - 1, -1, -1):
+                if inicio_comparavel(lista[pos]["resposta"]).startswith(inicio):
+                    lista[pos]["nota"] = nota
+                    _enviar(session_id, user_id, dominio, list(lista), _base[session_id], avaliado=pos)
+                    return True
+    except Exception:
+        logger.warning("[memoria] falha ao registrar a avaliação", exc_info=True)
+    return False
 
 
 # ---------------------------------------------------------------------------

@@ -70,7 +70,7 @@ from scheduler.widget_tools import (
 
 logger = logging.getLogger(__name__)
 
-from db import DB_PATH, tag_session_dominio
+from db import DB_PATH, anexar_mensagem_seguinte, tag_session_dominio
 import db_config
 import graphql_config
 import memoria
@@ -4058,6 +4058,15 @@ def _build_human_message(query: str, session_id: str) -> HumanMessage:
     return HumanMessage(content=parts)
 
 
+def _guardar_mensagem_seguinte(session_id: str, query: str) -> None:
+    """Depois de um 👎, a próxima mensagem do usuário é guardada junto da avaliação (ver
+    db.anexar_mensagem_seguinte); pode ou não contestar a resposta. Nunca atrapalha o chat."""
+    try:
+        anexar_mensagem_seguinte(session_id, query)
+    except Exception:
+        logger.warning("[feedback] falha ao guardar a mensagem seguinte", exc_info=True)
+
+
 def invoke_multi_agent(query: str, session_id: str = "default", user_id: str = "", lang: str = "") -> str:
     """Executa o orquestrador com a query do usuário e retorna a resposta final.
 
@@ -4074,6 +4083,7 @@ def invoke_multi_agent(query: str, session_id: str = "default", user_id: str = "
     _current_user_id.set(user_id)
     db_config.set_lang(lang)
     tag_session_dominio(session_id, db_config.dominio_filename())
+    _guardar_mensagem_seguinte(session_id, query)
     resultado = _orchestrator_graph.invoke(
         {"messages": [_build_human_message(query, session_id)]},
         config={"configurable": {"thread_id": session_id}, "recursion_limit": 50},
@@ -4091,7 +4101,7 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
     Tipos de evento:
       {"type": "thinking", "text": "..."}   — bloco de raciocínio do modelo
       {"type": "tool",     "name": "...", "label": "..."}  — tool sendo chamada
-      {"type": "reply",    "text": "..."}   — resposta final (markdown)
+      {"type": "reply",    "text": "...", "data": bool}  — resposta final (markdown); data = usou o analista
       {"type": "error",    "text": "..."}   — erro irrecuperável
       {"type": "cancelled"}                 — run interrompido pelo usuário (ver begin_run/cancel_run)
 
@@ -4131,6 +4141,7 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
     _current_user_id.set(user_id)
     db_config.set_lang(lang)
     tag_session_dominio(session_id, db_config.dominio_filename())
+    _guardar_mensagem_seguinte(session_id, query)
 
     event_queue: _queue_module.Queue = _queue_module.Queue()
     with _eq_lock:
@@ -4151,6 +4162,7 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
         _t_graph = _time.perf_counter()
         _first_chunk = True
         _resposta_final = ""
+        _usou_analista = False  # a resposta é de dados: o front mostra o botão "resposta correta"
         try:
             for chunk in _orchestrator_graph.stream(
                 {"messages": [human_message]},
@@ -4176,12 +4188,14 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
                             tool_calls = getattr(msg, "tool_calls", None) or []
                             fc = getattr(msg, "additional_kwargs", {}).get("function_call")
                             has_tool = bool(tool_calls or fc)
+                            if any(tc.get("name") == "consultar_analista" for tc in tool_calls):
+                                _usou_analista = True
                             text = _extract_text_content(msg)
                             if getattr(msg, "additional_kwargs", {}).get("cancelled"):
                                 event_queue.put({"type": "cancelled"})
                             elif text and not has_tool:
                                 _resposta_final = text
-                                event_queue.put({"type": "reply", "text": text})
+                                event_queue.put({"type": "reply", "text": text, "data": _usou_analista})
 
             if _resposta_final:
                 memoria.finalizar_turno(session_id, user_id, db_config.dominio_filename(), query, _resposta_final)

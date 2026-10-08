@@ -461,6 +461,17 @@ header {
   border-bottom-left-radius:3px;
 }
 .msg-time { font-family:'JetBrains Mono',monospace; font-size:9px; color:var(--txt3); margin-top:5px; padding:0 4px; }
+.msg-rate {
+  display:inline-flex; align-items:center; justify-content:center;
+  width:16px; height:16px; margin-left:6px; padding:0; vertical-align:middle;
+  border:1px solid rgba(100,116,139,.35); border-radius:50%;
+  background:transparent; color:var(--txt3); cursor:pointer;
+  transition:color .15s, border-color .15s, background .15s;
+}
+.msg-rate + .msg-rate { margin-left:4px; }
+.msg-rate.up:hover, .msg-rate.up.active { color:#16a34a; border-color:#16a34a; background:rgba(22,163,74,.1); }
+.msg-rate.down:hover, .msg-rate.down.active { color:#dc2626; border-color:#dc2626; background:rgba(220,38,38,.1); }
+.msg-rate-hint { font-size:10px; color:var(--txt3); margin-top:3px; padding:0 4px; font-style:italic; }
 
 .chat-input-wrap {
   padding:12px 12px calc(10px + env(safe-area-inset-bottom, 0px));

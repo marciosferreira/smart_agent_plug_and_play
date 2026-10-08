@@ -13,7 +13,9 @@ import {
   ArtifactChatMessage,
   ChatHistoryEntry,
   ChatMessage,
+  ChatRating,
   ChatSession,
+  TextChatMessage,
   ThinkingChatMessage,
 } from '../models/chat.model';
 
@@ -27,6 +29,20 @@ marked.use({
 
 function escHtml(s: string): string {
   return s.replace(/</g, '&lt;');
+}
+
+/**
+ * Começo da resposta sem gráficos/PDFs/planilhas e com espaços colapsados. É o que o back
+ * compara para achar a resposta confirmada (feedback.inicio_comparavel): no checkpoint os
+ * artefatos são tokens, aqui são imagens e links.
+ */
+function replyStart(raw: string): string {
+  return raw
+    .replace(/!\[[^\]]*\]\([^)]*\)|\[(?:chart|pdf|excel):[^\]]*\]|\[📥[^\]]*\]\([^)]*\)/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .join(' ')
+    .slice(0, 120);
 }
 
 function nowLabel(lang: string): string {
@@ -88,7 +104,13 @@ export class ChatService {
           this.pushText('user', escHtml(m.content));
         } else if (m.role === 'assistant') {
           if (m.thinking?.length) this.pushThinkingHistory(m.thinking);
-          if (m.content.trim()) this.pushText('assistant', marked.parse(m.content) as string);
+          if (m.content.trim()) {
+            this.pushText('assistant', marked.parse(m.content) as string, {
+              raw: m.content,
+              rateable: !!m.data,
+              rating: m.rating ?? undefined,
+            });
+          }
         }
       }
     } catch {
@@ -228,10 +250,41 @@ export class ChatService {
 
   // ── Mensagens ────────────────────────────────────────────
 
-  private pushText(role: 'user' | 'assistant' | 'error', html: string): string {
+  private pushText(role: 'user' | 'assistant' | 'error', html: string, extra: Partial<TextChatMessage> = {}): string {
     const id = nextId('cm');
-    this.messages.update((list) => [...list, { kind: 'text', id, role, html, time: nowLabel(this.locale.lang()) }]);
+    this.messages.update((list) => [
+      ...list,
+      { kind: 'text', id, role, html, time: nowLabel(this.locale.lang()), ...extra },
+    ]);
     return id;
+  }
+
+  private patchText(id: string, patch: Partial<TextChatMessage>): void {
+    this.messages.update((list) => list.map((m) => (m.kind === 'text' && m.id === id ? { ...m, ...patch } : m)));
+  }
+
+  /**
+   * Botões 👍 e 👎 de uma resposta de dados. Toda avaliação é gravada no back (pergunta, resposta
+   * e nota) para melhorar o agente depois; depois do 👎 o usuário explica no chat o que estava
+   * errado, e essa mensagem é guardada junto. Marca na hora (otimista) e desfaz se o back recusar.
+   */
+  async rateReply(messageId: string, rating: ChatRating): Promise<void> {
+    const msg = this.messages().find((m) => m.kind === 'text' && m.id === messageId) as TextChatMessage | undefined;
+    if (!msg || msg.rating === rating || !msg.raw) return;
+    const previous = msg.rating;
+    this.patchText(messageId, { rating });
+    try {
+      await firstValueFrom(
+        this.http.post('/chat/feedback', {
+          session_id: this.sessionId,
+          user_id: this.userSession.userId,
+          reply_start: replyStart(msg.raw),
+          rating,
+        }),
+      );
+    } catch {
+      this.patchText(messageId, { rating: previous });
+    }
   }
 
   /** Reconstrói o balão de raciocínio (fechado) de uma resposta antiga do histórico. */
@@ -380,7 +433,7 @@ export class ChatService {
             subscription.unsubscribe();
             this.alerts.pollFast(); // monitor recém-criado: 1ª checagem no próximo tick do daemon
             finalizeThinking();
-            this.pushText('assistant', marked.parse(ev.text) as string);
+            this.pushText('assistant', marked.parse(ev.text) as string, { raw: ev.text, rateable: !!ev.data });
             finishSending();
             break;
           case 'cancelled':
