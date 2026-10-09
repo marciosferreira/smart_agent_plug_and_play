@@ -133,6 +133,9 @@ def migrate_db():
             )""",
             "CREATE INDEX IF NOT EXISTS idx_fichas_dominio ON fichas(dominio)",
             "CREATE INDEX IF NOT EXISTS idx_fichas_sessao ON fichas(session_id)",
+            # a assinatura do cache da busca lê MAX(atualizada_em): sem este índice a consulta
+            # percorre o vetor de cada ficha (medido: 68 ms com 20 mil fichas, 3 ms com o índice)
+            "CREATE INDEX IF NOT EXISTS idx_fichas_dominio_atual ON fichas(dominio, atualizada_em)",
             # marca cada sessão de chat com o domínio ativo no primeiro turno
             """CREATE TABLE IF NOT EXISTS session_dominio (
                 session_id TEXT PRIMARY KEY,
@@ -251,6 +254,49 @@ def fichas_da_sessao(session_id: str, dominio: str) -> list[dict]:
 def fichas_do_dominio(dominio: str) -> list[dict]:
     with get_db() as conn:
         rows = conn.execute("SELECT * FROM fichas WHERE dominio = ?", (dominio,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def fichas_assinatura(dominio: str) -> tuple:
+    """Muda sempre que uma ficha do domínio é criada, atualizada ou apagada: o cache da busca
+    (fichas.py) compara isto, em vez de ler as fichas, para saber se ainda vale. O
+    INSERT OR REPLACE de gravar_ficha dá à ficha atualizada um rowid novo, então o maior rowid
+    acompanha cada atualização; o total e a maior data cobrem as remoções."""
+    with get_db() as conn:
+        r = conn.execute(
+            "SELECT COUNT(*), MAX(rowid), MAX(atualizada_em) FROM fichas WHERE dominio = ?", (dominio,)
+        ).fetchone()
+    return tuple(r)
+
+
+def fichas_vetores(dominio: str) -> list[dict]:
+    """Só o que a busca por similaridade precisa de cada ficha com vetor: nada do texto."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, user_id, avaliacao, atualizada_em, vetor FROM fichas "
+            "WHERE dominio = ? AND vetor IS NOT NULL", (dominio,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def fichas_por_id(ids: list[str]) -> dict[str, dict]:
+    if not ids:
+        return {}
+    with get_db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM fichas WHERE id IN ({', '.join('?' for _ in ids)})", list(ids)
+        ).fetchall()
+    return {r["id"]: dict(r) for r in rows}
+
+
+def ficha_por_prefixo(user_id: str, dominio: str, prefixo: str) -> list[dict]:
+    """Fichas deste usuário e deste domínio cujo id começa com `prefixo` (a ref que o
+    orquestrador usa para reler uma conversa)."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM fichas WHERE dominio = ? AND user_id = ? AND substr(id, 1, ?) = ?",
+            (dominio, user_id, len(prefixo), prefixo),
+        ).fetchall()
     return [dict(r) for r in rows]
 
 

@@ -300,9 +300,11 @@ class _BancoTemporario(unittest.TestCase):
         db.DB_PATH = Path(self._dir.name) / "teste.db"
         db.migrate_db()
         fichas.definir_embedder(_embedder_falso)
+        fichas.invalidar()
 
     def tearDown(self):
         fichas.definir_embedder(None)
+        fichas.invalidar()
         self.db.DB_PATH = self._antigo
         self._dir.cleanup()
 
@@ -389,10 +391,83 @@ class FichasArmazenamentoEBusca(_BancoTemporario):
         self.assertLessEqual(len(achadas), 2)
         self.assertEqual(fichas.buscar("custo de mão de obra direta por site", "dom.md", limiar=0.999), [])
 
+    def test_a_matriz_fica_em_cache_e_so_as_escolhidas_sao_lidas_do_banco(self):
+        from unittest import mock
+
+        for t in ("Custo por site", "Custo por site e função", "Produção por linha", "Estoque por depósito"):
+            self._salva(t, sessao=f"s_{t}")
+        with mock.patch.object(fichas, "_db_vetores", wraps=fichas._db_vetores) as vetores, \
+                mock.patch.object(fichas, "_db_por_id", wraps=fichas._db_por_id) as por_id:
+            for _ in range(3):
+                achadas = fichas.buscar("custo por site", "dom.md", k=2, limiar=0.1)
+        self.assertEqual(vetores.call_count, 1)                  # as 3 buscas usaram a mesma matriz
+        self.assertEqual(len(por_id.call_args[0][0]), 2)         # e só 2 fichas foram lidas por inteiro
+        self.assertEqual(len(achadas), 2)
+
+    def test_o_cache_acompanha_ficha_nova_atualizada_ou_apagada_mesmo_de_outro_processo(self):
+        from unittest import mock
+
+        self._salva("Custo por site", sessao="s1")
+        self.assertEqual(len(fichas.buscar("custo por site", "dom.md", limiar=0.5)), 1)
+        with mock.patch.object(fichas, "_db_vetores", wraps=fichas._db_vetores) as vetores:
+            self._salva("Custo por site e função", sessao="s2")                    # nova, pelo próprio processo
+            self.assertEqual(len(fichas.buscar("custo por site", "dom.md", limiar=0.5)), 2)
+            # "outro processo": grava direto no banco, sem passar por fichas.salvar
+            linha = dict(fichas.da_sessao("s2", "dom.md")[0], titulo="Produção por linha", intencao="",
+                         vetor=fichas._embed(["Produção por linha"], "RETRIEVAL_DOCUMENT")[0].tobytes())
+            self.db.gravar_ficha(linha)
+            achadas = fichas.buscar("custo por site", "dom.md", limiar=0.5)
+            self.assertEqual([f["titulo"] for f in achadas], ["Custo por site"])    # a atualizada saiu do resultado
+            with self.db.get_db() as conn:                                           # e apagada (como ao excluir a conversa)
+                conn.execute("DELETE FROM fichas WHERE session_id = 's1'")
+                conn.commit()
+            self.assertEqual(fichas.buscar("custo por site", "dom.md", limiar=0.5), [])
+            self.assertEqual(vetores.call_count, 3)  # uma releitura por mudança: nova, atualizada e apagada
+
+    def test_quase_identicas_viram_uma_so_para_o_analista_e_nada_e_apagado(self):
+        for i in range(3):
+            self._salva("Custo por site", user=f"9{i}", sessao=f"s{i}")
+        self._salva("Custo por site e função", user="990", sessao="s_outra")
+        todas = fichas.buscar("custo por site", "dom.md", limiar=0.5)
+        agrupadas = fichas.buscar("custo por site", "dom.md", limiar=0.5, user_id="321", agrupar="todas")
+        self.assertEqual(len(todas), 4)
+        self.assertEqual(sorted(f["titulo"] for f in agrupadas), ["Custo por site", "Custo por site e função"])
+        self.assertEqual(len(self.db.fichas_do_dominio("dom.md")), 4)
+
+    def test_entre_quase_identicas_fica_a_propria_depois_a_de_melhor_sinal(self):
+        self._salva("Custo por site", user="990", sessao="a", avaliacao="sem_avaliacao")
+        corrigida = self._salva("Custo por site", user="991", sessao="b", avaliacao="corrigida")
+        self._salva("Custo por site", user="992", sessao="c", avaliacao="positiva")
+        achadas = fichas.buscar("custo por site", "dom.md", limiar=0.5, user_id="321", agrupar="todas")
+        self.assertEqual([f["id"] for f in achadas], [corrigida])
+        propria = self._salva("Custo por site", user="321", sessao="d", avaliacao="sem_avaliacao")
+        achadas = fichas.buscar("custo por site", "dom.md", limiar=0.5, user_id="321", agrupar="todas")
+        self.assertEqual([f["id"] for f in achadas], [propria])  # a do usuário vale mais que o sinal
+
+    def test_o_orquestrador_nao_agrupa_as_fichas_do_proprio_usuario(self):
+        a = self._salva("Custo por site", user="321", sessao="a")
+        b = self._salva("Custo por site", user="321", sessao="b")  # outra conversa: outra ref
+        for i in range(3):
+            self._salva("Custo por site", user=f"9{i}", sessao=f"s{i}")
+        achadas = fichas.buscar("custo por site", "dom.md", limiar=0.5, user_id="321", agrupar="so_de_outros")
+        ids = [f["id"] for f in achadas]
+        self.assertIn(a, ids)
+        self.assertIn(b, ids)
+        self.assertEqual(len(ids), 3)  # as duas suas e uma só das três de outros
+        texto = fichas.texto_para_orquestrador("custo por site", "dom.md", "321")
+        self.assertEqual(texto.count("Ficha sua"), 2)
+        self.assertEqual(texto.count("Ficha de outro usuário"), 1)
+
+    def test_ref_com_caracteres_que_nao_sao_hexadecimais_nao_casa_nada(self):
+        self._salva("Custo por site")
+        self.assertIsNone(fichas.ficha_do_usuario("%%%%%%%%", "321", "dom.md"))
+        self.assertIsNone(fichas.ficha_do_usuario("_" * 8, "321", "dom.md"))
+
     def test_o_id_real_de_outro_usuario_nunca_aparece(self):
         self._salva("Custo por site", user="321")
-        self._salva("Custo por site", user="999", sessao="999_s")
-        self._salva("Custo por site", user="888", sessao="888_s")
+        # títulos diferentes: fichas quase idênticas seriam agrupadas numa só para o analista
+        self._salva("Custo por site e função", user="999", sessao="999_s")
+        self._salva("Custo por site e linha", user="888", sessao="888_s")
         bloco = fichas.bloco_para_analista("custo por site", "dom.md", "321")
         self.assertIn("Usuário atual: 321", bloco)
         self.assertIn("Ficha sua", bloco)

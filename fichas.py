@@ -28,6 +28,8 @@ Variáveis de ambiente:
   EMBEDDING_LOCATION       região do Vertex para embeddings (padrão: us-central1)
   MEMORIA_FICHAS_K         fichas injetadas no prompt do analista (padrão: 5)
   MEMORIA_FICHAS_LIMIAR    similaridade mínima (cosseno) para uma ficha entrar (padrão: 0.70)
+  MEMORIA_FICHAS_DUPLICADA similaridade a partir da qual duas fichas contam como quase idênticas
+                           e só uma é mostrada ao analista (padrão: 0.95)
   MEMORIA_CONVERSA_MAX_CHARS  tamanho a partir do qual a conversa vem como índice (padrão: 8000)
 """
 from __future__ import annotations
@@ -35,14 +37,19 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import uuid
 from datetime import datetime
 
 import numpy as np
 
+import db
 import feedback
+from db import ficha_por_prefixo as _db_por_prefixo
+from db import fichas_assinatura as _db_assinatura
 from db import fichas_da_sessao as _db_da_sessao
-from db import fichas_do_dominio as _db_do_dominio
+from db import fichas_por_id as _db_por_id
+from db import fichas_vetores as _db_vetores
 from db import gravar_ficha as _db_gravar
 
 logger = logging.getLogger(__name__)
@@ -155,25 +162,113 @@ def salvar(campos: dict, session_id: str, user_id: str, dominio: str, existentes
         linha["vetor"] = v[0].tobytes() if v is not None else None
         linha["modelo"] = _modelo() if v is not None else None
     _db_gravar(linha)
+    _cache.pop(_chave(dominio), None)
     logger.info("[fichas] ficha %s %s: %s", linha["id"][:8], "atualizada" if antiga else "criada", linha["titulo"])
     return linha["id"]
 
 
-def buscar(consulta: str, dominio: str, k: int | None = None, limiar: float | None = None) -> list[dict]:
+def _duplicada() -> float:
+    try:
+        return float(os.getenv("MEMORIA_FICHAS_DUPLICADA", "0.95"))
+    except ValueError:
+        return 0.95
+
+
+_CANDIDATAS_MAX = 200  # fichas examinadas ao agrupar as quase idênticas
+_PESO_AVALIACAO = {"corrigida": 3, "positiva": 2, "negativa": 1}
+
+# A matriz de vetores de cada domínio, em memória. Montá-la a cada busca (ler todas as fichas e
+# empilhar os vetores) custa mais a cada ficha nova; assim o custo vira uma leitura só, refeita
+# quando a assinatura das fichas do domínio muda (também em outro processo/worker).
+_cache: dict[tuple, dict] = {}
+_trava_cache = threading.Lock()
+
+
+def _chave(dominio: str) -> tuple:
+    return (str(db.DB_PATH), dominio)
+
+
+def invalidar() -> None:
+    with _trava_cache:
+        _cache.clear()
+
+
+def _indice(dominio: str) -> dict:
+    """Matriz (n x 768) e metadados mínimos das fichas do domínio com vetor válido. A assinatura
+    é lida ANTES das fichas: se algo mudar no meio, a próxima busca vê a diferença e recarrega."""
+    assinatura = _db_assinatura(dominio)
+    chave = _chave(dominio)
+    c = _cache.get(chave)
+    if c and c["assinatura"] == assinatura:
+        return c
+    with _trava_cache:
+        c = _cache.get(chave)
+        if c and c["assinatura"] == assinatura:
+            return c
+        linhas = [r for r in _db_vetores(dominio) if len(r["vetor"]) == DIMENSAO * 4]
+        matriz = (np.vstack([np.frombuffer(r["vetor"], dtype=np.float32) for r in linhas])
+                  if linhas else np.empty((0, DIMENSAO), dtype=np.float32))
+        c = {"assinatura": assinatura, "matriz": matriz,
+             "linhas": [{k: r[k] for k in ("id", "user_id", "avaliacao", "atualizada_em")} for r in linhas]}
+        _cache[chave] = c
+        return c
+
+
+def _escolher(ind: dict, ordem, sim, k: int, user_id: str, agrupar: str | None) -> list[int]:
+    """Os `k` índices a devolver. Sem `agrupar`, os k mais parecidos. Com `agrupar`, fichas
+    quase idênticas entre si (cosseno >= MEMORIA_FICHAS_DUPLICADA) viram uma só, para as vagas
+    mostrarem abordagens diferentes: fica a do próprio usuário, depois a de melhor sinal
+    ("contestada e corrigida", 👍, 👎) e depois a mais recente. Nada é apagado.
+    `agrupar="so_de_outros"` nunca agrupa as fichas do próprio usuário: cada uma é uma conversa
+    que ele pode querer reler."""
+    if not agrupar:
+        return [int(i) for i in ordem[:k]]
+    linhas, matriz, limite = ind["linhas"], ind["matriz"], _duplicada()
+
+    def propria(i: int) -> bool:
+        return bool(user_id) and linhas[i]["user_id"] == user_id
+
+    def valor(i: int) -> tuple:
+        return (propria(i), _PESO_AVALIACAO.get(linhas[i]["avaliacao"], 0), linhas[i]["atualizada_em"] or "")
+
+    escolhidas: list[int] = []
+    for i in (int(x) for x in ordem[:_CANDIDATAS_MAX]):
+        if agrupar == "so_de_outros" and propria(i):
+            escolhidas.append(i)
+            continue
+        comparaveis = [p for p, j in enumerate(escolhidas) if not (agrupar == "so_de_outros" and propria(j))]
+        igual = next((p for p in comparaveis if float(matriz[i] @ matriz[escolhidas[p]]) >= limite), None)
+        if igual is None:
+            escolhidas.append(i)
+        elif valor(i) > valor(escolhidas[igual]):
+            escolhidas[igual] = i
+    escolhidas.sort(key=lambda i: -float(sim[i]))
+    return escolhidas[:k]
+
+
+def buscar(consulta: str, dominio: str, k: int | None = None, limiar: float | None = None,
+           user_id: str = "", agrupar: str | None = None) -> list[dict]:
     """As `k` fichas do domínio mais parecidas com `consulta` (cosseno) e acima do limiar, da
-    mais para a menos parecida. Cada uma vem com `similaridade`."""
+    mais para a menos parecida. Cada uma vem com `similaridade`. A comparação é feita na matriz
+    em cache; só as fichas escolhidas são lidas do banco. `agrupar`: ver `_escolher`."""
     k = k or _k()
     limiar = _limiar() if limiar is None else limiar
-    linhas = [r for r in _db_do_dominio(dominio) if r.get("vetor") and len(r["vetor"]) == DIMENSAO * 4]
-    if not linhas or not (consulta or "").strip():
+    if not (consulta or "").strip():
+        return []
+    ind = _indice(dominio)
+    if not ind["linhas"]:
         return []
     q = _embed([consulta], "RETRIEVAL_QUERY")
     if q is None:
         return []
-    matriz = np.vstack([np.frombuffer(r["vetor"], dtype=np.float32) for r in linhas])
-    sim = matriz @ q[0]
-    ordem = np.argsort(-sim)[:k]
-    return [dict(linhas[i], similaridade=float(sim[i])) for i in ordem if sim[i] >= limiar]
+    sim = ind["matriz"] @ q[0]
+    ordem = np.argsort(-sim)
+    ordem = ordem[sim[ordem] >= limiar]
+    escolhidas = _escolher(ind, ordem, sim, k, user_id, agrupar)
+    ids = [ind["linhas"][i]["id"] for i in escolhidas]
+    lidas = _db_por_id(ids)
+    return [dict(lidas[ind["linhas"][i]["id"]], similaridade=float(sim[i]))
+            for i in escolhidas if ind["linhas"][i]["id"] in lidas]
 
 
 def _data(texto: str) -> str:
@@ -196,9 +291,9 @@ def ficha_do_usuario(ref: str, user_id: str, dominio: str) -> dict | None:
     """A ficha de `ref` (o começo do id) se for DESTE usuário e deste domínio; senão None. Uma
     referência de outro usuário e uma inexistente são indistinguíveis para quem chama."""
     ref = (ref or "").strip().lower()
-    if not user_id or len(ref) < _TAM_REF - 2:
+    if not user_id or len(ref) < _TAM_REF - 2 or not re.fullmatch(r"[0-9a-f]+", ref):
         return None
-    achadas = [f for f in _db_do_dominio(dominio) if f.get("user_id") == user_id and f["id"].startswith(ref)]
+    achadas = _db_por_prefixo(user_id, dominio, ref)
     return achadas[0] if len(achadas) == 1 else None
 
 
@@ -305,7 +400,7 @@ def bloco_para_analista(consulta: str, dominio: str, user_id: str) -> str:
     """Bloco do prompt do analista com as fichas mais parecidas com o pedido delegado. Vazio
     se não houver nenhuma acima do limiar. Nunca levanta exceção."""
     try:
-        achadas = buscar(consulta, dominio)
+        achadas = buscar(consulta, dominio, user_id=user_id, agrupar="todas")
     except Exception:
         logger.warning("[fichas] falha na busca", exc_info=True)
         return ""
@@ -325,7 +420,7 @@ def bloco_para_analista(consulta: str, dominio: str, user_id: str) -> str:
 def texto_para_orquestrador(consulta: str, dominio: str, user_id: str, k: int = 10) -> str:
     """Resposta da tool buscar_analises_anteriores."""
     try:
-        achadas = buscar(consulta, dominio, k=k)
+        achadas = buscar(consulta, dominio, k=k, user_id=user_id, agrupar="so_de_outros")
     except Exception:
         logger.warning("[fichas] falha na busca", exc_info=True)
         achadas = []
