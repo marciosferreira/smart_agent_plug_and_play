@@ -73,6 +73,7 @@ logger = logging.getLogger(__name__)
 from db import DB_PATH, anexar_mensagem_seguinte, tag_session_dominio
 import db_config
 import graphql_config
+import fichas
 import memoria
 
 SKILLS_FOLDER = Path(__file__).parent / "skills"
@@ -303,6 +304,7 @@ _TOOL_LABELS: dict[str, str] = {
     "rag_capacidades":         "📚 Consultando base de conhecimento (capacidades)",
     "rag_arquitetura":         "📚 Consultando base de conhecimento (arquitetura)",
     "rag_dados":               "📚 Consultando base de conhecimento (dados)",
+    "buscar_analises_anteriores": "🧠 Consultando análises anteriores",
     "get_current_datetime":    "🕐 Verificando data e hora",
     "gerar_pdf":               "📄 Gerando relatório PDF",
     "gerar_excel":             "📊 Gerando planilha Excel",
@@ -345,6 +347,7 @@ _LABEL_TRANSLATIONS: dict[str, dict[str, str]] = {
     "🗄️ Consultando esquema do banco (GraphQL)": {"en": "🗄️ Querying database schema (GraphQL)", "zh": "🗄️ 正在查询数据库架构（GraphQL）"},
     "🔢 Processando e analisando dados": {"en": "🔢 Processing and analyzing data", "zh": "🔢 正在处理和分析数据"},
     "🔍 Delegando ao sub-agente analista": {"en": "🔍 Delegating to the analyst sub-agent", "zh": "🔍 正在委派给分析子代理"},
+    "🧠 Consultando análises anteriores": {"en": "🧠 Looking up previous analyses", "zh": "🧠 正在查询以往的分析"},
     "📚 Consultando base de conhecimento (domínio)": {"en": "📚 Consulting knowledge base (domain)", "zh": "📚 正在查询知识库（业务领域）"},
     "📚 Consultando base de conhecimento (capacidades)": {"en": "📚 Consulting knowledge base (capabilities)", "zh": "📚 正在查询知识库（功能）"},
     "📚 Consultando base de conhecimento (arquitetura)": {"en": "📚 Consulting knowledge base (architecture)", "zh": "📚 正在查询知识库（架构）"},
@@ -1015,6 +1018,22 @@ def rag_arquitetura() -> str:
     caminho = _rag_path("arquitetura.md")
     _tlog("rag_arquitetura", "CHAMADA", arquivo=str(caminho))
     return caminho.read_text(encoding="utf-8")
+
+
+@tool
+def buscar_analises_anteriores(consulta: str) -> str:
+    """Busca na memória fichas de análises já feitas parecidas com `consulta`, por este usuário
+    ou por outros. Cada ficha diz o que foi pedido, como foi feito, o que falhou e como foi
+    avaliado, mas não traz números.
+
+    Use quando o usuário mencionar uma análise anterior ("lembra da análise de custo que fiz?",
+    "aquela da semana passada", "alguém já analisou X?"). `consulta` é a intenção da análise,
+    em uma frase. Para os valores, refaça a análise com consultar_analista.
+    """
+    _tlog("buscar_analises_anteriores", "CHAMADA", consulta=consulta)
+    texto = fichas.texto_para_orquestrador(consulta, db_config.dominio_filename(), _current_user_id.get())
+    _tlog("buscar_analises_anteriores", "RETORNO", chars=len(texto))
+    return texto
 
 
 @tool
@@ -2161,14 +2180,15 @@ def _build_sub_agent(llm):
             f"\n\n## Skill dominio.md (já carregada — não chame read_skill para ela)\n{dominio_txt}"
             if dominio_txt and db_config.is_configured() else ""
         )
-        # Memória (lições do banco, convenções e preferências do usuário): vem depois do dominio.md e antes
-        # de `extra` para manter o prefixo estável entre chamadas.
+        # Memória (lições do banco, convenções e preferências do usuário, e as fichas de análises
+        # parecidas, buscadas uma vez em consultar_analista): vem depois do dominio.md e antes de
+        # `extra` para manter o prefixo estável entre chamadas.
         _dom = db_config.dominio_filename()
         _uid = _current_user_id.get()
         bloco_memoria = (
             memoria.bloco_licoes(_dom)
             + memoria.bloco_convencoes(_uid, _dom)
-            + memoria.bloco_estrategias(_dom)
+            + ns.get("_bloco_fichas", "")
             + memoria.bloco_preferencias(_uid, _dom)
         )
         msgs = [SystemMessage(
@@ -2296,6 +2316,10 @@ def consultar_analista(detalhes: str, from_date: str = "", to_date: str = "", ti
 
     ns = _ns_get()
     ns["_current_query"] = detalhes
+    # Memória de episódios: as fichas de análises parecidas entram no prompt do analista. A
+    # busca (um embedding do pedido delegado, que já vem autocontido) é feita uma vez aqui, e
+    # não a cada passo do analista.
+    ns["_bloco_fichas"] = fichas.bloco_para_analista(detalhes, db_config.dominio_filename(), _current_user_id.get())
     frase_periodo = f" frase='{periodo.strip()}'" if periodo.strip() else ""
     flags = f"[TIPO DE SAÍDA OBRIGATÓRIO: {tipo.upper()}]\n[PERÍODO: from={from_date} to={to_date}{frase_periodo}]"
 
@@ -3633,6 +3657,12 @@ def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
         "       rag_capacidades()  → o que o agente pode fazer, agendamento, monitores\n"
         "       rag_arquitetura()  → como o sistema funciona, sub-agentes, skills\n"
         "       rag_dados()        → schema do banco configurado, tabelas e colunas\n\n"
+        "  B2) ANÁLISE ANTERIOR — o usuário menciona uma análise feita antes ('lembra da análise de custo\n"
+        "     que fiz?', 'aquela da semana passada', 'alguém já analisou X?').\n"
+        "     → Chame buscar_analises_anteriores(consulta) com a intenção da análise. As fichas dizem o que\n"
+        "       foi pedido, como foi feito e como foi avaliado, mas não trazem números: para os valores,\n"
+        "       refaça a análise com consultar_analista. Pode mencionar fichas de outro usuário ('outro\n"
+        "       usuário fez uma análise parecida'), mas nunca diga quem é.\n\n"
         "  C) AGENDAMENTO — o usuário quer CRIAR, EDITAR, LISTAR, PAUSAR ou DELETAR uma tarefa recorrente.\n"
         "     Palavras-chave obrigatórias: 'agendar', 'todo dia', 'toda semana', 'automaticamente',\n"
         "     'criar tarefa', 'monitor', 'me avise quando', 'editar tarefa [ID]'.\n"
@@ -3837,7 +3867,7 @@ def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
     orq_tools = [
         get_current_datetime, get_dashboard_charts, calcular_periodo, consultar_analista,
         ver_grafico,
-        rag_dominio, rag_capacidades, rag_arquitetura, rag_dados,
+        rag_dominio, rag_capacidades, rag_arquitetura, rag_dados, buscar_analises_anteriores,
         gerar_pdf, gerar_excel,
         gerenciar_agenda,
         criar_tarefa_agendada, editar_tarefa_agendada,
@@ -4021,6 +4051,7 @@ def init_multi_agent(project: str, location: str, model_name: str, credentials=N
         # Extrator da memória do agente (ver memoria.py): uma chamada estruturada por turno, em
         # background, que decide e devolve as mudanças nos três documentos (lições, preferências
         # e perfil). Como separa o que é lição do que é preferência, o padrão é medium.
+        fichas.init(project, credentials)
         memoria.init(ChatVertexAI(
             model_name=model_name,
             project=project,

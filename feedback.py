@@ -12,8 +12,8 @@ Funções puras sobre as mensagens do checkpoint, sem rede nem banco, usadas pel
 Toda avaliação é gravada em `feedback_respostas` (db.py) junto com a pergunta, a resposta e,
 no caso do 👎, a mensagem que o usuário escreve em seguida (que pode ou não contestar a
 resposta). Esse conjunto fica guardado para melhorar o agente depois. Para a memória, 👍 e 👎
-são sinais de reforço: marcam a resposta na conversa que o extrator único lê a cada 30 s, e é
-só com um sinal na janela que ele pode gravar estratégias (memoria.avaliar_resposta).
+são sinais: marcam a resposta na conversa que o extrator lê a cada 30 s, e entram na avaliação
+da ficha de análise daquele episódio (memoria.avaliar_resposta, fichas.py).
 """
 from __future__ import annotations
 
@@ -87,15 +87,3 @@ def localizar_resposta(turnos: list[dict], inicio: str) -> int | None:
         if resposta and inicio_comparavel(resposta).startswith(inicio):
             return i
     return None
-
-
-PREFIXO_MARCA = "[AVALIAÇÃO DO USUÁRIO"
-
-
-def tem_sinal(msgs: list[dict]) -> bool:
-    """True se a conversa enviada ao extrator traz um 👍 ou 👎 numa resposta ainda não processada
-    (as de mensagens [CONTEXTO] já foram vistas). Estratégias só valem com esse sinal."""
-    return any(
-        m["role"] == "assistant" and not m["content"].startswith("[CONTEXTO") and PREFIXO_MARCA in m["content"]
-        for m in msgs
-    )

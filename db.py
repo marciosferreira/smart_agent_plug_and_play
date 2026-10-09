@@ -114,6 +114,25 @@ def migrate_db():
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (session_id, chave)
             )""",
+            # fichas de análise: a memória de episódios (fichas.py). Uma por episódio de análise
+            # de dados, escrita pelo extrator da memória; vetor = embedding do título e da intenção.
+            """CREATE TABLE IF NOT EXISTS fichas (
+                id            TEXT PRIMARY KEY,
+                dominio       TEXT NOT NULL,
+                user_id       TEXT,
+                session_id    TEXT NOT NULL,
+                titulo        TEXT NOT NULL,
+                intencao      TEXT,
+                funcionou     TEXT,
+                falhou        TEXT,
+                avaliacao     TEXT NOT NULL DEFAULT 'sem_avaliacao',
+                vetor         BLOB,
+                modelo        TEXT,
+                criada_em     TEXT NOT NULL,
+                atualizada_em TEXT NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_fichas_dominio ON fichas(dominio)",
+            "CREATE INDEX IF NOT EXISTS idx_fichas_sessao ON fichas(session_id)",
             # marca cada sessão de chat com o domínio ativo no primeiro turno
             """CREATE TABLE IF NOT EXISTS session_dominio (
                 session_id TEXT PRIMARY KEY,
@@ -204,6 +223,35 @@ def buscar_abordagem(session_id: str, chave: str) -> str | None:
             "SELECT texto FROM abordagens WHERE session_id = ? AND chave = ?", (session_id, chave)
         ).fetchone()
     return r["texto"] if r else None
+
+
+_CAMPOS_FICHA = ("id", "dominio", "user_id", "session_id", "titulo", "intencao", "funcionou", "falhou",
+                 "avaliacao", "vetor", "modelo", "criada_em", "atualizada_em")
+
+
+def gravar_ficha(f: dict) -> None:
+    """Cria ou substitui uma ficha de análise (ver fichas.py)."""
+    with get_db() as conn:
+        conn.execute(
+            f"INSERT OR REPLACE INTO fichas ({', '.join(_CAMPOS_FICHA)}) "
+            f"VALUES ({', '.join('?' for _ in _CAMPOS_FICHA)})",
+            tuple(f.get(c) for c in _CAMPOS_FICHA),
+        )
+        conn.commit()
+
+
+def fichas_da_sessao(session_id: str, dominio: str) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM fichas WHERE session_id = ? AND dominio = ? ORDER BY criada_em", (session_id, dominio)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def fichas_do_dominio(dominio: str) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM fichas WHERE dominio = ?", (dominio,)).fetchall()
+    return [dict(r) for r in rows]
 
 
 def registrar_avaliacao(session_id: str, turn: int, user_id: str, dominio: str, rating: str,

@@ -575,6 +575,7 @@ async def delete_chat_session(session_id: str):
             conn.execute("DELETE FROM session_dominio WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM feedback_respostas WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM abordagens WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM fichas WHERE session_id = ?", (session_id,))
             conn.commit()
         import chart_store as cs
         cs.delete_charts_for_session(session_id)

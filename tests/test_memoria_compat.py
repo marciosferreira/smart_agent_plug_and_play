@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 import agent_multi
 import feedback
+import fichas
 import memoria
 from memoria import MAX_CONVENCOES, MAX_LICOES, MudancasMemoria, Operacao, aplicar_operacoes
 
@@ -137,29 +138,16 @@ class OperacoesDeLicoes(unittest.TestCase):
         lic, _, _ = _aplica([_op("licao_verificada", "remover", "Na tabela producao a coluna de data é dt_prod_b")], doc)
         self.assertEqual(lic["verificadas"], ["Na tabela producao a coluna de data é dt_prod_a"])
 
-    def test_promover_hipotese_e_remover_mais_adicionar(self):
-        doc = {"verificadas": [], "hipoteses": ["Incluir a data no join"]}
-        lic, _, _ = _aplica([_op("licao_hipotese", "remover", "Incluir a data no join"),
-                             _op("licao_verificada", "adicionar", novo="Incluir a data no join")], doc)
-        self.assertEqual(lic, {"verificadas": ["Incluir a data no join"], "hipoteses": []})
-
-    def test_verificada_nova_substitui_a_hipotese_igual(self):
-        doc = {"verificadas": [], "hipoteses": ["Incluir a data no join"]}
-        lic, _, _ = _aplica([_op("licao_verificada", "adicionar", novo="Incluir a data no join")], doc)
-        self.assertEqual(lic, {"verificadas": ["Incluir a data no join"], "hipoteses": []})
-
-    def test_hipotese_igual_a_verificada_e_ignorada(self):
-        doc = {"verificadas": ["Usar USD"], "hipoteses": []}
-        lic, _, _ = _aplica([_op("licao_hipotese", "adicionar", novo="Usar USD")], doc)
-        self.assertEqual(lic, doc)
-
-    def test_limite_descarta_hipoteses_primeiro(self):
+    def test_limite_de_licoes_descarta_as_mais_antigas(self):
         verificadas = [(f"regra verificada numero {i} " + "x" * i * 3).strip() for i in range(MAX_LICOES)]
-        lic, _, _ = _aplica([_op("licao_hipotese", "adicionar", novo="uma hipotese a mais, bem diferente")],
+        lic, _, _ = _aplica([_op("licao_verificada", "adicionar", novo="uma regra nova, bem diferente")],
                             {"verificadas": verificadas})
-        self.assertEqual(len(lic["verificadas"]) + len(lic["hipoteses"]), MAX_LICOES)
-        self.assertEqual(lic["verificadas"], verificadas)
-        self.assertEqual(lic["hipoteses"], [])
+        self.assertEqual(len(lic["verificadas"]), MAX_LICOES)
+        self.assertEqual(lic["verificadas"][-1], "uma regra nova, bem diferente")
+        self.assertNotIn(verificadas[0], lic["verificadas"])
+
+    def test_nao_existe_mais_destino_de_hipotese(self):
+        self.assertNotIn("licao_hipotese", str(Operacao.model_json_schema()))
 
 
 class OperacoesDePreferenciasEPerfil(unittest.TestCase):
@@ -284,159 +272,218 @@ class AvaliacaoDeResposta(unittest.TestCase):
         self.assertIsNone(feedback.localizar_resposta(turnos, ""))
 
 
-def _est(destino, texto):
-    return Operacao(destino=destino, acao="adicionar", novo=texto)
+def _embedder_falso(textos, tarefa):
+    """Embedding de teste: saco de palavras com hash. Textos com palavras em comum ficam próximos."""
+    import hashlib
+    import re as _re
+
+    import numpy as np
+
+    v = np.zeros((len(textos), fichas.DIMENSAO), dtype=np.float32)
+    for i, t in enumerate(textos):
+        for palavra in _re.findall(r"\w+", t.lower()):
+            v[i, int(hashlib.md5(palavra.encode()).hexdigest(), 16) % fichas.DIMENSAO] += 1
+    return v
 
 
-class EstrategiasReforcadas(unittest.TestCase):
-    """Estratégias compartilhadas (boas e evitar): reforço, filtro de números, visibilidade."""
-
-    def test_reforca_a_mesma_abordagem_e_conta_usuarios_distintos(self):
-        t = "Para custo por site, agregar dl_cost_by_cm_usd por site filtrando status aprovado"
-        doc = memoria.aplicar_estrategias({}, [_est("estrategia_boa", t)], "u1", hoje="2026-10-01")
-        doc = memoria.aplicar_estrategias(doc, [_est("estrategia_boa", t.lower() + ".")], "u1", hoje="2026-10-02")
-        self.assertEqual((doc["boas"][0]["n"], len(doc["boas"][0]["usuarios"])), (2, 1))
-        doc = memoria.aplicar_estrategias(doc, [_est("estrategia_boa", t)], "u2", hoje="2026-10-03")
-        self.assertEqual((len(doc["boas"]), doc["boas"][0]["n"], len(doc["boas"][0]["usuarios"])), (1, 3, 2))
-        self.assertEqual(doc["boas"][0]["ultima"], "2026-10-03")
-
-    def test_abordagem_diferente_vira_entrada_nova(self):
-        doc = memoria.aplicar_estrategias({}, [_est("estrategia_boa", "Agregar o custo por site, filtrando aprovados")], "u1")
-        doc = memoria.aplicar_estrategias(doc, [_est("estrategia_boa", "Calcular a taxa horária pela vigência mais recente")], "u1")
-        self.assertEqual(len(doc["boas"]), 2)
-
-    def test_descarta_estrategia_com_resultado_numerico_mas_aceita_datas(self):
-        doc = memoria.aplicar_estrategias({}, [
-            _est("estrategia_boa", "O site BPL concentrou 88,6% do custo"),
-            _est("estrategia_boa", "O custo total foi de $798,76"),
-            _est("estrategia_boa", "Para o último mês fechado (2026-09-01 a 2026-09-30, Q2,2026), agregar por site"),
-        ], "u1")
-        self.assertEqual([e["texto"] for e in doc["boas"]],
-                         ["Para o último mês fechado (2026-09-01 a 2026-09-30, Q2,2026), agregar por site"])
-
-    def test_limite_por_lista_descarta_as_de_avaliacao_mais_antiga(self):
-        doc = {"boas": [{"texto": f"abordagem numero {i} " + "z" * i * 3, "n": 1, "usuarios": ["u"],
-                         "ultima": f"2026-01-{i + 1:02d}"} for i in range(memoria.MAX_ESTRATEGIAS)]}
-        novo = memoria.aplicar_estrategias(doc, [_est("estrategia_boa", "uma abordagem nova e bem diferente")], "u1",
-                                           hoje="2026-10-01")
-        self.assertEqual(len(novo["boas"]), memoria.MAX_ESTRATEGIAS)
-        self.assertEqual(novo["boas"][-1]["texto"], "uma abordagem nova e bem diferente")
-
-    def test_visibilidade_respeita_o_minimo_de_usuarios(self):
-        from unittest import mock
-
-        doc = {"boas": [{"texto": "Agregar por site", "n": 1, "usuarios": ["u1"], "ultima": "2026-10-01"}]}
-        with mock.patch.dict("os.environ", {"MEMORIA_MIN_USUARIOS": "1"}):
-            self.assertEqual(len(memoria.estrategias_visiveis(doc)[0]), 1)  # padrão: já na primeira avaliação
-        with mock.patch.dict("os.environ", {"MEMORIA_MIN_USUARIOS": "2"}):
-            self.assertEqual(memoria.estrategias_visiveis(doc)[0], [])
-            doc["boas"][0]["usuarios"].append("u2")
-            self.assertEqual(len(memoria.estrategias_visiveis(doc)[0]), 1)
-
-    def test_abordagem_contestada_some_ate_um_lado_ganhar(self):
-        def e(texto, n):
-            return {"texto": texto, "n": n, "usuarios": [f"u{i}" for i in range(n)], "ultima": "2026-10-01"}
-
-        igual = {"boas": [e("Somar dl_cost_by_cm_usd como custo total", 1)],
-                 "evitar": [e("Somar dl_cost_by_cm_usd como custo total", 1)]}
-        self.assertEqual(memoria.estrategias_visiveis(igual), ([], []))
-        ganha_boa = {"boas": [e("Somar dl_cost_by_cm_usd como custo total", 2)],
-                     "evitar": [e("Somar dl_cost_by_cm_usd como custo total", 1)]}
-        boas, evitar = memoria.estrategias_visiveis(ganha_boa)
-        self.assertEqual((len(boas), evitar), (1, []))
-
-    def test_resumo_da_abordagem_leva_as_consultas_e_o_resultado_ok_ou_erro_sem_valores(self):
-        from langchain_core.messages import AIMessage, ToolMessage
-
-        msgs = [
-            AIMessage("", tool_calls=[{"name": "executar_graphql_agregado", "args": {"table": "fact", "group_by": "site_id"}, "id": "1"}]),
-            ToolMessage("Erro ao executar GraphQL: coluna inexistente", tool_call_id="1", name="executar_graphql_agregado"),
-            AIMessage("", tool_calls=[{"name": "executar_graphql_agregado", "args": {"table": "fact", "group_by": "site"}, "id": "2"}]),
-            ToolMessage('[{"groupKey": "BPL", "metricValue": 708.0}]', tool_call_id="2", name="executar_graphql_agregado"),
-        ]
-        resumo = memoria.renderizar_abordagem(msgs)
-        self.assertIn("group_by", resumo)
-        self.assertIn("ERRO: Erro ao executar GraphQL", resumo)
-        self.assertNotIn("708", resumo)
-        self.assertNotIn("BPL", resumo)
-
-
-class BlocoDeEstrategias(unittest.TestCase):
+class _BancoTemporario(unittest.TestCase):
     def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        import db
+
+        self.db = db
+        self._antigo = db.DB_PATH
+        self._dir = tempfile.TemporaryDirectory()
+        db.DB_PATH = Path(self._dir.name) / "teste.db"
+        db.migrate_db()
+        fichas.definir_embedder(_embedder_falso)
+
+    def tearDown(self):
+        fichas.definir_embedder(None)
+        self.db.DB_PATH = self._antigo
+        self._dir.cleanup()
+
+    def _salva(self, titulo, user="321", sessao="321_s1", dominio="dom.md", existentes=None, **kw):
+        campos = {"ficha_id": kw.get("ficha_id", ""), "titulo": titulo, "intencao": kw.get("intencao", ""),
+                  "funcionou": kw.get("funcionou", ""), "falhou": kw.get("falhou", ""),
+                  "avaliacao": kw.get("avaliacao", "positiva")}
+        return fichas.salvar(campos, sessao, user, dominio, existentes or {})
+
+
+class FichasValidacao(unittest.TestCase):
+    """memoria.validar_fichas: o que o código aceita das fichas que o extrator propõe."""
+
+    COM_ANALISE = [{"role": "user", "content": "Qual o custo por site?"},
+                   {"role": "assistant", "content": "[analista chamou executar_graphql] {...}\n"
+                                                    "[resultado de executar_graphql] [{\"site\": \"BPL\"}]\nCusto por site..."}]
+    SO_FALHA = [{"role": "user", "content": "Qual o custo por site?"},
+                {"role": "assistant", "content": "[analista chamou executar_graphql] {...}\n"
+                                                 "[resultado de executar_graphql] Erro ao executar GraphQL: Analytics API "
+                                                 "is not configured\nNão consegui consultar."}]
+    SO_CONTEXTO = [{"role": "user", "content": "[CONTEXTO, já processado] Qual o custo?"},
+                   {"role": "assistant", "content": "[CONTEXTO, já processado] [analista chamou executar_sql] {...}\n"
+                                                    "[resultado de executar_sql] ok"}]
+    SEM_ANALISE = [{"role": "user", "content": "Bom dia"}, {"role": "assistant", "content": "Bom dia!"}]
+
+    def _f(self, **kw):
+        base = {"titulo": "Custo de mão de obra direta por site em um mês", "intencao": "Custo aprovado por site",
+                "funcionou": "fact_final_dl_cost com status aprovado", "avaliacao": "positiva"}
+        base.update(kw)
+        return memoria.FichaAnalise(**base)
+
+    def test_ficha_nova_exige_consulta_de_dados_nao_processada(self):
+        self.assertEqual(len(memoria.validar_fichas([self._f()], self.COM_ANALISE, set(), True)), 1)
+        self.assertEqual(memoria.validar_fichas([self._f()], self.SEM_ANALISE, set(), True), [])
+        self.assertEqual(memoria.validar_fichas([self._f()], self.SO_CONTEXTO, set(), True), [])
+
+    def test_falha_de_infraestrutura_nao_vira_ficha(self):
+        self.assertEqual(memoria.validar_fichas([self._f()], self.SO_FALHA, set(), True), [])
+        so_schema = [self.SO_FALHA[0], {"role": "assistant", "content": self.SO_FALHA[1]["content"]
+                                        + "\n[resultado de executar_graphql_schema] {\"tables\": []}"}]
+        self.assertEqual(memoria.validar_fichas([self._f()], so_schema, set(), True), [])  # schema não é dado
+
+    def test_atualizar_ficha_da_sessao_nao_exige_consulta(self):
+        aceitas = memoria.validar_fichas([self._f(ficha_id="abc", avaliacao="corrigida")], self.SEM_ANALISE, {"abc"}, True)
+        self.assertEqual((aceitas[0]["ficha_id"], aceitas[0]["avaliacao"]), ("abc", "corrigida"))
+
+    def test_id_que_nao_e_desta_sessao_vira_ficha_nova(self):
+        aceitas = memoria.validar_fichas([self._f(ficha_id="de_outra_sessao")], self.COM_ANALISE, {"abc"}, True)
+        self.assertEqual(aceitas[0]["ficha_id"], "")
+
+    def test_numeros_derrubam_o_titulo_e_esvaziam_os_outros_campos(self):
+        self.assertEqual(memoria.validar_fichas([self._f(titulo="Custo de $798,76 por site")], self.COM_ANALISE, set(), True), [])
+        aceitas = memoria.validar_fichas([self._f(funcionou="O site BPL teve 88,6% do custo")], self.COM_ANALISE, set(), True)
+        self.assertEqual(aceitas[0]["funcionou"], "")
+        self.assertEqual(aceitas[0]["titulo"], "Custo de mão de obra direta por site em um mês")
+
+    def test_sem_usuario_nao_ha_fichas_e_no_maximo_tres(self):
+        self.assertEqual(memoria.validar_fichas([self._f()], self.COM_ANALISE, set(), False), [])
+        varias = [self._f(titulo=f"Análise {chr(65 + i)}") for i in range(5)]
+        self.assertEqual(len(memoria.validar_fichas(varias, self.COM_ANALISE, set(), True)), memoria.MAX_FICHAS_POR_VEZ)
+
+
+class FichasArmazenamentoEBusca(_BancoTemporario):
+    def test_cria_e_atualiza_a_mesma_ficha_e_so_reembedda_se_o_texto_mudar(self):
+        fid = self._salva("Custo de mão de obra por site", intencao="custo por site")
+        existentes = {f["id"]: f for f in fichas.da_sessao("321_s1", "dom.md")}
+        vetor = existentes[fid]["vetor"]
+        mesmo = self._salva("Custo de mão de obra por site", intencao="custo por site", ficha_id=fid,
+                            existentes=existentes, falhou="Somou o custo unitário como total", avaliacao="corrigida")
+        self.assertEqual(mesmo, fid)
+        linhas = fichas.da_sessao("321_s1", "dom.md")
+        self.assertEqual(len(linhas), 1)
+        self.assertEqual((linhas[0]["avaliacao"], linhas[0]["falhou"]), ("corrigida", "Somou o custo unitário como total"))
+        self.assertEqual(linhas[0]["vetor"], vetor)  # título e intenção iguais: mesmo embedding
+
+    def test_busca_traz_as_mais_parecidas_acima_do_limiar_e_so_do_dominio(self):
+        self._salva("Custo de mão de obra direta por site", intencao="custo mão de obra site mês")
+        self._salva("Taxa horária vigente por site", intencao="taxa horária site")
+        self._salva("Quantidade de produtos cadastrados", intencao="produtos cadastrados")
+        self._salva("Custo de mão de obra direta por site", intencao="outro domínio", dominio="outro.md")
+        achadas = fichas.buscar("custo de mão de obra direta por site", "dom.md", k=2, limiar=0.1)
+        self.assertEqual(achadas[0]["titulo"], "Custo de mão de obra direta por site")
+        self.assertTrue(all(f["dominio"] == "dom.md" for f in achadas))
+        self.assertLessEqual(len(achadas), 2)
+        self.assertEqual(fichas.buscar("custo de mão de obra direta por site", "dom.md", limiar=0.999), [])
+
+    def test_o_id_real_de_outro_usuario_nunca_aparece(self):
+        self._salva("Custo por site", user="321")
+        self._salva("Custo por site", user="999", sessao="999_s")
+        self._salva("Custo por site", user="888", sessao="888_s")
+        bloco = fichas.bloco_para_analista("custo por site", "dom.md", "321")
+        self.assertIn("Usuário atual: 321", bloco)
+        self.assertIn("Ficha sua", bloco)
+        self.assertIn("de outro usuário (A)", bloco)
+        self.assertIn("de outro usuário (B)", bloco)
+        self.assertNotIn("999", bloco)
+        self.assertNotIn("888", bloco)
+        self.assertIn("nunca diga quem é esse usuário", bloco)
+
+    def test_o_analista_recebe_como_ler_a_avaliacao_e_como_usar_a_ficha(self):
+        self._salva("Custo por site")
+        bloco = fichas.bloco_para_analista("custo por site", "dom.md", "321")
+        self.assertIn("\"👎\" é alerta", bloco)
+        self.assertIn("evite o que está em \"Falhou\"", bloco)
+        self.assertIn("diga na resposta qual escolha fez", bloco)
+        self.assertIn("siga o recorte do pedido atual", bloco)
+
+    def test_texto_para_o_orquestrador_aponta_a_conversa_so_nas_fichas_do_proprio_usuario(self):
+        self._salva("Custo por site", user="321")
+        self._salva("Custo por site", user="999", sessao="999_s")
+        texto = fichas.texto_para_orquestrador("custo por site", "dom.md", "321")
+        self.assertEqual(texto.count("Feita na conversa de"), 1)
+        self.assertIn("refaça a análise com consultar_analista", texto)
+        self.assertIn("\"👎\" é alerta", texto)
+        self.assertNotIn("Como usar:", texto)  # o modo de usar é só do analista
+        self.assertEqual(fichas.texto_para_orquestrador("assunto sem nada a ver", "vazio.md", "321"),
+                         "Nenhuma análise parecida encontrada na memória.")
+
+    def test_sem_embeddings_a_ficha_e_gravada_e_a_busca_nao_quebra(self):
+        fichas.definir_embedder(None)  # e sem cliente do Vertex nos testes
+        self._salva("Custo por site")
+        self.assertIsNone(fichas.da_sessao("321_s1", "dom.md")[0]["vetor"])
+        self.assertEqual(fichas.buscar("custo por site", "dom.md"), [])
+        self.assertEqual(fichas.bloco_para_analista("custo por site", "dom.md", "321"), "")
+
+
+class ExtratorGravaFichas(_BancoTemporario):
+    """O extrator único cria a ficha do episódio e depois a atualiza (mesmo id), com um LLM falso."""
+
+    class _LLMFalso:
+        def __init__(self, resposta):
+            self.resposta = resposta
+
+        def invoke(self, msgs):
+            return self.resposta
+
+    def setUp(self):
+        super().setUp()
         import sqlite3
 
         from langgraph.store.sqlite import SqliteStore
 
-        self._antigo = memoria._store
+        self._store_antigo = memoria._store
         conn = sqlite3.connect(":memory:", check_same_thread=False, isolation_level=None)
         memoria._store = SqliteStore(conn)
         memoria._store.setup()
 
     def tearDown(self):
-        memoria._store = self._antigo
+        memoria._store = self._store_antigo
+        super().tearDown()
 
-    def test_bloco_mostra_a_confianca_e_so_o_dominio_certo(self):
-        memoria._store.put(("strategies", "dom_a_md"), "default", {"kind": "Estrategias", "content": {
-            "boas": [{"texto": "Agregar o custo por site, filtrando aprovados", "n": 3, "usuarios": ["a", "b"], "ultima": "2026-10-01"}],
-            "evitar": [{"texto": "Somar custo unitário como total", "n": 1, "usuarios": ["a"], "ultima": "2026-10-01"}],
-        }})
-        bloco = memoria.bloco_estrategias("dom_a.md")
-        self.assertIn("- Agregar o custo por site, filtrando aprovados (2 usuários)", bloco)
-        self.assertIn("- Somar custo unitário como total (1 usuário)", bloco)
-        self.assertIn("o dominio.md e as lições confirmadas valem mais", bloco)
-        self.assertIn("nunca resultados", bloco)
-        self.assertEqual(memoria.bloco_estrategias("dom_b.md"), "")
+    def _extrai(self, ficha, msgs):
+        ex = memoria._Extrator.__new__(memoria._Extrator)
+        ex._llm = self._LLMFalso(memoria.MudancasMemoria(raciocinio="teste", fichas=[ficha]))
+        ex._extrair(msgs, "321", "dom.md", "321_s1")
 
-
-class EstrategiaExigeSinal(unittest.TestCase):
-    """Estratégia só entra com um 👍/👎 na janela, e a lição vence a estratégia igual."""
-
-    COM_SINAL = [{"role": "user", "content": "Qual o custo?"},
-                 {"role": "assistant", "content": "Custo por site... " + feedback.MARCA_BOA}]
-    SO_CONTEXTO = [{"role": "user", "content": "[CONTEXTO, já processado] Qual o custo?"},
-                   {"role": "assistant", "content": "[CONTEXTO, já processado] Custo... " + feedback.MARCA_BOA}]
-    SEM_SINAL = [{"role": "user", "content": "Qual o custo?"}, {"role": "assistant", "content": "Custo por site..."}]
-
-    def test_sem_sinal_na_janela_a_estrategia_cai(self):
-        ops = [_est("estrategia_boa", "Agregar por site")]
-        self.assertEqual(memoria.validar_estrategias(ops, self.SEM_SINAL, True), [])
-        self.assertEqual(memoria.validar_estrategias(ops, self.SO_CONTEXTO, True), [])  # sinal já processado
-
-    def test_com_sinal_e_usuario_a_estrategia_passa(self):
-        ops = [_est("estrategia_boa", "Agregar por site")]
-        self.assertEqual(memoria.validar_estrategias(ops, self.COM_SINAL, True), ops)
-        self.assertEqual(memoria.validar_estrategias(ops, self.COM_SINAL, False), [])  # sem usuário
-
-    def test_so_a_acao_adicionar_e_no_maximo_tres(self):
-        ops = [_est("estrategia_boa", f"abordagem {i}") for i in range(5)]
-        ops.append(Operacao(destino="estrategia_evitar", acao="remover", antigo="x"))
-        validas = memoria.validar_estrategias(ops, self.COM_SINAL, True)
-        self.assertEqual(len(validas), 3)
-        self.assertTrue(all(o.acao == "adicionar" for o in validas))
-
-    def test_a_mesma_frase_em_licao_e_estrategia_fica_so_na_licao(self):
-        frase = "Para custo, considerar apenas registros com status aprovado"
-        ops = memoria._sem_duplicata_entre_destinos([
-            _est("estrategia_evitar", frase + "."),
-            Operacao(destino="licao_verificada", acao="adicionar", novo=frase),
-        ])
-        self.assertEqual([o.destino for o in ops], ["licao_verificada"])
-
-    def test_estrategia_nao_chega_ao_aplicador_dos_outros_documentos(self):
-        lic, pref, perfil, conv = aplicar_operacoes([_est("estrategia_boa", "Agregar por site")], {}, {}, {}, {}, True)
-        self.assertEqual((lic["verificadas"], pref["preferencias"], conv["convencoes"]), ([], [], []))
+    def test_cria_e_depois_atualiza_a_ficha_do_episodio(self):
+        self._extrai(memoria.FichaAnalise(titulo="Custo de mão de obra por site", funcionou="soma por site"),
+                     FichasValidacao.COM_ANALISE)
+        [ficha] = fichas.da_sessao("321_s1", "dom.md")
+        self._extrai(memoria.FichaAnalise(ficha_id=ficha["id"], titulo="Custo de mão de obra por site",
+                                          falhou="Somou o custo unitário como total", avaliacao="corrigida"),
+                     [{"role": "user", "content": "Esse total está estranho, refaz."},
+                      {"role": "assistant", "content": "Refeito."}])
+        linhas = fichas.da_sessao("321_s1", "dom.md")
+        self.assertEqual(len(linhas), 1)
+        self.assertEqual(linhas[0]["avaliacao"], "corrigida")
 
 
-class PromptDoExtratorUnico(unittest.TestCase):
-    def test_regras_das_estrategias_estao_no_prompt(self):
-        for trecho in ("NUNCA números", "ERRO NÃO É PEDIDO DE OUTRO RECORTE",
-                       "Evitar <abordagem rejeitada>; em vez disso", "texto EXATO",
-                       "SÓ existem quando há uma marca", "NÃO repita como estratégia"):
+class PromptDoExtrator(unittest.TestCase):
+    def test_regras_das_fichas_estao_no_prompt(self):
+        for trecho in ("FICHAS DE ANÁLISE", "ATUALIZE-a", "NUNCA números", "ERRO NÃO É PEDIDO DE OUTRO RECORTE",
+                       "não é lição: vai para a ficha da análise", "fichas_desta_sessao",
+                       "VALE O ÚLTIMO SINAL", "MANTENHA a avaliacao que a ficha já tinha",
+                       "conferido após contestação", "falhou: SÓ uma abordagem que de fato estava errada"):
             with self.subTest(trecho=trecho):
                 self.assertIn(trecho, memoria.INSTRUCOES)
+        self.assertNotIn("estrategia", memoria.INSTRUCOES)
+        self.assertNotIn("licao_hipotese", memoria.INSTRUCOES)
 
-    def test_destinos_de_estrategia_existem_no_schema_e_o_vertex_o_aceita(self):
-        self.assertIn("estrategia_boa", str(Operacao.model_json_schema()))
+    def test_o_vertex_aceita_o_schema_com_as_fichas(self):
+        self.assertIn("FichaAnalise", str(MudancasMemoria.model_json_schema()))
         modelo = _modelo(agent_multi._chat_vertex_with_thinking_level()).bind_tools([MudancasMemoria])
         modelo.bound._prepare_request_gemini([HumanMessage("x")], **modelo.kwargs)
 
@@ -491,7 +538,6 @@ class AvaliacaoComoSinal(unittest.TestCase):
         envio = memoria._executor.envios[-1]
         self.assertEqual(envio["thread_id"], self.sessao)  # substitui a extração pendente da sessão
         self.assertIn(feedback.MARCA_BOA, " ".join(m["content"] for m in envio["payload"]["messages"]))
-        self.assertTrue(feedback.tem_sinal(envio["payload"]["messages"]))
 
     def test_turno_ja_extraido_volta_a_janela_com_dois_turnos_de_contexto(self):
         memoria._extraidos[self.sessao] = 3  # tudo já foi extraído
@@ -501,7 +547,6 @@ class AvaliacaoComoSinal(unittest.TestCase):
         self.assertTrue(msgs[0]["content"].startswith("[CONTEXTO"))      # o anterior é contexto
         self.assertFalse(msgs[2]["content"].startswith("[CONTEXTO"))     # o avaliado conta como novo
         self.assertFalse(msgs[4]["content"].startswith("[CONTEXTO"))     # e o que veio depois também
-        self.assertTrue(feedback.tem_sinal(msgs))
 
     def test_avaliar_o_ultimo_turno_ja_extraido_nao_perde_o_sinal(self):
         memoria._extraidos[self.sessao] = 3
@@ -529,15 +574,6 @@ class AvaliacaoComoSinal(unittest.TestCase):
         chave, texto = guardar.call_args[0][1:]
         self.assertEqual(chave, feedback.inicio_comparavel("Refeito só com aprovados."))
         self.assertIn("executar_graphql", texto)
-
-
-class SinalNaJanela(unittest.TestCase):
-    def test_tem_sinal_ignora_o_que_e_contexto_ou_so_do_usuario(self):
-        marca = feedback.MARCA_RUIM
-        self.assertTrue(feedback.tem_sinal([{"role": "assistant", "content": "resposta " + marca}]))
-        self.assertFalse(feedback.tem_sinal([{"role": "assistant", "content": "[CONTEXTO, já processado] r " + marca}]))
-        self.assertFalse(feedback.tem_sinal([{"role": "user", "content": "digitei " + marca}]))
-        self.assertFalse(feedback.tem_sinal([]))
 
 
 class BancoDeAvaliacoes(unittest.TestCase):
