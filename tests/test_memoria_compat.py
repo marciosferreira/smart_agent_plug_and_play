@@ -438,6 +438,14 @@ class FichasArmazenamentoEBusca(_BancoTemporario):
         self.assertIsNone(fichas.ficha_do_usuario("0" * 8, "321", "dom.md"))
         self.assertIsNone(fichas.ficha_do_usuario(minha[:8], "", "dom.md"))
 
+    def test_a_tool_de_busca_diz_ao_modelo_que_a_conversa_completa_pode_ser_relida(self):
+        # a descrição é o que o modelo lê ao decidir chamar a tool
+        descricao = agent_multi.buscar_analises_anteriores.description
+        self.assertIn("recuperar_conversa_anterior", descricao)
+        self.assertIn("ref", descricao)
+        self.assertIn("recuperar_conversa_anterior", agent_multi.recuperar_conversa_anterior.name)
+        self.assertIn("buscar_analises_anteriores", agent_multi.recuperar_conversa_anterior.description)
+
     def test_sem_ficha_propria_o_orquestrador_nao_e_mandado_reler_conversa(self):
         self._salva("Custo por site", user="999", sessao="999_s")
         self.assertNotIn("recuperar_conversa_anterior", fichas.texto_para_orquestrador("custo por site", "dom.md", "321"))

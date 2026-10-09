@@ -335,9 +335,9 @@ def texto_para_orquestrador(consulta: str, dominio: str, user_id: str, k: int = 
     sua = any(user_id and f.get("user_id") == user_id for f in achadas)
     return (
         f"Usuário atual: {user_id or 'não identificado'}. Fichas de análises parecidas, da mais "
-        "para a menos parecida. " + _REGRAS + " " + _LEITURA + " Para os valores, refaça a "
-        "análise com consultar_analista."
-        + (" Para reler a conversa de uma ficha SUA, com as respostas e tabelas daquele dia, chame "
-           "recuperar_conversa_anterior com a ref dela." if sua else "")
+        "para a menos parecida. " + _REGRAS + " " + _LEITURA
+        + (" Para rever a conversa de uma ficha SUA, com as perguntas, respostas e valores daquele "
+           "dia, chame recuperar_conversa_anterior com a ref dela." if sua else "")
+        + " Para o valor de hoje, refaça a análise com consultar_analista."
         + "\n" + formatar(achadas, user_id, com_conversa=True)
     )

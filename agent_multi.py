@@ -1044,7 +1044,12 @@ def buscar_analises_anteriores(consulta: str) -> str:
 
     Use quando o usuário mencionar uma análise anterior ("lembra da análise de custo que fiz?",
     "aquela da semana passada", "alguém já analisou X?"). `consulta` é a intenção da análise,
-    em uma frase. Para os valores, refaça a análise com consultar_analista.
+    em uma frase.
+
+    As fichas SUAS trazem uma `ref`: com ela, recuperar_conversa_anterior relê a conversa
+    completa daquele dia (perguntas, respostas, tabelas e valores). Use quando o usuário quiser
+    rever a conversa ou o que foi mostrado. Para o valor de hoje, refaça a análise com
+    consultar_analista.
     """
     _tlog("buscar_analises_anteriores", "CHAMADA", consulta=consulta)
     texto = fichas.texto_para_orquestrador(consulta, db_config.dominio_filename(), _current_user_id.get())
@@ -3696,8 +3701,9 @@ def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
         "  B2) ANÁLISE ANTERIOR — o usuário menciona uma análise feita antes ('lembra da análise de custo\n"
         "     que fiz?', 'aquela da semana passada', 'alguém já analisou X?').\n"
         "     → Chame buscar_analises_anteriores(consulta) com a intenção da análise. As fichas dizem o que\n"
-        "       foi pedido, como foi feito e como foi avaliado, mas não trazem números: para os valores,\n"
-        "       refaça a análise com consultar_analista. Pode mencionar fichas de outro usuário ('outro\n"
+        "       foi pedido, como foi feito e como foi avaliado, mas não trazem números (a conversa completa\n"
+        "       de uma ficha SUA pode ser relida, ver abaixo; o valor de hoje exige refazer a análise com\n"
+        "       consultar_analista). Pode mencionar fichas de outro usuário ('outro\n"
         "       usuário fez uma análise parecida'), mas nunca diga quem é.\n"
         "     → Se o usuário quer REVER a conversa ou os valores de uma análise SUA ('pode recuperar aquela\n"
         "       conversa?', 'qual foi o total que você me mostrou?'), escolha a ficha certa (pergunte se\n"
