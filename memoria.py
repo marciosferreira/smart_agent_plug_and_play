@@ -44,7 +44,8 @@ Fluxo no agent_multi.py:
 
 Variáveis de ambiente:
   MEMORIA_ATIVA              "0" desliga leitura e extração (padrão: ligada)
-  MEMORIA_DELAY_SEGUNDOS     espera depois do último turno antes de extrair (padrão: 30)
+  MEMORIA_DELAY_SEGUNDOS     espera depois do último turno antes de extrair (padrão: 120)
+  MEMORIA_MAX_PENDENTES      turnos ainda não extraídos que dispensam a espera (padrão: 2)
   MEMORIA_DEBUG              "1" loga o payload enviado ao extrator
   THINKING_LEVEL_MEMORIA     nível de raciocínio do extrator (padrão: medium; ver init_multi_agent)
 """
@@ -99,9 +100,16 @@ def ativa() -> bool:
 
 def _delay() -> int:
     try:
-        return int(float(os.getenv("MEMORIA_DELAY_SEGUNDOS", "30")))
+        return int(float(os.getenv("MEMORIA_DELAY_SEGUNDOS", "120")))
     except ValueError:
-        return 30
+        return 120
+
+
+def _teto_pendentes() -> int:
+    try:
+        return max(1, int(float(os.getenv("MEMORIA_MAX_PENDENTES", "2"))))
+    except ValueError:
+        return 2
 
 
 def _seg(valor: str) -> str:
@@ -1077,14 +1085,20 @@ def _enviar(sessao: str, user_id: str, dominio: str, turnos: list[dict], base: i
         or any(_DECLARA_REGRA.search(t["pergunta"]) for t in janela[n_contexto:])
     ):
         return
-    logger.info("[memoria] agendando extração (sessão %s, %d turnos na janela)", sessao, len(janela))
+    # A espera (debounce) deixa a pergunta, a contestação e a refeitura chegarem juntas ao
+    # extrator, mas numa conversa sem pausas ela adiaria a extração para sempre e os turnos
+    # sairiam da janela: com turnos demais pendentes, extrai já.
+    pendentes = base + len(turnos) - ja
+    espera = 0 if pendentes >= _teto_pendentes() else _delay()
+    logger.info("[memoria] agendando extração (sessão %s, %d turnos na janela, %d pendentes, em %ds)",
+                sessao, len(janela), pendentes, espera)
     fut = _executor.submit(
         {
             "messages": _mensagens(janela, n_contexto),
             "_meta": {"sessao": sessao, "n_abs": base + len(turnos), "user_id": user_id, "dominio": dominio},
         },
         config={"configurable": {}},
-        after_seconds=_delay(),
+        after_seconds=espera,
         thread_id=sessao,
     )
     _futuros[:] = [f for f in _futuros if not f.done()]
@@ -1121,7 +1135,7 @@ def avaliar_resposta(session_id: str, user_id: str, dominio: str, inicio_respost
     """O usuário clicou em 👍 (`up`) ou 👎 (`down`) numa resposta. É um sinal de reforço para o
     extrator único: o turno é marcado e a extração da sessão é reagendada com ele na janela (e os
     dois anteriores como contexto), para o extrator decidir, olhando a conversa toda, o que há a
-    reforçar. Se o usuário seguir conversando antes dos 30 s de espera, a extração seguinte
+    reforçar. Se o usuário seguir conversando antes da espera, a extração seguinte
     absorve esta (mesmo thread_id), já com as mensagens que vêm depois. Devolve True se achou o
     turno em memória; senão (muito antigo, ou depois de um restart) a avaliação só fica no banco."""
     if not ativa() or _store is None or _executor is None or not user_id or nota not in ("up", "down"):

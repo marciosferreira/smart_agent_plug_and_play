@@ -9,6 +9,7 @@ dos blocos injetados nos prompts. Se um upgrade quebrar algo, repita também uma
 real com o Vertex (ver "Limites conhecidos" em ARQUITETURA.md).
 """
 import base64
+import os
 import unittest
 from importlib.metadata import version
 
@@ -498,7 +499,7 @@ class AvaliacaoComoSinal(unittest.TestCase):
         def submit(self, payload, config=None, after_seconds=0, thread_id=None):
             from concurrent.futures import Future
 
-            self.envios.append({"payload": payload, "thread_id": thread_id})
+            self.envios.append({"payload": payload, "thread_id": thread_id, "espera": after_seconds})
             return Future()
 
     def setUp(self):
@@ -554,6 +555,22 @@ class AvaliacaoComoSinal(unittest.TestCase):
         msgs = memoria._executor.envios[-1]["payload"]["messages"]
         self.assertFalse(msgs[-1]["content"].startswith("[CONTEXTO"))
         self.assertIn(feedback.MARCA_RUIM, msgs[-1]["content"])
+
+    def test_a_espera_so_e_dispensada_com_turnos_demais_pendentes(self):
+        from unittest import mock
+
+        with mock.patch.dict("os.environ", {}, clear=False):
+            for var in ("MEMORIA_DELAY_SEGUNDOS", "MEMORIA_MAX_PENDENTES"):
+                os.environ.pop(var, None)
+            lista = memoria._turnos[self.sessao]
+            memoria._turnos[self.sessao] = lista[:1]
+            memoria._enviar(self.sessao, "321", "dom.md", memoria._turnos[self.sessao], 0)
+            self.assertEqual(memoria._executor.envios[-1]["espera"], 120)   # 1 pendente: espera
+            memoria._enviar(self.sessao, "321", "dom.md", lista[:2], 0)
+            self.assertEqual(memoria._executor.envios[-1]["espera"], 0)     # 2 pendentes: já
+            memoria._extraidos[self.sessao] = 2                             # os dois já foram extraídos
+            memoria._enviar(self.sessao, "321", "dom.md", lista[:3], 0)
+            self.assertEqual(memoria._executor.envios[-1]["espera"], 120)   # só 1 pendente de novo
 
     def test_nao_agenda_quando_nao_ha_o_que_marcar(self):
         self.assertFalse(self._avalia("resposta que não está aqui", "down"))
