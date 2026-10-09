@@ -29,7 +29,7 @@ Este documento descreve como cada componente foi construído e por que as decis�
 | `db.py` | Banco local do app (`mfg.db`): criação e migração das tabelas de tarefas, painéis, ordem, auditoria, sessão×domínio, avaliações das respostas e resumo da abordagem |
 | `memoria.py` | Memória do agente: uma extração em background (chamada estruturada ao LLM, agendada pelo `ReflectionExecutor` do LangMem) que mantém lições do banco, convenções, preferências, perfil do usuário e as fichas de análise no `mfg.db`, e os blocos injetados nos prompts (ver [Memória do agente](#memória-do-agente--o-que-ele-aprende-entre-sessões)) |
 | `feedback.py` | Funções puras da avaliação das respostas (👍 e 👎): acham a resposta avaliada no checkpoint, dizem se é uma resposta de dados e normalizam o começo do texto com que o front a identifica |
-| `fichas.py` | Fichas de análise, a memória de episódios: embeddings do Vertex (`gemini-embedding-001`), gravação, busca por similaridade de cosseno com `numpy` e o texto injetado no analista e devolvido pela tool `buscar_analises_anteriores` |
+| `fichas.py` | Fichas de análise, a memória de episódios: embeddings do Vertex (`gemini-embedding-001`), gravação, busca por similaridade de cosseno com `numpy` o texto injetado no analista e devolvido pela tool `buscar_analises_anteriores`, e a leitura da conversa de uma ficha (tool `recuperar_conversa_anterior`) |
 | `tests/` | Testes offline (sem rede e sem LLM) da memória e das avaliações: `.venv/Scripts/python -m unittest discover -s tests`. Trava as versões validadas das bibliotecas, confere que o Vertex aceita o schema da saída do extrator, e cobre a mesclagem das operações, as fichas de análise (validação, gravação, busca com um embedding de teste e a privacidade dos ids), os blocos injetados nos prompts, o banco das avaliações e o bypass de `thought_signature` |
 | `chart_store.py` | Artefatos (gráficos, PDFs, Excels) e alertas de threshold, também em `mfg.db` |
 | `scheduler/daemon.py` | Loop do agendador e execução das tarefas (retry, timeout, relatórios) |
@@ -267,6 +267,7 @@ Usuário (voz ou texto, com recortes de tela opcionais)
         ├── get_current_datetime(), get_dashboard_charts(), ver_grafico()
         ├── rag_dominio(), rag_capacidades(), rag_arquitetura(), rag_dados()
         ├── buscar_analises_anteriores()  → fichas de análises parecidas já feitas
+        ├── recuperar_conversa_anterior() → relê a conversa de uma ficha SUA (perguntas, respostas e tabelas daquele dia)
         ├── gerar_pdf(), gerar_excel()
         ├── criar_tarefa_agendada()       → pipeline determinístico de criação de tarefa
         ├── editar_tarefa_agendada()      → pipeline determinístico de edição
@@ -302,6 +303,10 @@ Daemon de agendamento (loop asyncio + threads, no mesmo processo do FastAPI)
 
 O orquestrador **não sabe analisar dados** — ele só sabe a quem perguntar. O sub-agente **não tem acesso ao histórico de conversa** — recebe só o pedido pontual delegado (mais o último script executado na sessão, como referência para ajustes, e o que a [memória do agente](#memória-do-agente--o-que-ele-aprende-entre-sessões) aprendeu: lições do banco e preferências do usuário). Essa separação de responsabilidades é deliberada: cada camada faz uma coisa e faz bem.
 
+### A data de hoje
+
+Os dois prompts (orquestrador e analista) começam com "Data de hoje: dd/mm/aaaa (dia da semana)". A linha é calculada **a cada chamada ao LLM** (`_linha_data_de_hoje`), e não na montagem dos prompts, que acontece uma vez na subida do app: uma data fixada ali ficaria velha no dia seguinte. Os períodos relativos ("ontem", "último quarter", "últimos 30 dias") não dependem do modelo fazer a conta: `consultar_analista(periodo=...)` chama `calcular_periodo` em código e entrega ao analista o `[PERÍODO: from=… to=…]` pronto; períodos do domínio ("FQ1") vêm da seção `## Períodos` do pack. `get_current_datetime` responde quando o usuário pergunta a data ou a hora, e também traz o dia da semana.
+
 ### Roteamento do orquestrador
 
 O prompt do orquestrador classifica cada mensagem em uma de seis categorias e segue só o fluxo dela:
@@ -310,7 +315,7 @@ O prompt do orquestrador classifica cada mensagem em uma de seis categorias e se
 | --- | --- | --- |
 | A | Consulta pontual de dados | `consultar_analista(periodo=..., tipo=...)`. O período vai em linguagem natural e é resolvido dentro da tool; `tipo` é `tabela` (padrão), `grafico` ou `ambos` — "mostre" e "compare" não são pedido de gráfico |
 | B | Pergunta conceitual (o que é X, como se calcula Y) | Tools `rag_*`, sem buscar dados |
-| B2 | Menção a uma análise anterior ("lembra da análise que fiz?", "alguém já analisou X?") | `buscar_analises_anteriores`; para os valores, refaz com `consultar_analista` |
+| B2 | Menção a uma análise anterior ("lembra da análise que fiz?", "alguém já analisou X?") | `buscar_analises_anteriores`; para rever a conversa ou os valores de uma ficha **sua**, `recuperar_conversa_anterior(ref)`; para os valores de hoje, refaz com `consultar_analista` |
 | C | Agendamento (criar, editar, listar, pausar, apagar) | `criar_tarefa_agendada`, `editar_tarefa_agendada` ou `gerenciar_agenda` |
 | D | Pergunta simples (data, hora, saudação) | Responde direto |
 | E | Pergunta sobre o que está na tela (texto ou imagem anexada) | `get_dashboard_charts()` e, se preciso, `rag_dominio()` |
@@ -447,6 +452,7 @@ Os documentos ficam na tabela `store` do `SqliteStore` do LangGraph, dentro do p
   - **Como o analista lê as fichas.** O bloco diz que elas descrevem como análises parecidas foram feitas e avaliadas, sem números, e que valem menos que o pedido atual, o `dominio.md` e as lições. Explica a avaliação ("👍" é abordagem aprovada; "contestada e corrigida" quer dizer que o "Funcionou" já é a versão corrigida; "👎" é alerta, não receita; "sem avaliação" não confirma nem desmente) e o uso: evitar o que está em "Falhou", a não ser que o pedido atual peça; dizer na resposta qual escolha fez quando ela já foi contestada antes; e, como a ficha pode ser de um pedido só parecido, aproveitar o método e seguir o recorte do pedido atual. A tool do orquestrador repete a leitura da avaliação, mas não o modo de usar, que é de quem refaz a análise.
   - **De quem é a ficha.** O bloco traz o id do usuário atual e marca cada ficha como "sua" ou "de outro usuário (A)", "(B)"... O id real de outro usuário **nunca chega ao modelo**, então não há como ele revelá-lo; o prompt também manda não dizer quem é. Fichas de outros usuários podem ser aproveitadas e mencionadas ("uma análise parecida feita por outro usuário").
   - **Tool do orquestrador.** `buscar_analises_anteriores(consulta)` (categoria B2 do roteamento) devolve até 10 fichas parecidas, com a data da conversa nas do próprio usuário. Para "lembra da análise que fiz?" ou "alguém já analisou X?". As fichas não trazem números: para os valores, o orquestrador refaz a análise com `consultar_analista`.
+  - **Reler a conversa de uma ficha.** `recuperar_conversa_anterior(ref, turno=0)` devolve a conversa em que uma ficha **sua** foi feita: as perguntas e as respostas finais daquele dia, com as tabelas e os valores que o usuário viu. O índice da busca são as próprias fichas: `buscar_analises_anteriores` acha a ficha por embedding e mostra, nas suas, a `ref` (os 8 primeiros caracteres do id); a tool lê o `session_id` da ficha e busca a conversa no checkpointer por chave, sem varrer nada. **A checagem de dono é em código** (`fichas.ficha_do_usuario`): a ref precisa ser de uma ficha do usuário atual e do domínio ativo, e o modelo nunca informa um `session_id`. Ref de outro usuário, de outro domínio ou inexistente dão a mesma resposta ("Não encontrei essa conversa entre as suas análises"), então não dá para sondar conversas alheias; fichas de outros usuários nem mostram ref. Conversa que cabe em `MEMORIA_CONVERSA_MAX_CHARS` vem inteira; uma maior vem como **índice** (um turno por linha, com a pergunta e o começo da resposta, os últimos 60 se houver mais), e o orquestrador pede `turno=N` para ler o turno inteiro (uma resposta enorme perde o meio e mantém o começo e o fim, onde ficam os blocos de dados). Gráficos e arquivos da conversa original aparecem só como marcador. **Limite:** o que se recupera é o que o usuário viu no chat; os DataFrames do analista ficam só em memória e não são persistidos. O texto da tool manda citar a data e oferecer refazer a análise se o usuário quiser o valor atual. Conversa apagada ou sem ficha (anterior a esta funcionalidade, ou sem consulta de dados) não é encontrada.
   - **Sem embeddings** (Vertex indisponível), as fichas são gravadas sem vetor e a busca não devolve nada; o chat segue normal.
 - **`SqliteStore` e threads.** O store usa uma conexão única e exige autocommit (`isolation_level=None`); o extrator e o chat leem e gravam o store em threads diferentes, então `_SqliteStoreSeguro` serializa as operações com um lock.
 - **Shutdown.** O worker do `ReflectionExecutor` não é daemon: o `main.py` chama `memoria.encerrar()` no evento de shutdown, senão o processo não termina.
@@ -909,6 +915,7 @@ As variáveis podem vir do ambiente ou de um arquivo `.env` na raiz (carregado n
 | `EMBEDDING_LOCATION` | Região do Vertex para os embeddings (o `LOCATION` do chat pode ser `global`) | `us-central1` |
 | `MEMORIA_FICHAS_K` | Quantas fichas parecidas entram no prompt do analista | `5` |
 | `MEMORIA_FICHAS_LIMIAR` | Similaridade mínima (cosseno) para uma ficha entrar | `0.70` |
+| `MEMORIA_CONVERSA_MAX_CHARS` | Tamanho a partir do qual `recuperar_conversa_anterior` devolve um índice de turnos em vez da conversa inteira | `8000` |
 | `DEBUG_TOOLS` | `1` loga o payload completo de cada tool call do agente | `0` |
 | `DEBUG_TOOLS_TRUNCATE` | Com `DEBUG_TOOLS=1`, trunca cada campo logado nesse nº de caracteres (0 = não trunca) | `0` |
 

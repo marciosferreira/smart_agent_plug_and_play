@@ -305,6 +305,7 @@ _TOOL_LABELS: dict[str, str] = {
     "rag_arquitetura":         "📚 Consultando base de conhecimento (arquitetura)",
     "rag_dados":               "📚 Consultando base de conhecimento (dados)",
     "buscar_analises_anteriores": "🧠 Consultando análises anteriores",
+    "recuperar_conversa_anterior": "📜 Relendo uma conversa anterior",
     "get_current_datetime":    "🕐 Verificando data e hora",
     "gerar_pdf":               "📄 Gerando relatório PDF",
     "gerar_excel":             "📊 Gerando planilha Excel",
@@ -348,6 +349,7 @@ _LABEL_TRANSLATIONS: dict[str, dict[str, str]] = {
     "🔢 Processando e analisando dados": {"en": "🔢 Processing and analyzing data", "zh": "🔢 正在处理和分析数据"},
     "🔍 Delegando ao sub-agente analista": {"en": "🔍 Delegating to the analyst sub-agent", "zh": "🔍 正在委派给分析子代理"},
     "🧠 Consultando análises anteriores": {"en": "🧠 Looking up previous analyses", "zh": "🧠 正在查询以往的分析"},
+    "📜 Relendo uma conversa anterior": {"en": "📜 Re-reading a previous conversation", "zh": "📜 正在重读之前的对话"},
     "📚 Consultando base de conhecimento (domínio)": {"en": "📚 Consulting knowledge base (domain)", "zh": "📚 正在查询知识库（业务领域）"},
     "📚 Consultando base de conhecimento (capacidades)": {"en": "📚 Consulting knowledge base (capabilities)", "zh": "📚 正在查询知识库（功能）"},
     "📚 Consultando base de conhecimento (arquitetura)": {"en": "📚 Consulting knowledge base (architecture)", "zh": "📚 正在查询知识库（架构）"},
@@ -806,6 +808,20 @@ def _idioma_nome(lang: str) -> str:
     return _IDIOMA_NOME.get(lang) or _IDIOMA_NOME[db_config.idioma_default()]
 
 
+_DIAS_DA_SEMANA = ("segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo")
+
+
+def _data_de_hoje() -> str:
+    """"09/10/2026 (sexta-feira)". Calculada a cada chamada ao LLM: os prompts são montados uma
+    vez, no início do app, e uma data fixada ali ficaria velha no dia seguinte."""
+    agora = datetime.now()
+    return f"{agora:%d/%m/%Y} ({_DIAS_DA_SEMANA[agora.weekday()]})"
+
+
+def _linha_data_de_hoje() -> str:
+    return f"Data de hoje: {_data_de_hoje()}\n\n"
+
+
 def _diretiva_idioma() -> str:
     """Linha injetada no topo de cada system prompt (orquestrador/sub-agente/scheduler)
     dizendo em que idioma responder. As instruções do prompt em si continuam só em
@@ -1037,6 +1053,27 @@ def buscar_analises_anteriores(consulta: str) -> str:
 
 
 @tool
+def recuperar_conversa_anterior(ref: str, turno: int = 0) -> str:
+    """Relê a conversa em que uma análise SUA foi feita, com as perguntas e as respostas (tabelas
+    e valores) daquele dia. `ref` é a referência que buscar_analises_anteriores mostra nas
+    fichas suas ("ref: a3f9c21b"); fichas de outros usuários não têm ref e não podem ser lidas.
+
+    Use depois de buscar_analises_anteriores, quando o usuário quiser rever o que foi dito ou
+    os valores de uma análise anterior ("pode recuperar aquela conversa?"). Se a conversa for
+    longa, vem um índice de turnos: chame de novo com `turno=N` para ler o turno inteiro.
+    """
+    _tlog("recuperar_conversa_anterior", "CHAMADA", ref=ref, turno=turno)
+    ficha = fichas.ficha_do_usuario(ref, _current_user_id.get(), db_config.dominio_filename())
+    if not ficha:
+        return "Não encontrei essa conversa entre as suas análises."
+    estado = _checkpointer.get({"configurable": {"thread_id": ficha["session_id"]}}) if _checkpointer else None
+    mensagens = (estado or {}).get("channel_values", {}).get("messages", [])
+    texto = fichas.texto_da_conversa(ficha, mensagens, turno or None)
+    _tlog("recuperar_conversa_anterior", "RETORNO", chars=len(texto))
+    return texto
+
+
+@tool
 def rag_dados() -> str:
     """Retorna a referência técnica de dados do banco configurado: schema completo
     (tabelas, colunas, tipos, descrições) e as chaves de junção entre tabelas.
@@ -1201,7 +1238,8 @@ def get_current_datetime() -> str:
     Use esta tool sempre que o usuário perguntar que horas são,
     qual é a data de hoje, ou qualquer variação dessas perguntas.
     """
-    result = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    agora = datetime.now()
+    result = f"{agora:%d/%m/%Y %H:%M:%S} ({_DIAS_DA_SEMANA[agora.weekday()]})"
     _tlog("get_current_datetime", "RETORNO", resultado=result)
     return result
 
@@ -1902,7 +1940,6 @@ def _build_sub_agent(llm):
     nome_tool_dados = tool_dados.name
     tools_extras = [executar_graphql_agregado, executar_graphql_schema] if modo == "graphql" else []
 
-    hoje = datetime.now().strftime("%d/%m/%Y")
     ident = db_config.identidade()
     regras_dominio = db_config.get_secao("Regras do agente")
     bloco_regras = (
@@ -1923,7 +1960,6 @@ def _build_sub_agent(llm):
     )
 
     SUB_SYSTEM_PROMPT = (
-        f"Data de hoje: {hoje}\n\n"
         f"Você é um sub-agente especializado em análise de dados do sistema "
         f"{ident['nome']} — {ident['descricao']}\n\n"
         "## Fluxo OBRIGATÓRIO — sem exceção\n"
@@ -2192,7 +2228,7 @@ def _build_sub_agent(llm):
             + memoria.bloco_preferencias(_uid, _dom)
         )
         msgs = [SystemMessage(
-            content=_diretiva_idioma() + SUB_SYSTEM_PROMPT + bloco_dominio + bloco_memoria + extra
+            content=_diretiva_idioma() + _linha_data_de_hoje() + SUB_SYSTEM_PROMPT + bloco_dominio + bloco_memoria + extra
         )] + list(state["messages"])
         _tlog("sub_agente", "LLM INVOCADO", mensagens=len(msgs))
         _raise_if_cancelled()
@@ -3662,7 +3698,11 @@ def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
         "     → Chame buscar_analises_anteriores(consulta) com a intenção da análise. As fichas dizem o que\n"
         "       foi pedido, como foi feito e como foi avaliado, mas não trazem números: para os valores,\n"
         "       refaça a análise com consultar_analista. Pode mencionar fichas de outro usuário ('outro\n"
-        "       usuário fez uma análise parecida'), mas nunca diga quem é.\n\n"
+        "       usuário fez uma análise parecida'), mas nunca diga quem é.\n"
+        "     → Se o usuário quer REVER a conversa ou os valores de uma análise SUA ('pode recuperar aquela\n"
+        "       conversa?', 'qual foi o total que você me mostrou?'), escolha a ficha certa (pergunte se\n"
+        "       houver duas parecidas) e chame recuperar_conversa_anterior(ref). Os valores são os do dia da\n"
+        "       conversa: cite a data e ofereça refazer a análise se ele quiser o valor atual.\n\n"
         "  C) AGENDAMENTO — o usuário quer CRIAR, EDITAR, LISTAR, PAUSAR ou DELETAR uma tarefa recorrente.\n"
         "     Palavras-chave obrigatórias: 'agendar', 'todo dia', 'toda semana', 'automaticamente',\n"
         "     'criar tarefa', 'monitor', 'me avise quando', 'editar tarefa [ID]'.\n"
@@ -3868,6 +3908,7 @@ def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
         get_current_datetime, get_dashboard_charts, calcular_periodo, consultar_analista,
         ver_grafico,
         rag_dominio, rag_capacidades, rag_arquitetura, rag_dados, buscar_analises_anteriores,
+        recuperar_conversa_anterior,
         gerar_pdf, gerar_excel,
         gerenciar_agenda,
         criar_tarefa_agendada, editar_tarefa_agendada,
@@ -3884,7 +3925,7 @@ def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
         historico_recente = state["messages"][-(MAX_INTERACOES * 2):]
         _uid, _dom = _current_user_id.get(), db_config.dominio_filename()
         bloco_pref = memoria.bloco_perfil(_uid, _dom) + memoria.bloco_preferencias(_uid, _dom)
-        msgs = [SystemMessage(content=_diretiva_idioma() + ORQ_SYSTEM_PROMPT + bloco_pref)] + historico_recente
+        msgs = [SystemMessage(content=_diretiva_idioma() + _linha_data_de_hoje() + ORQ_SYSTEM_PROMPT + bloco_pref)] + historico_recente
         if _cancelled():
             return _cancelled_reply()
         # Última mensagem do usuário => 1ª chamada do turno (rotear ou responder direto).

@@ -421,6 +421,103 @@ class FichasArmazenamentoEBusca(_BancoTemporario):
         self.assertEqual(fichas.texto_para_orquestrador("assunto sem nada a ver", "vazio.md", "321"),
                          "Nenhuma análise parecida encontrada na memória.")
 
+    def test_so_a_ficha_do_proprio_usuario_tem_ref_e_pode_ser_lida(self):
+        minha = self._salva("Custo por site", user="321")
+        alheia = self._salva("Custo por site", user="999", sessao="999_s")
+        texto = fichas.texto_para_orquestrador("custo por site", "dom.md", "321")
+        self.assertEqual(texto.count("(ref: "), 1)
+        self.assertIn(f"(ref: {minha[:8]})", texto)
+        self.assertNotIn(alheia[:8], texto)
+        self.assertIn("recuperar_conversa_anterior", texto)
+        self.assertEqual(fichas.ficha_do_usuario(minha[:8], "321", "dom.md")["id"], minha)
+        self.assertEqual(fichas.ficha_do_usuario(minha.upper()[:12], "321", "dom.md")["id"], minha)
+        # ref de outro usuário, de outro domínio, curta demais ou inexistente: todas iguais, None
+        self.assertIsNone(fichas.ficha_do_usuario(alheia[:8], "321", "dom.md"))
+        self.assertIsNone(fichas.ficha_do_usuario(minha[:8], "321", "outro.md"))
+        self.assertIsNone(fichas.ficha_do_usuario(minha[:3], "321", "dom.md"))
+        self.assertIsNone(fichas.ficha_do_usuario("0" * 8, "321", "dom.md"))
+        self.assertIsNone(fichas.ficha_do_usuario(minha[:8], "", "dom.md"))
+
+    def test_sem_ficha_propria_o_orquestrador_nao_e_mandado_reler_conversa(self):
+        self._salva("Custo por site", user="999", sessao="999_s")
+        self.assertNotIn("recuperar_conversa_anterior", fichas.texto_para_orquestrador("custo por site", "dom.md", "321"))
+
+    def _conversa(self, n_turnos, tamanho_resposta=50):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        msgs = []
+        for i in range(1, n_turnos + 1):
+            msgs += [HumanMessage(f"Pergunta {i}"), AIMessage("", tool_calls=[{"name": "consultar_analista", "args": {}, "id": f"c{i}"}]),
+                     AIMessage(f"Resposta {i} " + "x" * tamanho_resposta + " ![g](http://x/g.png) [chart:abc]")]
+        return msgs
+
+    def test_conversa_curta_vem_inteira_sem_artefatos(self):
+        ficha = {"titulo": "Custo por site", "criada_em": "2026-10-02 10:00:00"}
+        texto = fichas.texto_da_conversa(ficha, self._conversa(2))
+        self.assertIn("Conversa de 02/10/2026", texto)
+        self.assertIn("Turno 1 [dados]", texto)
+        self.assertIn("Pergunta 2", texto)
+        self.assertIn("Resposta 2", texto)
+        self.assertNotIn("chart:abc", texto)
+        self.assertIn("cite a data", texto)
+
+    def test_conversa_longa_vem_como_indice_e_o_turno_pedido_vem_inteiro(self):
+        ficha = {"titulo": "Custo por site", "criada_em": "2026-10-02 10:00:00"}
+        msgs = self._conversa(30, tamanho_resposta=400)
+        indice = fichas.texto_da_conversa(ficha, msgs)
+        self.assertIn("30 turnos", indice)
+        self.assertIn("turno=N", indice)
+        self.assertIn("30. [dados] Usuário: Pergunta 30", indice)
+        self.assertLess(len(indice), 8000)
+        um = fichas.texto_da_conversa(ficha, msgs, turno=7)
+        self.assertIn("Pergunta 7", um)
+        self.assertIn("Resposta 7", um)
+        self.assertNotIn("Pergunta 8", um)
+        self.assertIn("não existe", fichas.texto_da_conversa(ficha, msgs, turno=31))
+
+    def test_indice_de_conversa_muito_longa_mostra_so_os_ultimos_60(self):
+        ficha = {"titulo": "t", "criada_em": "2026-10-02 10:00:00"}
+        indice = fichas.texto_da_conversa(ficha, self._conversa(100, tamanho_resposta=200))
+        self.assertIn("mostrando os últimos 60", indice)
+        self.assertIn("100. [dados]", indice)
+        self.assertNotIn("\n40. ", indice)
+
+    def test_resposta_enorme_perde_o_meio_e_mantem_o_comeco_e_o_fim(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        resposta = "COMECO " + "m" * 20000 + " FIM-COM-DADOS"
+        texto = fichas.texto_da_conversa({"titulo": "t", "criada_em": "2026-10-02"}, [HumanMessage("p"), AIMessage(resposta)], turno=1)
+        self.assertIn("COMECO", texto)
+        self.assertIn("FIM-COM-DADOS", texto)
+        self.assertIn("trecho do meio omitido", texto)
+        self.assertLess(len(texto), 9000)
+
+    def test_conversa_apagada(self):
+        self.assertIn("não está mais disponível", fichas.texto_da_conversa({"titulo": "t"}, []))
+
+    def test_a_tool_so_le_conversa_de_ficha_do_proprio_usuario(self):
+        from unittest import mock
+
+        minha = self._salva("Custo por site", user="321", sessao="321_s1")
+        alheia = self._salva("Custo por site", user="999", sessao="999_s")
+        chamadas = []
+
+        class _Checkpointer:
+            def get(self, cfg):
+                chamadas.append(cfg["configurable"]["thread_id"])
+                return {"channel_values": {"messages": self_._conversa(1)}}
+
+        self_ = self
+        with mock.patch.object(agent_multi, "_checkpointer", _Checkpointer()), \
+                mock.patch.object(agent_multi.db_config, "dominio_filename", return_value="dom.md"):
+            agent_multi._current_user_id.set("321")
+            ok = agent_multi.recuperar_conversa_anterior.invoke({"ref": minha[:8]})
+            negado = agent_multi.recuperar_conversa_anterior.invoke({"ref": alheia[:8]})
+            inexistente = agent_multi.recuperar_conversa_anterior.invoke({"ref": "0" * 8})
+        self.assertIn("Pergunta 1", ok)
+        self.assertEqual(chamadas, ["321_s1"])  # a sessão de outro usuário nunca é lida
+        self.assertEqual(negado, inexistente)
+
     def test_sem_embeddings_a_ficha_e_gravada_e_a_busca_nao_quebra(self):
         fichas.definir_embedder(None)  # e sem cliente do Vertex nos testes
         self._salva("Custo por site")
@@ -591,6 +688,40 @@ class AvaliacaoComoSinal(unittest.TestCase):
         chave, texto = guardar.call_args[0][1:]
         self.assertEqual(chave, feedback.inicio_comparavel("Refeito só com aprovados."))
         self.assertIn("executar_graphql", texto)
+
+
+class DataDeHojeNosPrompts(unittest.TestCase):
+    """A data não pode ficar fixa no prompt montado na subida do app."""
+
+    def _com_data(self, ano, mes, dia):
+        from datetime import datetime as _dt
+        from unittest import mock
+
+        class _Falso(_dt):
+            @classmethod
+            def now(cls, tz=None):
+                return _dt(ano, mes, dia, 14, 30, 5)
+
+        return mock.patch.object(agent_multi, "datetime", _Falso)
+
+    def test_data_com_dia_da_semana_e_recalculada_a_cada_chamada(self):
+        with self._com_data(2026, 10, 9):
+            self.assertEqual(agent_multi._data_de_hoje(), "09/10/2026 (sexta-feira)")
+            self.assertEqual(agent_multi._linha_data_de_hoje(), "Data de hoje: 09/10/2026 (sexta-feira)\n\n")
+        with self._com_data(2026, 10, 11):  # dois dias depois, sem reconstruir nada
+            self.assertEqual(agent_multi._data_de_hoje(), "11/10/2026 (domingo)")
+
+    def test_a_tool_de_data_e_hora_traz_o_dia_da_semana(self):
+        with self._com_data(2026, 10, 12):
+            self.assertEqual(agent_multi.get_current_datetime.invoke({}), "12/10/2026 14:30:05 (segunda-feira)")
+
+    def test_os_dois_prompts_pegam_a_data_na_hora_e_nao_na_montagem(self):
+        import inspect
+
+        sub, orq = inspect.getsource(agent_multi._build_sub_agent), inspect.getsource(agent_multi._build_orchestrator)
+        for fonte in (sub, orq):
+            self.assertIn("_linha_data_de_hoje()", fonte)
+        self.assertNotIn('"Data de hoje', sub)  # o texto fixo não pode voltar para o prompt montado
 
 
 class BancoDeAvaliacoes(unittest.TestCase):

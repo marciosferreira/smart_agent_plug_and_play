@@ -15,6 +15,9 @@ coexistem, e quem as lê (o analista ou o orquestrador) decide o que aproveitar.
   buscar(consulta, dominio, k)      -> as k fichas mais parecidas com a consulta (cosseno)
   bloco_para_analista(...)          -> texto injetado no prompt do analista
   texto_para_orquestrador(...)      -> resposta da tool buscar_analises_anteriores
+  ficha_do_usuario(ref, ...)        -> a ficha de uma ref, só se for do usuário atual
+  texto_da_conversa(ficha, ...)     -> resposta da tool recuperar_conversa_anterior: a conversa
+                                       da ficha (inteira, ou um índice se for longa)
 
 Privacidade: o prompt recebe o id do usuário atual, para o modelo saber quais fichas são dele.
 As de outros usuários aparecem só como "outro usuário (A)", "(B)"... e o id real nunca chega
@@ -25,16 +28,19 @@ Variáveis de ambiente:
   EMBEDDING_LOCATION       região do Vertex para embeddings (padrão: us-central1)
   MEMORIA_FICHAS_K         fichas injetadas no prompt do analista (padrão: 5)
   MEMORIA_FICHAS_LIMIAR    similaridade mínima (cosseno) para uma ficha entrar (padrão: 0.70)
+  MEMORIA_CONVERSA_MAX_CHARS  tamanho a partir do qual a conversa vem como índice (padrão: 8000)
 """
 from __future__ import annotations
 
 import logging
 import os
+import re
 import uuid
 from datetime import datetime
 
 import numpy as np
 
+import feedback
 from db import fichas_da_sessao as _db_da_sessao
 from db import fichas_do_dominio as _db_do_dominio
 from db import gravar_ficha as _db_gravar
@@ -177,6 +183,76 @@ def _data(texto: str) -> str:
         return ""
 
 
+_TAM_REF = 8
+_ARTEFATOS = re.compile(r"!\[[^\]]*\]\([^)]*\)|\[(?:chart|pdf|excel):[^\]]*\]|\[📥[^\]]*\]\([^)]*\)")
+
+
+def _ref(f: dict) -> str:
+    """Referência curta de uma ficha, que o orquestrador usa para reler a conversa dela."""
+    return (f.get("id") or "")[:_TAM_REF]
+
+
+def ficha_do_usuario(ref: str, user_id: str, dominio: str) -> dict | None:
+    """A ficha de `ref` (o começo do id) se for DESTE usuário e deste domínio; senão None. Uma
+    referência de outro usuário e uma inexistente são indistinguíveis para quem chama."""
+    ref = (ref or "").strip().lower()
+    if not user_id or len(ref) < _TAM_REF - 2:
+        return None
+    achadas = [f for f in _db_do_dominio(dominio) if f.get("user_id") == user_id and f["id"].startswith(ref)]
+    return achadas[0] if len(achadas) == 1 else None
+
+
+def _limite_conversa() -> int:
+    try:
+        return max(1000, int(os.getenv("MEMORIA_CONVERSA_MAX_CHARS", "8000")))
+    except ValueError:
+        return 8000
+
+
+def _cortar(texto: str, n: int) -> str:
+    texto = " ".join((texto or "").split())
+    return texto if len(texto) <= n else texto[: n - 1].rstrip() + "…"
+
+
+def _turno_inteiro(i: int, t: dict, limite: int) -> str:
+    """Pergunta e resposta de um turno. Uma resposta maior que o limite perde o meio: o começo
+    e o fim (onde ficam os blocos de parâmetros e de dados) são o que importa."""
+    resposta = _ARTEFATOS.sub("[gráfico ou arquivo da conversa original]", t.get("resposta") or "(sem resposta)")
+    if len(resposta) > limite:
+        cabeca = limite // 4
+        resposta = resposta[:cabeca] + "\n[... trecho do meio omitido ...]\n" + resposta[-(limite - cabeca):]
+    return f"Turno {i}{' [dados]' if t.get('analista') else ''}\nUsuário: {t.get('usuario', '')}\nAgente: {resposta}"
+
+
+def texto_da_conversa(ficha: dict, mensagens: list, turno: int | None = None) -> str:
+    """Resposta da tool recuperar_conversa_anterior: a conversa em que a ficha foi feita. Se ela
+    couber no limite, vem inteira; senão vem um índice (um turno por linha) e o orquestrador
+    pede os turnos que interessam com `turno`. Os valores são os do dia da conversa."""
+    turnos = feedback.montar_turnos(mensagens)
+    if not turnos:
+        return "A conversa não está mais disponível (pode ter sido apagada)."
+    limite = _limite_conversa()
+    cab = (f"Conversa de {_data(ficha.get('criada_em', ''))}, da análise \"{ficha.get('titulo', '')}\". "
+           "Os valores são os daquele dia: cite a data e, se o usuário quiser o valor de hoje, refaça "
+           "a análise com consultar_analista.\n")
+    if turno:
+        if not 1 <= turno <= len(turnos):
+            return cab + f"O turno {turno} não existe: a conversa tem {len(turnos)} turnos."
+        return cab + _turno_inteiro(turno, turnos[turno - 1], limite)
+    inteira = "\n\n".join(_turno_inteiro(i, t, limite) for i, t in enumerate(turnos, 1))
+    if len(inteira) <= limite:
+        return cab + inteira
+    primeiro = max(1, len(turnos) - 59)
+    indice = "\n".join(
+        f"{i}.{' [dados]' if t.get('analista') else ''} Usuário: {_cortar(t.get('usuario'), 110)} | "
+        f"Agente: {_cortar(_ARTEFATOS.sub('', t.get('resposta') or ''), 110)}"
+        for i, t in enumerate(turnos, 1) if i >= primeiro
+    )
+    aviso = " (mostrando os últimos 60)" if primeiro > 1 else ""
+    return (cab + f"A conversa tem {len(turnos)} turnos e é longa demais para vir inteira{aviso}. Índice:\n"
+            f"{indice}\nPara ler um turno inteiro, chame recuperar_conversa_anterior(ref, turno=N).")
+
+
 def formatar(fichas: list[dict], user_id_atual: str, com_conversa: bool = False) -> str:
     """Uma linha por ficha, dizendo de quem é: "sua" ou "de outro usuário (A)". O id real de
     outro usuário nunca aparece. `com_conversa` acrescenta, nas fichas do próprio usuário, a
@@ -198,7 +274,7 @@ def formatar(fichas: list[dict], user_id_atual: str, com_conversa: bool = False)
         if f.get("falhou"):
             partes.append(f"  Falhou: {f['falhou']}")
         if com_conversa and autor == "sua":
-            partes.append(f"  Feita na conversa de {_data(f.get('criada_em', ''))}.")
+            partes.append(f"  Feita na conversa de {_data(f.get('criada_em', ''))} (ref: {_ref(f)}).")
         linhas.append("\n".join(partes))
     return "\n".join(linhas)
 
@@ -256,8 +332,12 @@ def texto_para_orquestrador(consulta: str, dominio: str, user_id: str, k: int = 
     logger.info("[fichas] busca do orquestrador: %d ficha(s)", len(achadas))
     if not achadas:
         return "Nenhuma análise parecida encontrada na memória."
+    sua = any(user_id and f.get("user_id") == user_id for f in achadas)
     return (
         f"Usuário atual: {user_id or 'não identificado'}. Fichas de análises parecidas, da mais "
         "para a menos parecida. " + _REGRAS + " " + _LEITURA + " Para os valores, refaça a "
-        "análise com consultar_analista.\n" + formatar(achadas, user_id, com_conversa=True)
+        "análise com consultar_analista."
+        + (" Para reler a conversa de uma ficha SUA, com as respostas e tabelas daquele dia, chame "
+           "recuperar_conversa_anterior com a ref dela." if sua else "")
+        + "\n" + formatar(achadas, user_id, com_conversa=True)
     )
