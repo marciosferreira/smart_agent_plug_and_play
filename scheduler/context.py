@@ -110,6 +110,24 @@ class TaskContext:
             where=where, expand=expand, order_by=order_by, limit=limit,
         )
 
+    def pack(self, nome: str, **kwargs) -> "list[dict]":
+        """Chama uma função que o pack do domínio oferece a tarefas e painéis (o dicionário
+        `FUNCOES` em config/<dominio>/ferramentas/__init__.py) e devolve uma lista de dicts.
+        Serve para o que o código do run() não consegue fazer sozinho no sandbox — por
+        exemplo, aplicar um modelo treinado do domínio.
+
+        Exemplo (domínio de alocação):
+            rows = ctx.pack("previsao_proximo_quarter")
+            df = pd.DataFrame(rows)
+        """
+        modulo = db_config.modulo_ferramentas()
+        funcoes = getattr(modulo, "FUNCOES", None) or {}
+        if nome not in funcoes:
+            disponiveis = ", ".join(sorted(funcoes)) or "nenhuma"
+            raise ValueError(f"O domínio ativo não oferece a função '{nome}' (disponíveis: {disponiveis}).")
+        resultado = funcoes[nome](**kwargs)
+        return resultado.to_dict("records") if hasattr(resultado, "to_dict") else resultado
+
     def api(self, path: str) -> any:
         """GET na API local. path deve começar com '/'.
         Retorna o JSON deserializado (dict ou list)."""

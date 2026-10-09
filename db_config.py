@@ -229,6 +229,46 @@ def _resolver_com_fallback(caminho_por_idioma) -> "Path | None":
     return None
 
 
+def pack_dir() -> Path:
+    """Pasta do pack do domínio ativo (config/<dominio>/), com o que não depende de idioma —
+    por exemplo config/<dominio>/ferramentas/, as tools e modelos próprios do domínio."""
+    return CONFIG_DIR / _dominio_slug()
+
+
+_modulos_pack: dict = {}  # (pasta, mtime do __init__.py) → módulo
+
+
+def modulo_ferramentas():
+    """O pacote config/<dominio>/ferramentas/ do domínio ativo, ou None se não existir.
+
+    Carregado com nome próprio (`pack_<slug>_ferramentas`) para os imports relativos entre os
+    módulos do pacote funcionarem sem pôr a pasta no sys.path. Usado pelo agente (tools do
+    analista, via `criar_tools`) e por `ctx.pack` (funções para tarefas e painéis, via
+    `FUNCOES`). Recarregado quando o __init__.py muda. Erros de import sobem para quem chamou.
+    """
+    import importlib.util
+    import sys
+
+    pasta = pack_dir() / "ferramentas"
+    init = pasta / "__init__.py"
+    if not init.exists():
+        return None
+    chave = (str(pasta), init.stat().st_mtime)
+    with _cache_lock:
+        if chave in _modulos_pack:
+            return _modulos_pack[chave]
+    nome = f"pack_{pasta.parent.name}_ferramentas"
+    for antigo in [m for m in sys.modules if m.startswith(nome + ".")]:
+        del sys.modules[antigo]  # submódulos de uma carga anterior
+    spec = importlib.util.spec_from_file_location(nome, init, submodule_search_locations=[str(pasta)])
+    modulo = importlib.util.module_from_spec(spec)
+    sys.modules[nome] = modulo
+    spec.loader.exec_module(modulo)
+    with _cache_lock:
+        _modulos_pack[chave] = modulo
+    return modulo
+
+
 def dominio_path(lang: "str | None" = None) -> "Path | None":
     """Caminho do dominio.md no idioma efetivo (pedido, ou fallback da instalação).
     None se não existir em nenhum dos dois — quem chamar trata como 'sem conteúdo'."""
@@ -367,7 +407,9 @@ def url_mascarada() -> str:
 
 # ── dominio.md — seções canônicas ─────────────────────────────────────────────
 
-_SECOES_NAO_SKILL = ("Períodos", "Regras do agente", "Regras do orquestrador")
+# "Recomendações de ação" é devolvida pela tool de previsão do pack, junto com o diagnóstico, só
+# quando alguém pergunta o que fazer: não precisa pesar na skill.
+_SECOES_NAO_SKILL = ("Períodos", "Regras do agente", "Regras do orquestrador", "Recomendações de ação")
 
 
 def _dominio_texto() -> str:

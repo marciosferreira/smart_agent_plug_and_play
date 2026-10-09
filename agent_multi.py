@@ -1907,6 +1907,34 @@ def calcular_periodo(periodo: str) -> str:
 
 # ── Catálogo de skills (injetado no system prompt do sub-agente) ──────────────
 
+def _ferramentas_do_pack() -> list:
+    """Tools próprias do domínio ativo, em config/<dominio>/ferramentas/__init__.py: o pacote
+    expõe `criar_tools(contexto) -> list` (tools LangChain) e, opcionalmente, `ROTULOS =
+    {nome: {"pt-BR": ..., "en": ..., "zh": ...}}` para a interface. O contexto dá acesso ao
+    ambiente do analista e ao banco sem o pack importar este módulo. Pack sem a pasta, ou que
+    falhe ao carregar, não muda nada: o analista segue com as tools padrão."""
+    from types import SimpleNamespace
+
+    try:
+        modulo = db_config.modulo_ferramentas()
+        if modulo is None:
+            return []
+        criar = getattr(modulo, "criar_tools", None)
+        if criar is None:
+            return []
+        contexto = SimpleNamespace(ns_get=_ns_get, ns_summary=_ns_summary, get_engine=db_config.get_engine, tlog=_tlog)
+        tools = list(criar(contexto))
+        for nome_tool, rotulos in (getattr(modulo, "ROTULOS", None) or {}).items():
+            pt = rotulos.get("pt-BR") or f"⚙ {nome_tool}"
+            _TOOL_LABELS[nome_tool] = pt
+            _LABEL_TRANSLATIONS[pt] = {k: v for k, v in rotulos.items() if k != "pt-BR"}
+        logger.info("[pack] %d tool(s) do domínio: %s", len(tools), ", ".join(t.name for t in tools))
+        return tools
+    except Exception:
+        logger.warning("[pack] falha ao carregar as ferramentas de %s", db_config.pack_dir(), exc_info=True)
+        return []
+
+
 def _montar_catalogo_skills() -> str:
     """Lê os headers dos arquivos .md e monta o texto de catálogo para o system prompt.
 
@@ -2191,7 +2219,8 @@ def _build_sub_agent(llm):
         "NUNCA emita uma tool call sem essa frase."
     )
 
-    sub_tools = [read_skill, tool_dados, *tools_extras, analisar_dataframe, gerar_pdf, gerar_excel]
+    sub_tools = [read_skill, tool_dados, *tools_extras, analisar_dataframe, gerar_pdf, gerar_excel,
+                 *_ferramentas_do_pack()]
     llm_sub = llm.bind_tools(sub_tools)
     no_sub_tools = ToolNode(sub_tools)
 

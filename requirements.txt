@@ -42,6 +42,7 @@ sqlite-vec==0.1.9
 pandas==2.3.3
 numpy==2.3.3
 scipy==1.17.1
+scikit-learn==1.9.1  # modelos treinados dos packs (config/<dominio>/ferramentas/)
 openpyxl==3.1.5
 tabulate==0.10.0
 

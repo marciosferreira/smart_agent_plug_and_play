@@ -23,3 +23,6 @@ scripts_manuais/
 # OS
 .DS_Store
 Thumbs.db
+
+# modelos treinados dos packs e as métricas (refeitos por python -m ferramentas.treinar)
+config/*/ferramentas/modelos/
