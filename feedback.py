@@ -12,8 +12,9 @@ Funções puras sobre as mensagens do checkpoint, sem rede nem banco, usadas pel
 Toda avaliação é gravada em `feedback_respostas` (db.py) junto com a pergunta, a resposta e,
 no caso do 👎, a mensagem que o usuário escreve em seguida (que pode ou não contestar a
 resposta). Esse conjunto fica guardado para melhorar o agente depois. Para a memória, 👍 e 👎
-são sinais: marcam a resposta na conversa que o extrator lê a cada 30 s, e entram na avaliação
-da ficha de análise daquele episódio (memoria.avaliar_resposta, fichas.py).
+são sinais: marcam a resposta na conversa que o extrator lê na extração seguinte da sessão
+(depois da espera de MEMORIA_DELAY_SEGUNDOS, 120 s por padrão), e entram na avaliação da ficha
+de análise daquele episódio (memoria.avaliar_resposta, fichas.py).
 """
 from __future__ import annotations
 

@@ -736,6 +736,39 @@ class AvaliacaoComoSinal(unittest.TestCase):
         self.assertFalse(msgs[-1]["content"].startswith("[CONTEXTO"))
         self.assertIn(feedback.MARCA_RUIM, msgs[-1]["content"])
 
+    def test_o_sinal_sobrevive_ao_turno_seguinte_antes_da_extracao(self):
+        memoria._extraidos[self.sessao] = 3
+        self._avalia("Custo por site", "up")  # o turno mais antigo, já extraído
+        # o usuário segue conversando antes da espera: o agendamento do novo turno substitui o do clique
+        lista = memoria._turnos[self.sessao]
+        lista.append({"pergunta": "E por planta?", "trace": "", "resposta": "Por planta: ..."})
+        memoria._enviar(self.sessao, "321", "dom.md", list(lista), 0)
+        msgs = memoria._executor.envios[-1]["payload"]["messages"]
+        self.assertEqual(len(msgs), 8)                                   # a janela volta até o avaliado
+        self.assertFalse(msgs[1]["content"].startswith("[CONTEXTO"))     # e ele conta como novo
+        self.assertIn(feedback.MARCA_BOA, msgs[1]["content"])
+
+    def test_a_marca_deixa_de_estar_pendente_depois_da_extracao(self):
+        memoria._extraidos[self.sessao] = 3
+        self._avalia("Custo por site", "up")
+        notas = memoria._executor.envios[-1]["payload"]["_meta"]["notas"]
+        self.assertEqual(list(notas), [0])
+        with memoria._lock:
+            memoria._baixar_notas(self.sessao, notas)
+        self.assertNotIn("nota_pendente", memoria._turnos[self.sessao][0])
+        self.assertEqual(memoria._turnos[self.sessao][0]["nota"], "up")  # a marca continua na conversa
+        memoria._enviar(self.sessao, "321", "dom.md", list(memoria._turnos[self.sessao]), 0)
+        self.assertEqual(len(memoria._executor.envios), 1)               # nada pendente: não reagenda
+
+    def test_clique_durante_a_extracao_continua_pendente(self):
+        memoria._extraidos[self.sessao] = 3
+        self._avalia("Custo por site", "up")
+        notas = memoria._executor.envios[-1]["payload"]["_meta"]["notas"]
+        self._avalia("Custo por site", "down")                          # mudou de ideia com ela rodando
+        with memoria._lock:
+            memoria._baixar_notas(self.sessao, notas)                    # a extração do 👍 termina
+        self.assertIn("nota_pendente", memoria._turnos[self.sessao][0])
+
     def test_a_espera_so_e_dispensada_com_turnos_demais_pendentes(self):
         from unittest import mock
 

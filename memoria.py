@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import itertools
 import json
 import logging
 import os
@@ -761,10 +762,13 @@ def aplicar_operacoes(
             _aplicar_em_lista(docs, op)
     v, h = docs["licoes"]["verificadas"], docs["licoes"]["hipoteses"]
     while len(v) + len(h) > MAX_LICOES:
-        (h or v).pop(0)
-    docs["preferencias"]["preferencias"] = docs["preferencias"]["preferencias"][-MAX_PREFERENCIAS:]
-    docs["convencoes"]["convencoes"] = docs["convencoes"]["convencoes"][-MAX_CONVENCOES:]
-    docs["perfil"]["outros"] = docs["perfil"]["outros"][-MAX_OUTROS:]
+        logger.warning("[memoria] limite de lições atingido; sai a mais antiga: %s", (h or v).pop(0))
+    for doc, chave, limite in (("preferencias", "preferencias", MAX_PREFERENCIAS),
+                               ("convencoes", "convencoes", MAX_CONVENCOES), ("perfil", "outros", MAX_OUTROS)):
+        itens = docs[doc][chave]
+        for saiu in itens[:-limite]:
+            logger.warning("[memoria] limite de %s atingido; sai o mais antigo: %s", chave, saiu)
+        docs[doc][chave] = itens[-limite:]
     return docs["licoes"], docs["preferencias"], docs["perfil"], docs["convencoes"]
 
 
@@ -870,6 +874,18 @@ _base: dict[str, int] = defaultdict(int)             # session_id -> turnos já 
 _extraidos: dict[str, int] = defaultdict(int)        # session_id -> turnos extraídos (absoluto)
 _futuros: list[Future] = []
 _lock = threading.Lock()
+_seq_notas = itertools.count(1)                      # identifica cada clique em 👍/👎
+
+
+def _baixar_notas(sessao: str, notas: dict[int, int]) -> None:
+    """Depois de uma extração concluída, as avaliações que ela levou deixam de estar pendentes
+    (`notas`: posição absoluta do turno -> clique). Um clique feito enquanto ela rodava tem outro
+    número e continua pendente. Chamada com `_lock` preso."""
+    lista, base = _turnos.get(sessao) or [], _base.get(sessao, 0)
+    for n_abs, clique in notas.items():
+        i = n_abs - base
+        if 0 <= i < len(lista) and lista[i].get("nota_pendente") == clique:
+            del lista[i]["nota_pendente"]
 
 
 def _cortar(txt: str, n: int) -> str:
@@ -945,6 +961,7 @@ class _Extrator:
             return []
         with _lock:
             _extraidos[meta.get("sessao")] = max(_extraidos[meta.get("sessao")], meta.get("n_abs", 0))
+            _baixar_notas(meta.get("sessao"), meta.get("notas") or {})
         logger.info("[memoria] extração concluída (sessão %s)", meta.get("sessao"))
         return []
 
@@ -1059,11 +1076,14 @@ _DECLARA_REGRA = re.compile(
 )
 
 
-def _enviar(sessao: str, user_id: str, dominio: str, turnos: list[dict], base: int,
-            avaliado: int | None = None) -> None:
-    """Agenda a extração da sessão. `avaliado` é o índice (em `turnos`) de uma resposta que o
-    usuário acabou de avaliar com 👍 ou 👎: a janela passa a incluí-la, com os dois turnos
-    anteriores como contexto, mesmo que ela já tivesse sido extraída, para o sinal valer."""
+def _enviar(sessao: str, user_id: str, dominio: str, turnos: list[dict], base: int) -> None:
+    """Agenda a extração da sessão. Uma resposta avaliada com 👍 ou 👎 cuja avaliação ainda não
+    chegou a uma extração concluída (`nota_pendente`) entra na janela como nova, com os dois
+    turnos anteriores como contexto, mesmo que ela já tivesse sido extraída. Vale também quando
+    quem agenda é o turno seguinte: o agendamento substitui o do clique (mesmo thread_id), e o
+    sinal não pode ficar de fora nem virar contexto."""
+    avaliados = [i for i, t in enumerate(turnos) if t.get("nota_pendente")]
+    avaliado = avaliados[0] if avaliados else None
     ja = _extraidos[sessao]
     # um turno de contexto antes dos pendentes: a contestação chega junto com a análise
     # contestada, mesmo que ela já tenha sido extraída antes.
@@ -1095,7 +1115,8 @@ def _enviar(sessao: str, user_id: str, dominio: str, turnos: list[dict], base: i
     fut = _executor.submit(
         {
             "messages": _mensagens(janela, n_contexto),
-            "_meta": {"sessao": sessao, "n_abs": base + len(turnos), "user_id": user_id, "dominio": dominio},
+            "_meta": {"sessao": sessao, "n_abs": base + len(turnos), "user_id": user_id, "dominio": dominio,
+                      "notas": {base + i: turnos[i]["nota_pendente"] for i in avaliados}},
         },
         config={"configurable": {}},
         after_seconds=espera,
@@ -1135,9 +1156,11 @@ def avaliar_resposta(session_id: str, user_id: str, dominio: str, inicio_respost
     """O usuário clicou em 👍 (`up`) ou 👎 (`down`) numa resposta. É um sinal de reforço para o
     extrator único: o turno é marcado e a extração da sessão é reagendada com ele na janela (e os
     dois anteriores como contexto), para o extrator decidir, olhando a conversa toda, o que há a
-    reforçar. Se o usuário seguir conversando antes da espera, a extração seguinte
-    absorve esta (mesmo thread_id), já com as mensagens que vêm depois. Devolve True se achou o
-    turno em memória; senão (muito antigo, ou depois de um restart) a avaliação só fica no banco."""
+    reforçar. A marca fica pendente até uma extração com ela terminar: se o usuário seguir
+    conversando antes da espera, o agendamento do turno seguinte substitui este (mesmo
+    thread_id) e leva o turno avaliado como novo, já com as mensagens que vêm depois. Devolve
+    True se achou o turno em memória; senão (muito antigo, ou depois de um restart) a avaliação
+    só fica no banco."""
     if not ativa() or _store is None or _executor is None or not user_id or nota not in ("up", "down"):
         return False
     inicio = (inicio_resposta or "").strip()
@@ -1149,7 +1172,8 @@ def avaliar_resposta(session_id: str, user_id: str, dominio: str, inicio_respost
             for pos in range(len(lista) - 1, -1, -1):
                 if inicio_comparavel(lista[pos]["resposta"]).startswith(inicio):
                     lista[pos]["nota"] = nota
-                    _enviar(session_id, user_id, dominio, list(lista), _base[session_id], avaliado=pos)
+                    lista[pos]["nota_pendente"] = next(_seq_notas)
+                    _enviar(session_id, user_id, dominio, list(lista), _base[session_id])
                     return True
     except Exception:
         logger.warning("[memoria] falha ao registrar a avaliação", exc_info=True)
