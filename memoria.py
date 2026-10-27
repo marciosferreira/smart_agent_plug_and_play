@@ -875,6 +875,8 @@ _extraidos: dict[str, int] = defaultdict(int)        # session_id -> turnos extr
 _futuros: list[Future] = []
 _lock = threading.Lock()
 _seq_notas = itertools.count(1)                      # identifica cada clique em 👍/👎
+_rodando: set[str] = set()                           # sessões com uma extração em andamento
+_adiadas: dict[str, tuple[str, str]] = {}            # sessão -> (user_id, dominio) a reagendar no fim dela
 
 
 def _baixar_notas(sessao: str, notas: dict[int, int]) -> None:
@@ -886,6 +888,20 @@ def _baixar_notas(sessao: str, notas: dict[int, int]) -> None:
         i = n_abs - base
         if 0 <= i < len(lista) and lista[i].get("nota_pendente") == clique:
             del lista[i]["nota_pendente"]
+
+
+def _concluir(meta: dict, ok: bool) -> None:
+    """Fim de uma extração, com `_lock` preso: se deu certo, avança o ponteiro e baixa as
+    avaliações que ela levou; em seguida agenda a extração que ficou adiada enquanto esta rodava,
+    já com o ponteiro certo."""
+    sessao = meta.get("sessao")
+    if ok:
+        _extraidos[sessao] = max(_extraidos[sessao], meta.get("n_abs", 0))
+        _baixar_notas(sessao, meta.get("notas") or {})
+    _rodando.discard(sessao)
+    adiada = _adiadas.pop(sessao, None)
+    if adiada:
+        _enviar(sessao, *adiada, list(_turnos.get(sessao) or []), _base.get(sessao, 0))
 
 
 def _cortar(txt: str, n: int) -> str:
@@ -944,7 +960,10 @@ class _Extrator:
     O ponteiro de turnos extraídos avança aqui dentro, antes de o Future ser concluído, e
     não num callback do Future: o `wait()` acorda antes de os callbacks rodarem, e um
     callback registrado com `_lock` preso numa tarefa já concluída rodaria na hora e
-    travaria no mesmo lock."""
+    travaria no mesmo lock.
+
+    Enquanto a extração roda, a sessão fica em `_rodando` e um agendamento novo dela é adiado
+    para o fim desta (ver `_enviar` e `_concluir`)."""
 
     namespace = ()
 
@@ -953,16 +972,19 @@ class _Extrator:
 
     def invoke(self, payload, config=None):
         meta = payload.get("_meta") or {}
+        with _lock:
+            _rodando.add(meta.get("sessao"))
+        ok = False
         try:
             self._extrair(payload["messages"], meta.get("user_id"), meta["dominio"], meta.get("sessao"))
+            ok = True
+            logger.info("[memoria] extração concluída (sessão %s)", meta.get("sessao"))
         except Exception as e:
             # o ponteiro não avança: esses turnos voltam na próxima extração da sessão
             logger.warning("[memoria] falha na extração (sessão %s): %r", meta.get("sessao"), e)
-            return []
-        with _lock:
-            _extraidos[meta.get("sessao")] = max(_extraidos[meta.get("sessao")], meta.get("n_abs", 0))
-            _baixar_notas(meta.get("sessao"), meta.get("notas") or {})
-        logger.info("[memoria] extração concluída (sessão %s)", meta.get("sessao"))
+        finally:
+            with _lock:
+                _concluir(meta, ok)
         return []
 
     def _extrair(self, msgs: list[dict], user_id: str | None, dominio: str, sessao: str | None = None) -> None:
@@ -1082,6 +1104,11 @@ def _enviar(sessao: str, user_id: str, dominio: str, turnos: list[dict], base: i
     turnos anteriores como contexto, mesmo que ela já tivesse sido extraída. Vale também quando
     quem agenda é o turno seguinte: o agendamento substitui o do clique (mesmo thread_id), e o
     sinal não pode ficar de fora nem virar contexto."""
+    if sessao in _rodando:
+        # A extração em andamento ainda não avançou o ponteiro: uma janela calculada agora
+        # repetiria como novos os turnos que ela está processando. Fica para o fim dela.
+        _adiadas[sessao] = (user_id, dominio)
+        return
     avaliados = [i for i, t in enumerate(turnos) if t.get("nota_pendente")]
     avaliado = avaliados[0] if avaliados else None
     ja = _extraidos[sessao]

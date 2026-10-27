@@ -696,8 +696,9 @@ class AvaliacaoComoSinal(unittest.TestCase):
         memoria._extraidos[self.sessao] = 0
 
     def tearDown(self):
-        for d in (memoria._turnos, memoria._base, memoria._extraidos):
+        for d in (memoria._turnos, memoria._base, memoria._extraidos, memoria._adiadas):
             d.pop(self.sessao, None)
+        memoria._rodando.discard(self.sessao)
         memoria._store, memoria._executor = self._store, self._executor
 
     def _avalia(self, inicio, nota, user="321"):
@@ -768,6 +769,35 @@ class AvaliacaoComoSinal(unittest.TestCase):
         with memoria._lock:
             memoria._baixar_notas(self.sessao, notas)                    # a extração do 👍 termina
         self.assertIn("nota_pendente", memoria._turnos[self.sessao][0])
+
+    def test_turno_novo_durante_a_extracao_espera_ela_terminar(self):
+        # a extração dos turnos 1 e 2 está rodando quando o turno 3 chega
+        memoria._rodando.add(self.sessao)
+        memoria._enviar(self.sessao, "321", "dom.md", list(memoria._turnos[self.sessao]), 0)
+        self.assertEqual(memoria._executor.envios, [])                  # adiado, não agendado
+        with memoria._lock:
+            memoria._concluir({"sessao": self.sessao, "n_abs": 2}, ok=True)
+        msgs = memoria._executor.envios[-1]["payload"]["messages"]
+        self.assertEqual(len(msgs), 4)                                   # só o turno 2 (contexto) e o 3
+        self.assertTrue(msgs[0]["content"].startswith("[CONTEXTO"))
+        self.assertFalse(msgs[2]["content"].startswith("[CONTEXTO"))
+        self.assertNotIn(self.sessao, memoria._rodando)
+
+    def test_extracao_que_falha_devolve_os_turnos_ao_agendamento_adiado(self):
+        memoria._rodando.add(self.sessao)
+        memoria._enviar(self.sessao, "321", "dom.md", list(memoria._turnos[self.sessao]), 0)
+        with memoria._lock:
+            memoria._concluir({"sessao": self.sessao, "n_abs": 2}, ok=False)
+        msgs = memoria._executor.envios[-1]["payload"]["messages"]
+        self.assertEqual(len(msgs), 6)                                   # os três voltam como novos
+        self.assertFalse(any(m["content"].startswith("[CONTEXTO") for m in msgs))
+
+    def test_sem_agendamento_adiado_o_fim_da_extracao_nao_agenda_nada(self):
+        memoria._rodando.add(self.sessao)
+        with memoria._lock:
+            memoria._concluir({"sessao": self.sessao, "n_abs": 3}, ok=True)
+        self.assertEqual(memoria._executor.envios, [])
+        self.assertEqual(memoria._extraidos[self.sessao], 3)
 
     def test_a_espera_so_e_dispensada_com_turnos_demais_pendentes(self):
         from unittest import mock
