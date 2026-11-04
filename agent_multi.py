@@ -71,6 +71,7 @@ from scheduler.widget_tools import (
 logger = logging.getLogger(__name__)
 
 from db import DB_PATH, anexar_mensagem_seguinte, tag_session_dominio
+import acesso
 import db_config
 import graphql_config
 import fichas
@@ -2250,6 +2251,11 @@ def _build_sub_agent(llm):
             f"\n\n## Skill dominio.md (já carregada — não chame read_skill para ela)\n{dominio_txt}"
             if dominio_txt and db_config.is_configured() else ""
         )
+        # Controle de acesso (acesso.py): o que o papel do usuário pode consultar. A imposição real
+        # é em graphql_config; este bloco só evita o LLM tentar tabelas/colunas que serão negadas.
+        _acl = acesso.bloco_prompt(_current_user_id.get())
+        if _acl:
+            bloco_dominio += "\n\n## Controle de acesso\n" + _acl
         # Memória (lições do banco, convenções e preferências do usuário, e as fichas de análises
         # parecidas, buscadas uma vez em consultar_analista): vem depois do dominio.md e antes de
         # `extra` para manter o prefixo estável entre chamadas.
@@ -4191,6 +4197,7 @@ def invoke_multi_agent(query: str, session_id: str = "default", user_id: str = "
         raise RuntimeError("Multi-agente não inicializado.")
     _current_session.set(session_id)
     _current_user_id.set(user_id)
+    acesso.set_usuario(user_id)
     db_config.set_lang(lang)
     tag_session_dominio(session_id, db_config.dominio_filename())
     _guardar_mensagem_seguinte(session_id, query)
@@ -4249,6 +4256,7 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
 
     _current_session.set(session_id)
     _current_user_id.set(user_id)
+    acesso.set_usuario(user_id)
     db_config.set_lang(lang)
     tag_session_dominio(session_id, db_config.dominio_filename())
     _guardar_mensagem_seguinte(session_id, query)
@@ -4267,6 +4275,7 @@ def stream_multi_agent(query: str, session_id: str = "default", user_id: str = "
         # ContextVar não se propaga para threading.Thread — precisa setar explicitamente.
         _current_session.set(session_id)
         _current_user_id.set(user_id)
+        acesso.set_usuario(user_id)
         _current_run.set(run)
         db_config.set_lang(lang)
         _t_graph = _time.perf_counter()

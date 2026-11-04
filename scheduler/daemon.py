@@ -185,7 +185,7 @@ def _evaluate_condition(task: dict) -> tuple[bool, str]:
     threshold = task.get("condition_threshold")
 
     try:
-        rows = run_condition_query(sql)
+        rows = run_condition_query(sql, user_id=task.get("user_id"))
     except Exception as exc:
         logger.warning("[daemon] Erro ao avaliar condition_sql da task %s: %s", task.get("id"), exc)
         return False, f"erro na condição: {exc}"

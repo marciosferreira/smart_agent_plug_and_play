@@ -26,12 +26,14 @@ Este documento descreve como cada componente foi construído e por que as decis�
 | `agent_multi.py` | O agente inteiro: tools, prompts, grafos LangGraph (orquestrador, analista, scheduler, pipeline de agendamento), streaming, cancelamento e criação dos LLMs |
 | `db_config.py` | Porta única para o pack `config/` (settings, idioma, seções do `dominio.md`, períodos, painéis padrão, pasta do pack) e para o banco de domínio em modo SQL |
 | `graphql_config.py` | Cliente GraphQL do modo `graphql`: `reportTable`, `reportAggregate`, `reportSchema` |
+| `acesso.py` | Controle de acesso por papel (POC): lê o `acl.yml` do pack e aplica a política do papel do usuário às consultas GraphQL — recusa no pedido e remove colunas negadas da resposta (ver [Controle de acesso por papel](#controle-de-acesso-por-papel-user_role--poc)) |
+| `auth.py` | Autenticação da POC: JWT HS256 (`id`, `email`, `name`), `POST /auth/dev-login` e o `AuthMiddleware`, que valida o Bearer e impõe o `user_id` do token |
 | `db.py` | Banco local do app (`mfg.db`): criação e migração das tabelas de tarefas, painéis, ordem, auditoria, sessão×domínio, avaliações das respostas e resumo da abordagem |
 | `memoria.py` | Memória do agente: uma extração em background (chamada estruturada ao LLM, agendada pelo `ReflectionExecutor` do LangMem) que mantém lições do banco, convenções, preferências, perfil do usuário e as fichas de análise no `mfg.db`, e os blocos injetados nos prompts (ver [Memória do agente](#memória-do-agente--o-que-ele-aprende-entre-sessões)) |
 | `feedback.py` | Funções puras da avaliação das respostas (👍 e 👎): acham a resposta avaliada no checkpoint, dizem se é uma resposta de dados e normalizam o começo do texto com que o front a identifica |
 | `fichas.py` | Fichas de análise, a memória de episódios: embeddings do Vertex (`gemini-embedding-001`), gravação, busca por similaridade de cosseno com `numpy` o texto injetado no analista e devolvido pela tool `buscar_analises_anteriores`, e a leitura da conversa de uma ficha (tool `recuperar_conversa_anterior`) |
 | `memoria_admin.py` + `static/memoria.html` | Painel de inspeção e edição da memória (`/memoria`): lê direto do `mfg.db`, sem depender do agente estar inicializado. Ver [Painel da memória](#painel-da-memória--memoria) |
-| `tests/` | Testes offline (sem rede e sem LLM) da memória, das avaliações e do pack de alocação (simulador, variáveis dos modelos, carregamento das tools de um pack e a tool de previsão de ponta a ponta, que roda quando a base demo e o modelo existem): `.venv/Scripts/python -m unittest discover -s tests`. Trava as versões validadas das bibliotecas, confere que o Vertex aceita o schema da saída do extrator, e cobre a mesclagem das operações, as fichas de análise (validação, gravação, busca com um embedding de teste e a privacidade dos ids), os blocos injetados nos prompts, o banco das avaliações e o bypass de `thought_signature` |
+| `tests/` | Testes offline (sem rede e sem LLM) da memória, das avaliações, do controle de acesso (`test_acesso.py`) e do pack de alocação (simulador, variáveis dos modelos, carregamento das tools de um pack e a tool de previsão de ponta a ponta, que roda quando a base demo e o modelo existem): `.venv/Scripts/python -m unittest discover -s tests`. Trava as versões validadas das bibliotecas, confere que o Vertex aceita o schema da saída do extrator, e cobre a mesclagem das operações, as fichas de análise (validação, gravação, busca com um embedding de teste e a privacidade dos ids), os blocos injetados nos prompts, o banco das avaliações e o bypass de `thought_signature` |
 | `chart_store.py` | Artefatos (gráficos, PDFs, Excels) e alertas de threshold, também em `mfg.db` |
 | `scheduler/daemon.py` | Loop do agendador e execução das tarefas (retry, timeout, relatórios) |
 | `scheduler/runner.py`, `scheduler/context.py` | Sandbox do `task_code` e o objeto `ctx` injetado nele |
@@ -216,7 +218,7 @@ Observação: `chart_store` só é inicializado junto com o agente (`init_multi_
 
 ## Identidade do usuário (`user_id`) — como é coletada e usada
 
-O sistema **não implementa login**. Ele é pensado para ser embutido (iframe/embed) dentro de um app host que já resolveu autenticação — o `user_id` é apenas um identificador que separa os dados de cada usuário dentro do mesmo domínio ativo. A responsabilidade de garantir que a pessoa certa está vendo o `user_id` certo é do app host, não deste sistema.
+Por padrão o sistema **não implementa login**. Ele é pensado para ser embutido (iframe/embed) dentro de um app host que já resolveu autenticação — o `user_id` é apenas um identificador que separa os dados de cada usuário dentro do mesmo domínio ativo. A responsabilidade de garantir que a pessoa certa está vendo o `user_id` certo é do app host, não deste sistema. *(Com o [controle de acesso por papel](#controle-de-acesso-por-papel-user_role--poc) ligado, o `user_id` passa a vir de um JWT assinado, e o parâmetro de query é sobrescrito pelo do token.)*
 
 ### Como o `user_id` chega ao sistema
 
@@ -277,6 +279,76 @@ Trocar o domínio não redistribui usuários; trocar de usuário não troca o ba
 O histórico de chat (checkpointer LangGraph) continua isolado por `session_id`, não por `user_id` diretamente — mas o frontend gera `session_id` como `<user_id>_<timestamp>` (`UserSessionService.newSessionId()`), e `/chat/sessions?user_id=...` lista as sessões cujo `thread_id` começa com esse prefixo e cujo domínio (`session_dominio`) é o ativo. Ou seja, a listagem de conversas de um usuário depende da convenção de nomenclatura do `session_id`, enquanto tarefas, painéis, alertas e artefatos usam uma coluna `user_id` real no banco.
 
 Isso tem uma implicação direta para onde o `session_id` **ativo** fica guardado no browser: a chave de `localStorage` que lembra "qual foi a última conversa aberta" é namespaced por `user_id` (`mfg_session_id::<user_id>`, em `UserSessionService`) — nunca uma chave global única. Sem esse namespacing, trocar o `user_id` na URL (ex: simular um segundo usuário no mesmo browser) continuaria devolvendo a última conversa de *outro* usuário salva naquele mesmo `localStorage`, porque a busca de histórico é por `session_id` e o `session_id` reaproveitado não teria trocado junto. Cada `user_id` mantém assim sua própria sessão ativa lembrada entre reloads, sem vazar para outro usuário do mesmo browser.
+
+---
+
+## Controle de acesso por papel (`user_role`) — POC
+
+> **Estado:** prova de conceito, **desligada por padrão**. Liga-se por pack com `enabled: true` em `config/<dominio>/acl.yml`; sem o arquivo (ou com `enabled: false`) nada muda no app. Hoje só o pack `new_age` traz um `acl.yml`.
+
+O controle tem duas peças independentes: **quem é o usuário** (identidade, `auth.py`) e **o que o papel dele pode consultar** (política, `acesso.py`). O objetivo é que usuários sem determinado papel (por exemplo, quem não é `gerente`) não consigam consultar certas tabelas, colunas e linhas do GraphQL.
+
+### Identidade — o JWT só identifica
+
+- O token é um JWT **HS256** com `id`, `email` e `name`, válido por 8 h, assinado com `AUTH_SECRET` (sem a variável, a POC usa um segredo fixo de desenvolvimento e loga um aviso). É o mesmo formato do repositório dos agentes, onde o `mdsc-api-gateway` emite o token.
+- **O papel não vai no token.** Ele é consultado no servidor a cada requisição (seção `users:` do `acl.yml`, que faz o papel da tabela `user_role` do repositório dos agentes); mudar o papel de alguém vale na hora.
+- **Não há login de verdade.** `POST /auth/dev-login` emite o token para qualquer `user_id` listado em `users:`, **sem senha**, apenas para simular o gateway. `GET /auth/users` lista os usuários demo para o seletor do front.
+- O `AuthMiddleware` valida o `Authorization: Bearer` das rotas `/chat`, `/tasks`, `/artifacts`, `/dashboard-widgets`, `/alerts` e `/chart-snapshot` e **sobrescreve o `user_id`** da query e do corpo JSON pelo do token, ignorando o que o cliente mandou. Token ausente, inválido ou adulterado (a assinatura deixa de bater) responde 401. Como o `EventSource` do SSE não envia headers, o token também é aceito em `?access_token=`.
+- No front, um interceptor Angular (`core/interceptors/`) envia o Bearer em toda chamada e o `UserSessionService` guarda o token (`localStorage['mfg_access_token']`) obtido no `dev-login`.
+
+### Política — o `acl.yml`
+
+```yaml
+enabled: true
+default_role: null                 # papel de quem não está em `users` (null = nega tudo)
+users:                             # a "tabela user_role" da POC
+  "321": {role: colaborador, name: "Bruno Colaborador", email: "..."}
+  "789": {role: gerente, name: "Gabriel Gerente", email: "..."}
+roles:
+  admin:
+    tables: "*"                    # todas as tabelas, colunas e linhas
+  gerente:
+    tables:
+      fact_hourly_rate: {}         # tabela liberada, sem restrição
+  colaborador:
+    tables:
+      dim_site: {}
+      fact_hourly_rate:
+        columns: {deny: [approved_at]}                      # ou {allow: [id, site_id, ...]}
+        rows:
+          - {field: is_forecast, op: EQ, value: false}      # AND com o where do usuário
+relations:                         # FK → tabela alvo, para validar `expand`
+  fact_hourly_rate.site_id: dim_site
+```
+
+| Regra | O que faz |
+| --- | --- |
+| `tables` | **Allowlist.** Só as tabelas declaradas podem ser consultadas; as demais são recusadas e somem do schema que o LLM vê. `{}` libera a tabela sem restrição |
+| `columns: {deny: [...]}` / `{allow: [...]}` | Bloqueia colunas (ou libera só as listadas). Sem `columns`, nenhuma coluna é bloqueada |
+| `rows: [{field, op, value}]` | Condição somada em AND ao `where` de toda consulta à tabela; o usuário continua filtrando por outras colunas, e pedir o valor oposto devolve resultado vazio (não é recusado). Sem `rows`, nenhuma linha é filtrada |
+| `relations` | Chaves estrangeiras usadas para validar `expand` (join de um salto). Sem a relação declarada, o `expand` é negado; também é negado quando a tabela alvo tem `rows`, porque o join roda no servidor e o filtro não pode ser injetado lá |
+
+`columns` e `rows` são independentes: uma tabela pode ter só uma delas, as duas ou nenhuma. **Fail-closed:** usuário desconhecido ou sem papel cai no `default_role`; sem ele, não enxerga nenhuma tabela. Nomes de papel são de **usuário** e não têm relação com os agentes do sistema (o agente `analista`).
+
+### Onde a política é aplicada — dois momentos
+
+A política roda em `graphql_config` (`run_query_table`, `run_aggregate` e `run_schema`), por onde passam o chat, o sandbox das tasks (`ctx`), o daemon, os monitores e os painéis. O chat guarda o usuário num `ContextVar` (`acesso.set_usuario`); as tasks, que rodam em threads que não o herdam, recebem o `user_id` explicitamente. O backend GraphQL não muda.
+
+| Momento | O que acontece |
+| --- | --- |
+| **No pedido** (`preparar_tabela` / `preparar_agregado`) | Recusa tabela fora da política e coluna negada usada em `where`, `orderBy`, `groupBy`, `metric` ou `expand`; soma o filtro de linhas do papel ao `where`. Uma recusa levanta `AcessoNegado` **antes** de qualquer chamada ao backend, e a tool devolve a mensagem ao LLM |
+| **Na resposta** (`limpar_linhas`, `filtrar_schema`) | O `reportTable` não permite escolher colunas e devolve todas; o código **apaga as colunas negadas** de cada linha antes de entregar o resultado ao LLM. O `reportSchema` também sai filtrado. Nas agregações só existe a checagem do pedido |
+
+Além disso, `acesso.bloco_prompt` injeta no prompt do analista a lista do que o papel pode consultar, só para o LLM não tentar o que será negado; a imposição real é a de `graphql_config`.
+
+### Limites conhecidos
+
+- **A política é do cliente.** O backend GraphQL segue com a `api_key` única e não sabe quem é o usuário: a coluna negada trafega até o app antes de ser apagada, e quem chamar o backend por outro caminho não passa pela política. Decisão atual: manter assim, porque as regras são de cada app e ficam em arquivo local, o que permite que um mesmo servidor atenda várias aplicações, cada uma com a sua política, atualizada sem mexer no servidor. A alternativa é aplicar as regras no resolver do backend (a coluna negada nem sairia do servidor e o filtro valeria também nos joins), o que exigiria enviar a identidade do usuário ao backend e hospedar lá as regras de cada app.
+- **O modo `sql` não passa pela política** (`db_config.run_select` não consulta o `acesso`).
+- **Rotas abertas:** o front estático, `/app-info`, `/auth/*` e os downloads `/chart`, `/pdf`, `/excel` e `/reports` (abertos por `<img>`/`<a>`, que não mandam header, e identificados por UUID).
+- **Autenticação simulada:** o `dev-login` não pede senha. Em produção o token deve vir do gateway real e esse endpoint sai.
+- **Os papéis do `acl.yml` de exemplo** usam as colunas do `dominio.md` do pack e não foram conferidos contra os dados reais.
+- Falta validar ponta a ponta com o agente, o GraphQL real e o front no navegador. Os testes offline estão em `tests/test_acesso.py` (a política, o filtro de linhas, o `expand`, a limpeza das linhas e o `ContextVar`).
 
 ---
 
@@ -912,6 +984,8 @@ Toda a API vive num único `FastAPI` (`main.py`), sem prefixo/versionamento (`/c
 
 | Rota | Método | Para que serve |
 | --- | --- | --- |
+| `/auth/users` | GET | Usuários demo do `acl.yml` (`{enabled, users}`) para o seletor do front; `enabled: false` quando o controle de acesso está inativo |
+| `/auth/dev-login` | POST | Emite um JWT para um `user_id` do `acl.yml`, sem senha (simula o gateway); 404 se o controle de acesso está inativo, 401 se o usuário é desconhecido |
 | `/app-info` | GET | `{nome, descricao, configurado}` do pack ativo — usado pelo dashboard para branding e como sonda de saúde |
 | `/` | GET | Serve o `index.html` do build Angular (`frontend/dist/frontend/browser/`) — a SPA inteira |
 | `/{arquivo estático do build}` | GET | JS/CSS com hash, `favicon.ico`, `i18n/<lang>.json` etc. — mount `StaticFiles` do build Angular, registrado por último para não sombrear as rotas de API acima |
@@ -926,7 +1000,7 @@ Pontos que um novo desenvolvedor precisa saber antes de expor isso além do `loc
 
 - **HTTP puro.** O `uvicorn` (ver `run.py`) não termina TLS — ele serve HTTP simples na porta 8000. Em produção, HTTPS é responsabilidade da camada na frente do app (reverse proxy/PaaS) — a aplicação em si não sabe nem precisa saber que existe TLS.
 - **CORS totalmente aberto, mas só relevante para consumidores externos.** `CORSMiddleware` está configurado com `allow_origins=["*"]` e `allow_methods=["GET", "POST"]` (`main.py`) — note que `DELETE`, `PUT` e `PATCH` não estão liberados. Isso não afeta o dashboard Angular porque ele é servido **same-origin** (o próprio FastAPI serve o `index.html` na raiz — ver [Frontend](#frontend--angular-19-standalone-components)), então suas chamadas `DELETE`, `PUT` e `PATCH` nunca passam por preflight de CORS. Só importa se algum dia um cliente rodando em outra origem precisar chamar essas rotas.
-- **Sem autenticação na API.** Não há API key, JWT nem sessão de servidor — nenhuma rota valida quem está fazendo a chamada. O único controle de acesso é a separação de dados por `user_id` (ver [Identidade do usuário](#identidade-do-usuário-user_id--como-é-coletada-e-usada)), e esse `user_id` é um query param em texto puro, não assinado — qualquer cliente que descubra/adivinhe o `user_id` de outra pessoa consegue ler os dados dela. O modelo de segurança inteiro depende do app host controlar quem recebe qual `user_id`.
+- **Sem autenticação na API (por padrão).** Não há API key, JWT nem sessão de servidor — nenhuma rota valida quem está fazendo a chamada. Com o [controle de acesso por papel](#controle-de-acesso-por-papel-user_role--poc) ligado (`acl.yml`), as rotas `/chat`, `/tasks`, `/artifacts`, `/dashboard-widgets`, `/alerts` e `/chart-snapshot` passam a exigir um JWT e a impor o `user_id` do token. O que segue neste item vale para o app sem ele. O único controle de acesso é a separação de dados por `user_id` (ver [Identidade do usuário](#identidade-do-usuário-user_id--como-é-coletada-e-usada)), e esse `user_id` é um query param em texto puro, não assinado — qualquer cliente que descubra/adivinhe o `user_id` de outra pessoa consegue ler os dados dela. O modelo de segurança inteiro depende do app host controlar quem recebe qual `user_id`.
 - **Algumas rotas nem aplicam o filtro por `user_id`.** Quem souber o identificador acessa: `/chat/history` e `DELETE /chat/sessions/{id}` (por `session_id`), `/chart/{id}`, `/pdf/{id}` e `/excel/{id}` (por UUID), `/dashboard-widgets/{id}/data`, `/reports/{task_id}` e as rotas `/tasks/code-audit*`, que operam sobre o domínio inteiro.
 - **O sandbox é um filtro, não um isolamento.** O `task_code` e o `widget_code` rodam via `exec()` no próprio processo do servidor, com builtins por lista de permitidos e imports bloqueados. Isso contém os erros comuns de código gerado por LLM, mas não é uma fronteira de segurança contra código malicioso — por isso o código executado vem do próprio agente do sistema, nunca de entrada de terceiros.
 
@@ -1007,6 +1081,7 @@ As variáveis podem vir do ambiente ou de um arquivo `.env` na raiz (carregado n
 | `MEMORIA_FICHAS_DUPLICADA` | Similaridade a partir da qual duas fichas contam como quase idênticas e só uma é mostrada ao analista | `0.95` |
 | `MEMORIA_CONVERSA_MAX_CHARS` | Tamanho a partir do qual `recuperar_conversa_anterior` devolve um índice de turnos em vez da conversa inteira | `8000` |
 | `MEMORIA_GRAVAR_PROMPTS` | `0` desliga a gravação do último prompt de cada usuário (painel `/memoria`) | `1` |
+| `AUTH_SECRET` | Segredo que assina e valida o JWT do controle de acesso. Sem ele a POC usa um segredo fixo de desenvolvimento (e loga um aviso) — em produção deve ser o mesmo do gateway | segredo de desenvolvimento |
 | `DEBUG_TOOLS` | `1` loga o payload completo de cada tool call do agente | `0` |
 | `DEBUG_TOOLS_TRUNCATE` | Com `DEBUG_TOOLS=1`, trunca cada campo logado nesse nº de caracteres (0 = não trunca) | `0` |
 
@@ -1131,3 +1206,4 @@ Hoje o app sobe um único processo (`python run.py` ou `uvicorn main:app`, sem `
 - **Documentos**: fpdf2 (PDF), openpyxl (Excel)
 - **Persistência**: SQLite (`mfg.db`: estado do app, histórico de conversa, memória do agente, artefatos e alertas)
 - **Threading**: `contextvars.ContextVar` para isolamento de sessão, usuário, idioma e cancelamento através de thread pools
+- **Controle de acesso (POC)**: PyJWT (HS256); o `acl.yml` é lido com o mesmo YAML do `settings.yml` — ver [Controle de acesso por papel](#controle-de-acesso-por-papel-user_role--poc)

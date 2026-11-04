@@ -75,12 +75,12 @@ class WidgetCodeError(Exception):
     """Erro de validação ou execução do widget_code."""
 
 
-def run_widget_code(code: str, from_date: str, to_date: str, session_id: str) -> dict:
+def run_widget_code(code: str, from_date: str, to_date: str, session_id: str, user_id: "str | None" = None) -> dict:
     """Compila e executa widget_code. Retorna Chart.js config dict.
 
     Lança WidgetCodeError com mensagem amigável em caso de falha.
     """
-    ctx = TaskContext(session_id)
+    ctx = TaskContext(session_id, user_id=user_id)
     g   = _build_globals(ctx, from_date, to_date)
 
     try:

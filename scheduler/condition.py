@@ -14,7 +14,7 @@ class ConditionError(RuntimeError):
     pass
 
 
-def run_condition_query(condition_sql: str) -> "list[dict]":
+def run_condition_query(condition_sql: str, user_id: "str | None" = None) -> "list[dict]":
     """Executa a condição do monitor e retorna list[dict].
 
     Modo sql: condition_sql é uma query SELECT, executada direto no banco.
@@ -22,13 +22,15 @@ def run_condition_query(condition_sql: str) -> "list[dict]":
     Em ambos os casos, quando o valor for numérico (operadores >, <, >=, <=, ==, !=),
     o chamador extrai list(dict(rows[0]).values())[0] — por isso normalizamos o
     resultado do graphql para uma única chave "value".
+
+    `user_id`: usuário cujo papel limita a consulta GraphQL (ver acesso.py).
     """
     if db_config.modo_acesso() == "graphql":
-        return _run_graphql_condition(condition_sql)
+        return _run_graphql_condition(condition_sql, user_id)
     return db_config.run_select(condition_sql)
 
 
-def _run_graphql_condition(spec_json: str) -> "list[dict]":
+def _run_graphql_condition(spec_json: str, user_id: "str | None" = None) -> "list[dict]":
     import graphql_config
 
     try:
@@ -55,6 +57,7 @@ def _run_graphql_condition(spec_json: str) -> "list[dict]":
             )
         rows = graphql_config.run_aggregate(
             table, group_by, metric_field, metric_op, where=where, limit=spec.get("limit"),
+            user_id=user_id,
         )
         return [{"value": r.get("metricValue")} for r in rows]
 
@@ -62,6 +65,7 @@ def _run_graphql_condition(spec_json: str) -> "list[dict]":
         value_field = spec.get("value_field")
         rows = graphql_config.run_query_table(
             table, where=where, order_by=spec.get("order_by"), limit=spec.get("limit") or 1,
+            user_id=user_id,
         )
         if value_field:
             return [{"value": r.get(value_field)} for r in rows]

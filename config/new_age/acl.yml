@@ -1,0 +1,75 @@
+# Controle de acesso por papel (POC) — ver acesso.py e auth.py.
+# enabled: false (ou apagar este arquivo) desliga tudo: o app volta a funcionar sem token.
+enabled: true
+
+# Papel de quem não está em `users` (ou está sem `role`). null = nega todas as tabelas.
+default_role: null
+
+# A "tabela user_role" da POC. No repositório dos agentes isto viria do banco; o JWT só
+# identifica (id, email, name) e o papel é consultado aqui, no servidor.
+users:
+  "123": {role: admin,          name: "Ana Admin",       email: "ana.admin@example.com"}
+  "321": {role: colaborador,    name: "Bruno Colaborador", email: "bruno.colaborador@example.com"}
+  "456": {role: consulta_basica, name: "Carla Consulta",  email: "carla.consulta@example.com"}
+  "789": {role: gerente,        name: "Gabriel Gerente",  email: "gabriel.gerente@example.com"}
+
+roles:
+  admin:
+    tables: "*"          # todas as tabelas, colunas e linhas
+
+  # Vê tudo do custo: descontos negociados, condições comerciais do custo final e as projeções
+  # das taxas horárias. É o papel que o `colaborador` NÃO tem.
+  gerente:
+    tables:
+      dim_calendar: {}
+      dim_product: {}
+      dim_product_family: {}
+      dim_sales_model: {}
+      dim_site: {}
+      bridge_final_dl_cost_sales_model: {}
+      fact_standard_time: {}
+      fact_hourly_rate: {}
+      fact_dl_discount: {}
+      fact_final_dl_cost: {}
+
+  # Vê o custo, mas não os descontos negociados; não vê as colunas de condições comerciais do
+  # custo final; e só enxerga taxas horárias reais (não as projeções).
+  colaborador:
+    tables:
+      dim_calendar: {}
+      dim_product: {}
+      dim_product_family: {}
+      dim_sales_model: {}
+      dim_site: {}
+      bridge_final_dl_cost_sales_model: {}
+      fact_standard_time: {}
+      fact_hourly_rate:
+        columns: {deny: [approved_at]}
+        rows:
+          - {field: is_forecast, op: EQ, value: false}
+      fact_final_dl_cost:
+        columns: {deny: [lta_discount, qoq_configuration]}
+
+  # Só as dimensões (cadastros), nenhum valor de custo.
+  consulta_basica:
+    tables:
+      dim_calendar: {}
+      dim_product: {}
+      dim_product_family: {}
+      dim_site:
+        columns: {allow: [id, name, country, status]}   # sem `company` (a fábrica contratada)
+
+# FK → tabela referenciada. Necessário para validar `expand`: sem a relação declarada, o expand
+# é negado (fail-closed). Formato "<tabela>.<coluna_fk>": <tabela alvo>.
+relations:
+  fact_hourly_rate.site_id: dim_site
+  fact_hourly_rate.product_id: dim_product
+  fact_hourly_rate.month_id: dim_calendar
+  fact_standard_time.site_id: dim_site
+  fact_standard_time.product_id: dim_product
+  fact_dl_discount.site_id: dim_site
+  fact_dl_discount.product_id: dim_product
+  fact_final_dl_cost.site_id: dim_site
+  fact_final_dl_cost.product_id: dim_product
+  fact_final_dl_cost.month_id: dim_calendar
+  dim_product.product_family_id: dim_product_family

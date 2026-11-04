@@ -25,6 +25,8 @@ from db import (
     avaliacoes_da_sessao, buscar_abordagem, get_db, init_db, migrate_db, registrar_avaliacao,
     save_dashboard_widget_order,
 )
+import acesso
+import auth
 import db_config
 
 try:
@@ -143,6 +145,9 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Smart Agent Plug and Play API", version="4.0.0")
 
+# Auth antes do CORS: o último middleware adicionado é o mais externo, e assim as respostas 401
+# também levam os headers de CORS. Só age com o controle de acesso ativo (config/<dominio>/acl.yml).
+app.add_middleware(auth.AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -152,6 +157,37 @@ app.add_middleware(
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(memoria_admin.router)
+
+
+class DevLoginRequest(BaseModel):
+    user_id: str
+
+
+@app.get("/auth/users")
+def auth_users():
+    """Usuários demo do acl.yml para o seletor do front — o 'gateway' simulado da POC.
+    `enabled=false` quando o controle de acesso está inativo (o front segue sem token)."""
+    if not acesso.ativo():
+        return {"enabled": False, "users": []}
+    return {
+        "enabled": True,
+        "users": [
+            {"id": uid, "name": info.get("name", uid), "email": info.get("email", ""), "role": info.get("role")}
+            for uid, info in acesso.usuarios().items()
+        ],
+    }
+
+
+@app.post("/auth/dev-login")
+def auth_dev_login(req: DevLoginRequest):
+    """Emite um JWT (id, email, name) para um usuário do acl.yml — equivale ao login do mdsc-api-gateway."""
+    if not acesso.ativo():
+        return JSONResponse(status_code=404, content=_error_body(404, "NotFound", "Controle de acesso inativo.", "/auth/dev-login"))
+    resultado = auth.dev_login(req.user_id)
+    if resultado is None:
+        return JSONResponse(status_code=401, content=_error_body(401, "Unauthorized", "Usuário desconhecido.", "/auth/dev-login"))
+    token, user = resultado
+    return {"access_token": token, "token_type": "bearer", "user": {"id": user.id, "name": user.name, "email": user.email}}
 
 
 @app.get("/app-info")
@@ -1028,7 +1064,7 @@ def share_dashboard_widget(widget_id: str, req: WidgetShareRequest):
 
 
 @app.get("/dashboard-widgets/{widget_id}/data")
-def get_dashboard_widget_data(widget_id: str, lang: str = Query(default="")):
+def get_dashboard_widget_data(request: Request, widget_id: str, lang: str = Query(default="")):
     """Re-executa o widget_code e retorna a configuração Chart.js atualizada."""
     from scheduler.widget_runner import run_widget_code, compute_widget_range, WidgetCodeError
     from datetime import datetime as _dt
@@ -1049,7 +1085,8 @@ def get_dashboard_widget_data(widget_id: str, lang: str = Query(default="")):
     from_date, to_date = compute_widget_range(range_unit, range_value)
     session_id = f"widget_{widget_id[:8]}_{_dt.now().strftime('%Y%m%d%H%M%S')}"
     try:
-        config = run_widget_code(code, from_date, to_date, session_id)
+        # O painel roda com o papel de quem o está vendo (user_id vem do token, ver auth.py).
+        config = run_widget_code(code, from_date, to_date, session_id, user_id=getattr(request.state, "user_id", None))
     except WidgetCodeError as e:
         return JSONResponse(status_code=422, content={"error": True, "message": str(e)})
     except Exception as e:

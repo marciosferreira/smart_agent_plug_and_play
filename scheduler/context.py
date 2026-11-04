@@ -77,7 +77,10 @@ class TaskContext:
             df = pd.DataFrame(rows)
         """
         import graphql_config
-        return graphql_config.run_query_table(table, where=where, order_by=order_by, limit=limit, offset=offset, expand=expand)
+        return graphql_config.run_query_table(
+            table, where=where, order_by=order_by, limit=limit, offset=offset, expand=expand,
+            user_id=self.user_id,
+        )
 
     def graphql_aggregate(
         self,
@@ -108,6 +111,7 @@ class TaskContext:
         return graphql_config.run_aggregate(
             table, group_by=group_by, metric_field=metric_field, metric_op=metric_op,
             where=where, expand=expand, order_by=order_by, limit=limit,
+            user_id=self.user_id,
         )
 
     def pack(self, nome: str, **kwargs) -> "list[dict]":

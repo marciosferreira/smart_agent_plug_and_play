@@ -12,6 +12,7 @@ from datetime import date
 
 import requests
 
+import acesso
 import db_config
 
 _TIMEOUT = 30
@@ -98,6 +99,7 @@ def run_query_table(
     limit: "int | None" = None,
     offset: "int | None" = None,
     expand: "list[dict] | None" = None,
+    user_id: "str | None" = None,
 ) -> "list[dict]":
     """Busca linhas de `table` via reportTable e retorna list[dict].
 
@@ -112,13 +114,19 @@ def run_query_table(
                 [{"viaColumn": "customer_id", "columns": ["name", "channel"]}].
                 `viaColumn` tem que ser uma foreign key de `table`; as colunas pedidas
                 vêm em cada linha prefixadas "viaColumn__coluna" (ex: "customer_id__name").
+        user_id: usuário cujo papel limita a consulta (ver acesso.py); None usa o do contexto
+                 atual (chat). Sem controle de acesso ativo, não muda nada.
     """
+    pol = acesso.politica_para(user_id or acesso.usuario_atual())
+    if pol:
+        where = pol.preparar_tabela(table, where, order_by, expand)
     variables = {
         "table": table, "where": where, "orderBy": order_by,
         "limit": limit, "offset": offset, "expand": expand,
     }
     data = _post(_QUERY_TABLE, variables)
-    return data["reportTable"]
+    rows = data["reportTable"]
+    return pol.limpar_linhas(table, rows, expand) if pol else rows
 
 
 def run_aggregate(
@@ -130,6 +138,7 @@ def run_aggregate(
     expand: "list[str] | None" = None,
     order_by: "str | None" = None,
     limit: "int | None" = None,
+    user_id: "str | None" = None,
 ) -> "list[dict]":
     """Agrega `table` (GROUP BY `group_by` + função de agregação) via reportAggregate.
 
@@ -145,9 +154,13 @@ def run_aggregate(
         order_by: "ASC" ou "DESC" — ordena pelo valor agregado (metricValue).
                   Default do servidor: DESC.
         limit: máximo de grupos a retornar. Default do servidor: 20, teto: 500.
+        user_id: usuário cujo papel limita a consulta (ver run_query_table).
 
     Retorna list[dict] com chaves "groupKey", "metricValue" e uma por coluna de `expand`.
     """
+    pol = acesso.politica_para(user_id or acesso.usuario_atual())
+    if pol:
+        where = pol.preparar_agregado(table, group_by, metric_field, where, expand)
     input_obj: dict = {
         "table": table,
         "groupBy": group_by,
@@ -174,7 +187,7 @@ def run_aggregate(
     return rows
 
 
-def run_schema() -> "list[dict]":
+def run_schema(user_id: "str | None" = None) -> "list[dict]":
     """Busca o schema real (tabelas e colunas) exposto pelo backend via reportSchema.
 
     Sem argumentos — retorna todas as tabelas do domínio ativo de uma vez. Cada item:
@@ -185,4 +198,6 @@ def run_schema() -> "list[dict]":
     config/new_age/*/dominio.md como exemplo de caso real já encontrado).
     """
     data = _post(_QUERY_SCHEMA, {})
-    return data["reportSchema"]["tables"]
+    tables = data["reportSchema"]["tables"]
+    pol = acesso.politica_para(user_id or acesso.usuario_atual())
+    return pol.filtrar_schema(tables) if pol else tables
