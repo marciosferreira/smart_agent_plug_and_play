@@ -1,0 +1,14 @@
+{
+  "task_id": "013",
+  "task_name": "Alerta Custo JAG > 50",
+  "run_at": "2026-10-28T14:39:31.305163",
+  "status": "pending_send",
+  "pdf_urls": [],
+  "email": null,
+  "schedule": {
+    "frequency": "every_5m",
+    "weekday": null,
+    "day": null,
+    "time": null
+  }
+}

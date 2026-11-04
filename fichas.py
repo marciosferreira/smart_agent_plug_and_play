@@ -218,7 +218,9 @@ def _escolher(ind: dict, ordem, sim, k: int, user_id: str, agrupar: str | None) 
     """Os `k` índices a devolver. Sem `agrupar`, os k mais parecidos. Com `agrupar`, fichas
     quase idênticas entre si (cosseno >= MEMORIA_FICHAS_DUPLICADA) viram uma só, para as vagas
     mostrarem abordagens diferentes: fica a do próprio usuário, depois a de melhor sinal
-    ("contestada e corrigida", 👍, 👎) e depois a mais recente. Nada é apagado.
+    ("contestada e corrigida", 👍, 👎) e depois a mais recente. Nada é apagado. Sinais opostos
+    não se fundem: as 👎 formam um grupo à parte das demais, então o que o usuário aprovou e o
+    que ele reprovou para o mesmo pedido chegam juntos, e a diferença entre os dois é o aprendizado.
     `agrupar="so_de_outros"` nunca agrupa as fichas do próprio usuário: cada uma é uma conversa
     que ele pode querer reler."""
     if not agrupar:
@@ -227,6 +229,9 @@ def _escolher(ind: dict, ordem, sim, k: int, user_id: str, agrupar: str | None) 
 
     def propria(i: int) -> bool:
         return bool(user_id) and linhas[i]["user_id"] == user_id
+
+    def reprovada(i: int) -> bool:
+        return linhas[i]["avaliacao"] == "negativa"
 
     def valor(i: int) -> tuple:
         return (propria(i), _PESO_AVALIACAO.get(linhas[i]["avaliacao"], 0), linhas[i]["atualizada_em"] or "")
@@ -237,7 +242,9 @@ def _escolher(ind: dict, ordem, sim, k: int, user_id: str, agrupar: str | None) 
             escolhidas.append(i)
             continue
         comparaveis = [p for p, j in enumerate(escolhidas) if not (agrupar == "so_de_outros" and propria(j))]
-        igual = next((p for p in comparaveis if float(matriz[i] @ matriz[escolhidas[p]]) >= limite), None)
+        igual = next((p for p in comparaveis
+                      if reprovada(i) == reprovada(escolhidas[p])
+                      and float(matriz[i] @ matriz[escolhidas[p]]) >= limite), None)
         if igual is None:
             escolhidas.append(i)
         elif valor(i) > valor(escolhidas[igual]):
@@ -392,7 +399,11 @@ _USO = (
     "Como usar: evite o que está em \"Falhou\", a não ser que o pedido atual peça isso; se a sua "
     "análise depender de uma escolha que já foi contestada antes (um filtro, uma métrica), diga na "
     "resposta qual escolha fez e por quê. Uma ficha pode ser de um pedido só parecido (outro período, "
-    "outro recorte, outra métrica): aproveite o método, mas siga o recorte do pedido atual."
+    "outro recorte, outra métrica): aproveite o método, mas siga o recorte do pedido atual. Se houver "
+    "uma ficha 👍 e uma 👎 do mesmo pedido, compare o \"Funcionou\" de uma com a abordagem da outra: "
+    "a diferença entre as duas é o que importa. Um \"Falhou\" que começa com \"Reprovada sem motivo "
+    "informado\" só descreve o que foi feito: o usuário não disse o que estava errado, então não "
+    "repita essa abordagem sem conferi-la."
 )
 
 

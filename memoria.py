@@ -71,7 +71,7 @@ from langgraph.store.sqlite import SqliteStore
 from langmem import ReflectionExecutor
 from pydantic import BaseModel, Field
 
-from db import DB_PATH, guardar_abordagem
+from db import DB_PATH, guardar_abordagem, guardar_prompt
 from feedback import inicio_comparavel, marca_da_nota
 import fichas as _fichas
 
@@ -347,6 +347,10 @@ Uma contestação que não se confirmou (o agente conferiu e manteve a abordagem
 MANTENHA a avaliacao que a ficha já tinha (um 👍 anterior continua "positiva").
 - NUNCA números, totais, percentuais, rankings ou comparações de valores, em nenhum campo. Os \
 números mudam; a abordagem não. Pode citar tabelas, colunas e filtros.
+- NUNCA datas nem períodos concretos ("2026-07-01", "Q2/2026", "setembro") em funcionou e falhou: \
+o período é do pedido, não do método, e a ficha vai servir a outros períodos. Descreva a REGRA do \
+período, não os valores: "meses que cruzam o trimestre pedido (start_month <= fim do período e \
+end_month >= início)", "trimestre fiscal do pedido".
 
 AVALIAÇÃO DAS RESPOSTAS (👍 e 👎):
 - Uma resposta do AGENTE pode vir marcada com "[AVALIAÇÃO DO USUÁRIO ...]": ele clicou em 👍 \
@@ -355,8 +359,11 @@ episódio. A marca não diz o que vem depois: a mensagem seguinte do usuário po
 relação nenhuma com a resposta avaliada.
 - 👎 seguido de uma mensagem que diz o que estava ERRADO (tabela, coluna, filtro, junção, \
 cálculo ou premissa): registre em falhou, com a causa; se a causa é um fato ou regra do banco, \
-também vira licao_verificada. 👎 seguido de outra pergunta, ou sem explicação: só avaliacao \
-"negativa", sem inventar a causa.
+também vira licao_verificada. 👎 seguido de outra pergunta, ou sem explicação: avaliacao \
+"negativa", sem inventar a causa. Em falhou, escreva então só "Reprovada sem motivo informado: " \
+e a abordagem que foi usada (tabela, colunas, filtros, junção, período), tirada das consultas do \
+analista: assim quem consultar a ficha sabe o que não repetir às cegas. Se a causa já estiver na \
+ficha, ou se o usuário a disser depois, ela substitui esse texto.
 - ERRO NÃO É PEDIDO DE OUTRO RECORTE: "quero por fábrica, não por site", "só o site JAG", \
 "agora por trimestre", "mostre em gráfico" são pedidos de outro recorte ou formato. A resposta \
 não estava errada: não registre em falhou nem nas lições. Se mudou a intenção, é outro episódio.
@@ -429,7 +436,9 @@ funcionou ("... conferido após contestação"); falhou continua vazio e avaliac
 - 👎 e a mensagem seguinte "faltou filtrar só os aprovados": na ficha, falhou "Não filtrou por \
 status aprovado" e avaliacao "negativa" (ou "corrigida", se o agente refez); e \
 licao_verificada "Para custo, considerar apenas registros com status aprovado".
-- 👎 e a mensagem seguinte "que horas são?": na ficha, só avaliacao "negativa"; nada em falhou.
+- 👎 e a mensagem seguinte "que horas são?": na ficha, avaliacao "negativa" e falhou \
+"Reprovada sem motivo informado: tabela fact_final_dl_cost, somando dl_cost_by_cm_usd por site, \
+sem filtro de status"; nenhuma lição.
 - "Quero por fábrica, não por site": pedido de outro recorte. Nada em falhou na ficha anterior; \
 quando o agente consultar, uma ficha nova para o novo episódio.
 - "Bom dia!" ou "que horas são?", sem consulta de dados: nenhuma ficha.
@@ -775,7 +784,7 @@ def aplicar_operacoes(
 # ---------------------------------------------------------------------------
 # Fichas de análise e resumo da abordagem
 # ---------------------------------------------------------------------------
-_DATAS = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\bQ\d\s*,?\s*(?:FY)?\s*\d{4}\b|\bFY\s?\d{2,4}\b", re.IGNORECASE)
+_DATAS = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\bQ\d\s*[,/-]?\s*(?:FY)?\s*\d{4}\b|\bFY\s?\d{2,4}\b", re.IGNORECASE)
 _VALOR = re.compile(r"\d+[.,]\d+|\d\s*%|[$€£¥]\s*\d|R\$\s*\d")
 
 
@@ -827,6 +836,8 @@ def validar_fichas(propostas: list[FichaAnalise], msgs: list[dict], existentes: 
             logger.info("[memoria] ficha nova descartada: não houve consulta de dados na janela")
             continue
         for c in ("intencao", "funcionou", "falhou"):
+            # o período é do pedido, não do método: a data concreta vira marcador e a regra fica
+            campos[c] = _DATAS.sub("[período]", campos[c])
             if campos[c] and _parece_valor(campos[c]):
                 logger.warning("[memoria] campo %s da ficha esvaziado (trazia números): %s", c, campos[c])
                 campos[c] = ""
@@ -877,6 +888,7 @@ _lock = threading.Lock()
 _seq_notas = itertools.count(1)                      # identifica cada clique em 👍/👎
 _rodando: set[str] = set()                           # sessões com uma extração em andamento
 _adiadas: dict[str, tuple[str, str]] = {}            # sessão -> (user_id, dominio) a reagendar no fim dela
+_geracao: dict[str, int] = defaultdict(int)          # sessão -> número do último agendamento
 
 
 def _baixar_notas(sessao: str, notas: dict[int, int]) -> None:
@@ -973,6 +985,14 @@ class _Extrator:
     def invoke(self, payload, config=None):
         meta = payload.get("_meta") or {}
         with _lock:
+            if meta.get("geracao") != _geracao[meta.get("sessao")]:
+                # O executor deveria ter cancelado este agendamento ao receber o seguinte, mas o
+                # cancelamento dele falha (o worker, ao descartar um agendamento cancelado, apaga
+                # o registro do que o substituiu). Rodar a janela velha, sem a contestação que
+                # chegou depois, reescreveria a ficha com menos informação.
+                logger.info("[memoria] extração substituída por outra mais nova, ignorada (sessão %s)",
+                            meta.get("sessao"))
+                return []
             _rodando.add(meta.get("sessao"))
         ok = False
         try:
@@ -1071,6 +1091,53 @@ def add_trace(session_id: str, messages: list[BaseMessage]) -> None:
         logger.warning("[memoria] falha ao registrar trace", exc_info=True)
 
 
+_MAX_MSG_PROMPT = 20000  # mensagens que não são o system prompt (dados de tools, histórico) saem cortadas
+
+
+def _texto_do_conteudo(c) -> str:
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        partes = []
+        for p in c:
+            if isinstance(p, str):
+                partes.append(p)
+            elif isinstance(p, dict) and p.get("type") == "text":
+                partes.append(p.get("text", ""))
+            else:
+                partes.append(f"[{p.get('type', 'conteúdo') if isinstance(p, dict) else 'conteúdo'}]")
+        return "\n".join(partes)
+    return str(c)
+
+
+def renderizar_prompt(msgs: list[BaseMessage]) -> str:
+    """O prompt como o LLM o recebe, em texto: o system prompt inteiro e depois as demais
+    mensagens (as grandes saem cortadas), cada uma com o papel no cabeçalho."""
+    partes = []
+    for m in msgs:
+        papel = {"system": "SYSTEM", "human": "USUÁRIO", "ai": "AGENTE", "tool": "TOOL"}.get(m.type, m.type.upper())
+        if m.type == "tool" and getattr(m, "name", None):
+            papel += f" ({m.name})"
+        texto = _texto_do_conteudo(m.content)
+        if m.type != "system":
+            texto = _cortar(texto, _MAX_MSG_PROMPT)
+        chamadas = [f"  -> chamou {tc.get('name')}({_cortar(json.dumps(tc.get('args', {}), ensure_ascii=False), 500)})"
+                    for tc in getattr(m, "tool_calls", None) or []]
+        partes.append(f"===== {papel} =====\n" + "\n".join([texto] + chamadas))
+    return "\n\n".join(partes)
+
+
+def registrar_prompt(user_id: str, tipo: str, session_id: str, dominio: str, msgs: list[BaseMessage]) -> None:
+    """Guarda o último prompt do usuário (`tipo`: orquestrador ou analista) para o painel de
+    depuração. Desligue com MEMORIA_GRAVAR_PROMPTS=0. Nunca levanta exceção."""
+    if not user_id or os.getenv("MEMORIA_GRAVAR_PROMPTS", "1").strip() == "0":
+        return
+    try:
+        guardar_prompt(user_id, tipo, session_id or "", dominio or "", renderizar_prompt(msgs))
+    except Exception:
+        logger.warning("[memoria] falha ao guardar o prompt", exc_info=True)
+
+
 def descartar_turno(session_id: str) -> None:
     """Turno cancelado ou com erro: descarta o trace acumulado."""
     with _lock:
@@ -1105,6 +1172,7 @@ def _enviar(sessao: str, user_id: str, dominio: str, turnos: list[dict], base: i
     quem agenda é o turno seguinte: o agendamento substitui o do clique (mesmo thread_id), e o
     sinal não pode ficar de fora nem virar contexto."""
     if sessao in _rodando:
+        _geracao[sessao] += 1  # o que estiver na fila perde a vez: o adiado o substitui
         # A extração em andamento ainda não avançou o ponteiro: uma janela calculada agora
         # repetiria como novos os turnos que ela está processando. Fica para o fim dela.
         _adiadas[sessao] = (user_id, dominio)
@@ -1139,10 +1207,12 @@ def _enviar(sessao: str, user_id: str, dominio: str, turnos: list[dict], base: i
     espera = 0 if pendentes >= _teto_pendentes() else _delay()
     logger.info("[memoria] agendando extração (sessão %s, %d turnos na janela, %d pendentes, em %ds)",
                 sessao, len(janela), pendentes, espera)
+    _geracao[sessao] += 1  # qualquer agendamento anterior, ainda na fila, perde a vez
     fut = _executor.submit(
         {
             "messages": _mensagens(janela, n_contexto),
             "_meta": {"sessao": sessao, "n_abs": base + len(turnos), "user_id": user_id, "dominio": dominio,
+                      "geracao": _geracao[sessao],
                       "notas": {base + i: turnos[i]["nota_pendente"] for i in avaliados}},
         },
         config={"configurable": {}},

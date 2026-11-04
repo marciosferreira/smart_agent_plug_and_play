@@ -1,0 +1,20 @@
+
+2. Campo sensível: lido direto x lido por junção
+================================================
+(a) Direto em fact_final_dl_cost:
+{
+  "quarter": "Q2,2026",
+  "dl_cost_by_cm": 5,
+  "dl_cost_by_cm_usd": 1
+}
+
+(b) A mesma linha por junção, a partir da ponte de Sales Models:
+{
+  "final_dl_cost_id__quarter": "Q2,2026",
+  "final_dl_cost_id__dl_cost_by_cm_usd": {
+    "iv": "Cz/Mzfp6UnDEX5eh",
+    "authTag": "l9Iri/qEQ6Gtio+OrOQK0w==",
+    "ciphertext": "nw==",
+    "keyVersion": "finalDlCost-v1"
+  }
+}

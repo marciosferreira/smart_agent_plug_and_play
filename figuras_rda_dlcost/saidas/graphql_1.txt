@@ -1,0 +1,57 @@
+
+1. Consulta com junção (expand): taxa horária já com o site
+===========================================================
+Pedido (reportTable):
+{
+  "table": "fact_hourly_rate",
+  "where": [
+    {
+      "field": "status_approval",
+      "op": "EQ",
+      "value": "APPROVED"
+    },
+    {
+      "field": "month_id",
+      "op": "EQ",
+      "value": "2026-08"
+    }
+  ],
+  "expand": [
+    {
+      "viaColumn": "site_id",
+      "columns": [
+        "name",
+        "country"
+      ]
+    }
+  ],
+  "limit": 3
+}
+
+Resposta (colunas selecionadas):
+[
+  {
+    "site_id__name": "WUH",
+    "site_id__country": "China",
+    "month_id": "2026-08",
+    "area": "L5",
+    "hourly_rate": 4,
+    "status_approval": "APPROVED"
+  },
+  {
+    "site_id__name": "BAT",
+    "site_id__country": "Indonesia",
+    "month_id": "2026-08",
+    "area": "SMT",
+    "hourly_rate": 4,
+    "status_approval": "APPROVED"
+  },
+  {
+    "site_id__name": "BAT",
+    "site_id__country": "Indonesia",
+    "month_id": "2026-08",
+    "area": "L5",
+    "hourly_rate": 4,
+    "status_approval": "APPROVED"
+  }
+]

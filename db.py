@@ -136,6 +136,17 @@ def migrate_db():
             # a assinatura do cache da busca lê MAX(atualizada_em): sem este índice a consulta
             # percorre o vetor de cada ficha (medido: 68 ms com 20 mil fichas, 3 ms com o índice)
             "CREATE INDEX IF NOT EXISTS idx_fichas_dominio_atual ON fichas(dominio, atualizada_em)",
+            # o último prompt enviado ao LLM de cada usuário (orquestrador e analista), para o painel
+            # /memoria mostrar o que a memória de fato injetou. Só o último de cada tipo é mantido.
+            """CREATE TABLE IF NOT EXISTS ultimos_prompts (
+                user_id    TEXT NOT NULL,
+                tipo       TEXT NOT NULL,
+                session_id TEXT,
+                dominio    TEXT,
+                prompt     TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, tipo)
+            )""",
             # marca cada sessão de chat com o domínio ativo no primeiro turno
             """CREATE TABLE IF NOT EXISTS session_dominio (
                 session_id TEXT PRIMARY KEY,
@@ -214,6 +225,17 @@ def guardar_abordagem(session_id: str, chave: str, texto: str) -> None:
         conn.execute(
             "INSERT OR REPLACE INTO abordagens (session_id, chave, texto, created_at) VALUES (?,?,?,?)",
             (session_id, chave, texto, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.commit()
+
+
+def guardar_prompt(user_id: str, tipo: str, session_id: str, dominio: str, prompt: str) -> None:
+    """Guarda o último prompt do usuário para o tipo (`orquestrador` ou `analista`)."""
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO ultimos_prompts (user_id, tipo, session_id, dominio, prompt, created_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (user_id, tipo, session_id, dominio, prompt, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.commit()
 

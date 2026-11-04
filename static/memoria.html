@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memória dos usuários</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --txt: #1f2430; --mut: #6b7280; --bd: #e2e5ea;
+    --acc: #2563eb; --ok: #15803d; --bad: #b91c1c; --warn: #b45309;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14161b; --card: #1d2027; --txt: #e6e8ee; --mut: #9aa1ae; --bd: #2c303a;
+            --acc: #6ea0ff; --ok: #4ade80; --bad: #f87171; --warn: #fbbf24; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--txt); }
+  header { position: sticky; top: 0; z-index: 2; background: var(--card); border-bottom: 1px solid var(--bd);
+           padding: 12px 24px; display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: center; }
+  h1 { font-size: 16px; margin: 0 8px 0 0; }
+  label { color: var(--mut); font-size: 12px; }
+  input, select, button { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--bd);
+                          border-radius: 6px; padding: 6px 10px; }
+  input { min-width: 200px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--acc); }
+  .danger { color: var(--bad); }
+  .danger:hover { border-color: var(--bad); }
+  main { max-width: 1000px; margin: 0 auto; padding: 24px; }
+  section { margin-bottom: 32px; }
+  h2 { font-size: 15px; margin: 0 0 4px; }
+  .sub { color: var(--mut); font-size: 12px; margin: 0 0 12px; }
+  .card { background: var(--card); border: 1px solid var(--bd); border-radius: 8px; padding: 12px 16px; margin-bottom: 10px; }
+  .vazio { color: var(--mut); font-style: italic; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { background: var(--bg); border: 1px solid var(--bd); border-radius: 999px; padding: 1px 10px; font-size: 12px; color: var(--mut); }
+  .chip.ok { color: var(--ok); } .chip.bad { color: var(--bad); } .chip.warn { color: var(--warn); }
+  dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; }
+  dt { color: var(--mut); } dd { margin: 0; }
+  ul { margin: 0; padding-left: 20px; }
+  .ficha-topo { display: flex; gap: 12px; justify-content: space-between; align-items: start; }
+  .ficha h3 { font-size: 14px; margin: 0 0 6px; }
+  .ficha p { margin: 4px 0; white-space: pre-wrap; }
+  .rot { color: var(--mut); font-size: 12px; }
+  .meta { color: var(--mut); font-size: 12px; margin-top: 8px; }
+  .item { display: flex; gap: 6px; margin-bottom: 6px; }
+  .item input { flex: 1; }
+  .item.campo span { width: 130px; color: var(--mut); padding-top: 7px; }
+  .acoes { display: flex; gap: 8px; margin-top: 10px; }
+  .card-topo { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+  .primary { background: var(--acc); color: #fff; border-color: var(--acc); }
+  .prompt-barra { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+  pre.prompt { margin: 0; max-height: 520px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+               font: 12px/1.5 ui-monospace, Consolas, monospace; background: var(--bg); border: 1px solid var(--bd);
+               border-radius: 6px; padding: 10px 12px; }
+  mark { background: #fde68a; color: #1f2430; }
+  #erro { color: var(--bad); padding: 8px 24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Memória dos usuários</h1>
+  <label for="usuarios">Usuário</label>
+  <input id="usuarios" list="lista-usuarios" placeholder="Digite ou escolha… (id novo = usuário novo)" autocomplete="off">
+  <datalist id="lista-usuarios"></datalist>
+  <select id="sel-usuarios" aria-label="Usuários disponíveis"></select>
+  <label for="dominios">Domínio</label>
+  <select id="dominios" aria-label="Domínio"></select>
+  <label for="busca">Fichas</label>
+  <input id="busca" placeholder="Filtrar por texto…">
+  <select id="aval" aria-label="Avaliação">
+    <option value="">Todas as avaliações</option>
+    <option value="positiva">👍 positiva</option>
+    <option value="negativa">👎 negativa</option>
+    <option value="corrigida">contestada e corrigida</option>
+    <option value="sem_avaliacao">sem avaliação</option>
+  </select>
+  <button id="recarregar">Recarregar</button>
+</header>
+<div id="erro" hidden></div>
+<main>
+  <section>
+    <h2>Perfil</h2>
+    <p class="sub">Quem o usuário disse ser. Dá para editar. Onde ainda não há nada, o modelo vazio aparece para preencher.</p>
+    <div id="perfil"></div>
+  </section>
+  <section>
+    <h2>Preferências</h2>
+    <p class="sub">Como ele quer ver os resultados. Dá para editar ou apagar itens.</p>
+    <div id="preferencias"></div>
+  </section>
+  <section>
+    <h2>Convenções pessoais</h2>
+    <p class="sub">Como ele quer que as análises dele sejam delimitadas ou calculadas. Dá para editar ou apagar itens.</p>
+    <div id="convencoes"></div>
+  </section>
+  <section>
+    <h2>Último prompt enviado</h2>
+    <p class="sub">O prompt completo da última chamada ao LLM deste usuário, para conferir o que a memória injetou.
+      O orquestrador recebe perfil e preferências; o analista, lições, convenções, fichas e preferências.</p>
+    <div id="prompts"></div>
+  </section>
+  <section>
+    <h2>Fichas de análise <span id="qtd-fichas" class="rot"></span></h2>
+    <p class="sub">O que o agente aprendeu com as conversas: a abordagem que funcionou e a que falhou.</p>
+    <div id="fichas"></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const AVAL = {
+  positiva: ["👍 positiva", "ok"], negativa: ["👎 negativa", "bad"],
+  corrigida: ["contestada e corrigida", "warn"], sem_avaliacao: ["sem avaliação", ""],
+};
+const ROTULOS_PERFIL = [
+  ["nome", "Nome"], ["cargo", "Cargo"], ["funcao_area", "Função/área"],
+  ["atuacao", "Atuação"], ["local_atuacao", "Local de atuação"], ["equipe_gestor", "Equipe/gestor"],
+];
+let prompts = [], tipoPrompt = "orquestrador", usuarios = [], todosDominios = [], atual = null, dados = null, dominio = "";
+const norm = (d) => (d || "").replaceAll(".", "_") || "_";
+
+function el(tag, props = {}, ...filhos) {
+  const e = Object.assign(document.createElement(tag), props);
+  e.append(...filhos.filter((f) => f != null));
+  return e;
+}
+function vazio(texto) { return el("div", { className: "card vazio", textContent: texto }); }
+function dataBr(s) {
+  const d = new Date((s || "").replace(" ", "T"));
+  return isNaN(d) ? (s || "") : d.toLocaleString("pt-BR");
+}
+async function api(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return r.json();
+}
+function erro(e) { $("erro").hidden = !e; $("erro").textContent = e ? `Erro: ${e.message || e}` : ""; }
+
+async function carregarUsuarios() {
+  usuarios = await api("/memoria/api/usuarios");
+  todosDominios = await api("/memoria/api/dominios");
+  const todos = todosDominios;
+  if (dominio && !todos.includes(dominio)) dominio = "";
+  $("dominios").replaceChildren(el("option", { value: "", textContent: `Escolher domínio (${todos.length})…` }),
+    ...todos.map((d) => el("option", { value: d, textContent: d })));
+  $("dominios").value = dominio;
+  const visiveis = usuarios.filter((u) => !dominio || u.dominios.includes(dominio));
+  const rotulo = (u) => `${u.user_id || "(sem usuário)"} — ${u.fichas} ficha(s)`;
+  $("lista-usuarios").replaceChildren(...visiveis.map((u) => el("option", { value: u.user_id || "" })));
+  $("sel-usuarios").replaceChildren(
+    el("option", { value: "", textContent: `Escolher (${visiveis.length} usuário(s))…` }),
+    ...visiveis.map((u) => el("option", { value: u.user_id, textContent: rotulo(u) })),
+  );
+  $("sel-usuarios").value = atual ?? "";
+}
+
+async function selecionar(id) {
+  atual = id;
+  $("sel-usuarios").value = id ?? "";
+  $("usuarios").value = id ?? "";
+  if (!id) { dados = null; desenhar(); return; }
+  dados = await api(`/memoria/api/usuarios/${encodeURIComponent(id)}`);
+  prompts = await api(`/memoria/api/usuarios/${encodeURIComponent(id)}/prompts`);
+  desenhar();
+}
+
+// O documento do domínio escolhido: o que existe no banco ou, se não há nada, o modelo vazio.
+// Só há edição com usuário e domínio escolhidos, para não mexer no documento errado.
+function docs(tipo, vazio) {
+  const d = (dados?.documentos || []).find((x) => x.tipo === tipo && x.dominio === dominio);
+  return [d || { dominio, tipo, conteudo: vazio, atualizado_em: null }];
+}
+function faltaEscolha(alvo) {
+  if (!dados) { alvo.replaceChildren(vazio("Selecione um usuário e um domínio.")); return true; }
+  if (!dominio) { alvo.replaceChildren(vazio("Selecione um domínio.")); return true; }
+  return false;
+}
+function comDominio(dominio, atualizado) {
+  return el("div", { className: "meta", textContent: `${dominio} · ` +
+    (atualizado ? `atualizado em ${dataBr(atualizado)}` : "ainda não existe no banco; será criado ao salvar") });
+}
+
+function desenharLista(destino, tipo, chave) {
+  const alvo = $(destino);
+  if (faltaEscolha(alvo)) return;
+  const itens = docs(tipo, { [chave]: [] });
+  alvo.replaceChildren(...itens.map((d) => {
+    const card = el("div", { className: "card" });
+    const ver = () => card.replaceChildren(
+      el("div", { className: "card-topo" },
+        (d.conteudo[chave] || []).length
+          ? el("ul", {}, ...d.conteudo[chave].map((t) => el("li", { textContent: t })))
+          : el("span", { className: "vazio", textContent: "Nada registrado." }),
+        botaoEditar(() => editarLista(card, d, chave, ver))),
+      comDominio(d.dominio, d.atualizado_em));
+    ver();
+    return card;
+  }));
+}
+
+function botaoEditar(fn) { return el("button", { textContent: "Editar", title: "Editar ou apagar itens", onclick: fn }); }
+
+// Linha de texto editável; sem rótulo é um item de lista, com botão de remover.
+function linha(valor, rotulo) {
+  const inp = el("input", { value: valor || "" });
+  const row = el("div", { className: rotulo ? "item campo" : "item" });
+  if (rotulo) row.append(el("span", { textContent: rotulo }));
+  row.append(inp);
+  if (!rotulo) row.append(el("button", { className: "danger", textContent: "✕", title: "Remover item", onclick: () => row.remove() }));
+  return { row, inp };
+}
+
+function barraSalvar(cancelar, salvar) {
+  return el("div", { className: "acoes" },
+    el("button", { className: "primary", textContent: "Salvar", onclick: salvar }),
+    el("button", { textContent: "Cancelar", onclick: cancelar }));
+}
+
+const textos = (caixa) => [...caixa.querySelectorAll("input")].map((i) => i.value.trim()).filter(Boolean);
+
+function editarLista(card, d, chave, voltar) {
+  const caixa = el("div");
+  const add = (v) => caixa.append(linha(v).row);
+  (d.conteudo[chave] || []).forEach(add);
+  card.replaceChildren(caixa,
+    el("button", { textContent: "+ adicionar item", onclick: () => add("") }),
+    barraSalvar(voltar, () => salvarDoc(d, { [chave]: textos(caixa) })));
+}
+
+function editarPerfil(card, d, voltar) {
+  const campos = ROTULOS_PERFIL.map(([c, rot]) => [c, linha(d.conteudo[c], rot)]);
+  const caixa = el("div");
+  const add = (v) => caixa.append(linha(v).row);
+  (d.conteudo.outros || []).forEach(add);
+  card.replaceChildren(...campos.map(([, l]) => l.row), el("div", { className: "rot", textContent: "Outros" }), caixa,
+    el("button", { textContent: "+ adicionar em Outros", onclick: () => add("") }),
+    barraSalvar(voltar, () => salvarDoc(d, {
+      ...Object.fromEntries(campos.map(([c, l]) => [c, l.inp.value.trim() || null])),
+      outros: textos(caixa) })));
+}
+
+async function salvarDoc(d, conteudo) {
+  try {
+    await api("/memoria/api/documentos", { method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: atual, dominio: d.dominio, tipo: d.tipo, conteudo, atualizado_em: d.atualizado_em }) });
+    erro(null);
+    await carregarUsuarios();
+    await selecionar(atual);
+  } catch (e) { erro(e); }
+}
+
+function desenharPerfil() {
+  const alvo = $("perfil");
+  if (faltaEscolha(alvo)) return;
+  const itens = docs("perfil", {});
+  alvo.replaceChildren(...itens.map((d) => {
+    const card = el("div", { className: "card" });
+    const ver = () => {
+    const dl = el("dl");
+    for (const [campo, rot] of ROTULOS_PERFIL)
+      if (d.conteudo[campo]) dl.append(el("dt", { textContent: rot }), el("dd", { textContent: d.conteudo[campo] }));
+    const outros = d.conteudo.outros || [];
+    if (outros.length)
+      dl.append(el("dt", { textContent: "Outros" }), el("dd", {}, el("ul", {}, ...outros.map((t) => el("li", { textContent: t })))));
+    if (!dl.children.length) dl.append(el("span", { className: "vazio", textContent: "Nada registrado." }));
+    card.replaceChildren(el("div", { className: "card-topo" }, dl, botaoEditar(() => editarPerfil(card, d, ver))),
+      comDominio(d.dominio, d.atualizado_em));
+    };
+    ver();
+    return card;
+  }));
+}
+
+function campoFicha(rotulo, texto) {
+  return texto ? el("p", {}, el("span", { className: "rot", textContent: rotulo + ": " }), texto) : null;
+}
+
+function desenharFichas() {
+  const alvo = $("fichas");
+  if (!dados) { $("qtd-fichas").textContent = ""; return alvo.replaceChildren(vazio("Selecione um usuário.")); }
+  const q = $("busca").value.trim().toLowerCase(), av = $("aval").value;
+  const lista = dados.fichas.filter((f) =>
+    (!av || f.avaliacao === av) && (!dominio || norm(f.dominio) === dominio) &&
+    (!q || [f.titulo, f.intencao, f.funcionou, f.falhou].some((t) => (t || "").toLowerCase().includes(q))));
+  $("qtd-fichas").textContent = `(${lista.length} de ${dados.fichas.length})`;
+  if (!lista.length) return alvo.replaceChildren(vazio("Nenhuma ficha."));
+  alvo.replaceChildren(...lista.map((f) => {
+    const [txt, cls] = AVAL[f.avaliacao] || [f.avaliacao, ""];
+    const apagar = el("button", { className: "danger", textContent: "Apagar", title: "Apagar esta ficha" });
+    apagar.onclick = () => apagarFicha(f);
+    return el("div", { className: "card ficha" },
+      el("div", { className: "ficha-topo" },
+        el("div", {}, el("h3", { textContent: f.titulo }), el("div", { className: "chips" },
+          el("span", { className: `chip ${cls}`, textContent: txt }),
+          el("span", { className: "chip", textContent: f.dominio }))),
+        apagar),
+      campoFicha("Intenção", f.intencao), campoFicha("Funcionou", f.funcionou), campoFicha("Falhou", f.falhou),
+      el("div", { className: "meta", textContent:
+        `criada em ${dataBr(f.criada_em)} · atualizada em ${dataBr(f.atualizada_em)} · sessão ${f.session_id} · id ${f.id.slice(0, 8)}` }));
+  }));
+}
+
+const ROT_PROMPT = { orquestrador: "Orquestrador", analista: "Analista" };
+
+function desenharPrompt() {
+  const alvo = $("prompts");
+  if (!dados) return alvo.replaceChildren(vazio("Selecione um usuário."));
+  if (!prompts.length) return alvo.replaceChildren(vazio("Nenhum prompt registrado ainda para este usuário."));
+  const p = prompts.find((x) => x.tipo === tipoPrompt) || prompts[0];
+  tipoPrompt = p.tipo;
+  const sel = el("select", { onchange: (e) => { tipoPrompt = e.target.value; desenharPrompt(); } },
+    ...prompts.map((x) => el("option", { value: x.tipo, textContent: ROT_PROMPT[x.tipo] || x.tipo, selected: x.tipo === p.tipo })));
+  const termo = el("input", { placeholder: "Destacar no prompt…", value: termoPrompt, oninput: (e) => { termoPrompt = e.target.value; pintar(); } });
+  const pre = el("pre", { className: "prompt" });
+  const contagem = el("span", { className: "rot" });
+  function pintar() {
+    const t = termoPrompt.trim(), txt = p.prompt;
+    pre.replaceChildren();
+    contagem.textContent = "";
+    if (!t) { pre.textContent = txt; return; }
+    let i = 0, n = 0;
+    for (let k = txt.toLowerCase().indexOf(t.toLowerCase()); k >= 0; k = txt.toLowerCase().indexOf(t.toLowerCase(), i)) {
+      pre.append(txt.slice(i, k), el("mark", { textContent: txt.slice(k, k + t.length) }));
+      i = k + t.length; n++;
+    }
+    pre.append(txt.slice(i));
+    contagem.textContent = `${n} ocorrência(s)`;
+    pre.querySelector("mark")?.scrollIntoView({ block: "nearest" });
+  }
+  const copiar = el("button", { textContent: "Copiar", onclick: () => navigator.clipboard.writeText(p.prompt) });
+  alvo.replaceChildren(el("div", { className: "card" },
+    el("div", { className: "prompt-barra" }, sel, termo, contagem, copiar),
+    pre,
+    el("div", { className: "meta", textContent:
+      `${p.prompt.length.toLocaleString("pt-BR")} caracteres · domínio ${p.dominio || "?"} · sessão ${p.session_id || "?"} · gravado em ${dataBr(p.created_at)}` })));
+  pintar();
+}
+let termoPrompt = "";
+
+function desenhar() {
+  desenharPrompt();
+  desenharPerfil();
+  desenharLista("preferencias", "preferencias", "preferencias");
+  desenharLista("convencoes", "convencoes", "convencoes");
+  desenharFichas();
+}
+
+async function apagarFicha(f) {
+  if (!confirm(`Apagar a ficha "${f.titulo}"?\nIsso não pode ser desfeito.`)) return;
+  try {
+    await api(`/memoria/api/fichas/${f.id}`, { method: "DELETE" });
+    erro(null);
+    await carregarUsuarios();
+    await selecionar(atual);
+  } catch (e) { erro(e); }
+}
+
+$("sel-usuarios").onchange = (e) => selecionar(e.target.value || null).catch(erro);
+$("usuarios").onchange = (e) => selecionar(e.target.value.trim() || null).catch(erro);
+$("dominios").onchange = (e) => { dominio = e.target.value; carregarUsuarios().then(desenhar).catch(erro); };
+$("busca").oninput = desenharFichas;
+$("aval").onchange = desenharFichas;
+$("recarregar").onclick = () => carregarUsuarios().then(() => selecionar(atual)).then(() => erro(null)).catch(erro);
+
+carregarUsuarios().then(() => {
+  const inicial = new URLSearchParams(location.search).get("user") || (usuarios.length === 1 ? usuarios[0].user_id : null);
+  return selecionar(inicial);
+}).catch(erro);
+</script>
+</body>
+</html>

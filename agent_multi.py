@@ -2264,6 +2264,7 @@ def _build_sub_agent(llm):
         msgs = [SystemMessage(
             content=_diretiva_idioma() + _linha_data_de_hoje() + SUB_SYSTEM_PROMPT + bloco_dominio + bloco_memoria + extra
         )] + list(state["messages"])
+        memoria.registrar_prompt(_uid, "analista", _current_session.get(), _dom, msgs)
         _tlog("sub_agente", "LLM INVOCADO", mensagens=len(msgs))
         _raise_if_cancelled()
         _t_llm = _time.perf_counter()
@@ -3961,6 +3962,7 @@ def _build_orchestrator(llm, checkpointer=None, llm_roteamento=None):
         _uid, _dom = _current_user_id.get(), db_config.dominio_filename()
         bloco_pref = memoria.bloco_perfil(_uid, _dom) + memoria.bloco_preferencias(_uid, _dom)
         msgs = [SystemMessage(content=_diretiva_idioma() + _linha_data_de_hoje() + ORQ_SYSTEM_PROMPT + bloco_pref)] + historico_recente
+        memoria.registrar_prompt(_uid, "orquestrador", _current_session.get(), _dom, msgs)
         if _cancelled():
             return _cancelled_reply()
         # Última mensagem do usuário => 1ª chamada do turno (rotear ou responder direto).

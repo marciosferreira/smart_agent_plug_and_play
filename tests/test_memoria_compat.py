@@ -361,6 +361,13 @@ class FichasValidacao(unittest.TestCase):
         self.assertEqual(aceitas[0]["funcionou"], "")
         self.assertEqual(aceitas[0]["titulo"], "Custo de mão de obra direta por site em um mês")
 
+    def test_datas_concretas_viram_marcador_e_a_regra_do_periodo_fica(self):
+        falhou = ("Reprovada sem motivo informado: tabela fact_final_dl_cost, período Q2/2026 "
+                  "(start_month <= 2026-09-30, end_month >= 2026-07-01), por site")
+        aceitas = memoria.validar_fichas([self._f(falhou=falhou)], self.COM_ANALISE, set(), True)
+        self.assertEqual(aceitas[0]["falhou"], "Reprovada sem motivo informado: tabela fact_final_dl_cost, "
+                         "período [período] (start_month <= [período], end_month >= [período]), por site")
+
     def test_sem_usuario_nao_ha_fichas_e_no_maximo_tres(self):
         self.assertEqual(memoria.validar_fichas([self._f()], self.COM_ANALISE, set(), False), [])
         varias = [self._f(titulo=f"Análise {chr(65 + i)}") for i in range(5)]
@@ -443,6 +450,16 @@ class FichasArmazenamentoEBusca(_BancoTemporario):
         propria = self._salva("Custo por site", user="321", sessao="d", avaliacao="sem_avaliacao")
         achadas = fichas.buscar("custo por site", "dom.md", limiar=0.5, user_id="321", agrupar="todas")
         self.assertEqual([f["id"] for f in achadas], [propria])  # a do usuário vale mais que o sinal
+
+    def test_aprovada_e_reprovada_do_mesmo_pedido_chegam_juntas(self):
+        self._salva("Custo por site", user="990", sessao="a", avaliacao="positiva")
+        self._salva("Custo por site", user="991", sessao="b", avaliacao="positiva")
+        self._salva("Custo por site", user="992", sessao="c", avaliacao="negativa")
+        self._salva("Custo por site", user="993", sessao="d", avaliacao="negativa")
+        achadas = fichas.buscar("custo por site", "dom.md", limiar=0.5, user_id="321", agrupar="todas")
+        self.assertEqual(len(achadas), 2)  # uma de cada sinal, não quatro
+        self.assertEqual({f["avaliacao"] for f in achadas}, {"positiva", "negativa"})
+        self.assertEqual(len(self.db.fichas_do_dominio("dom.md")), 4)
 
     def test_o_orquestrador_nao_agrupa_as_fichas_do_proprio_usuario(self):
         a = self._salva("Custo por site", user="321", sessao="a")
@@ -815,6 +832,23 @@ class AvaliacaoComoSinal(unittest.TestCase):
             memoria._enviar(self.sessao, "321", "dom.md", lista[:3], 0)
             self.assertEqual(memoria._executor.envios[-1]["espera"], 120)   # só 1 pendente de novo
 
+    def test_agendamento_antigo_que_sobrou_na_fila_nao_roda(self):
+        # O executor nem sempre cancela o agendamento anterior: o do clique em 👎 rodava depois
+        # da extração que já levou a contestação e reescrevia a ficha sem ela.
+        from unittest import mock
+
+        self.assertTrue(self._avalia("Custo por site", "down"))
+        do_clique = memoria._executor.envios[-1]["payload"]
+        memoria._enviar(self.sessao, "321", "dom.md", list(memoria._turnos[self.sessao]), 0)
+        atual = memoria._executor.envios[-1]["payload"]
+        self.assertNotEqual(do_clique["_meta"]["geracao"], atual["_meta"]["geracao"])
+        extrator = memoria._Extrator.__new__(memoria._Extrator)
+        with mock.patch.object(memoria._Extrator, "_extrair") as extrair:
+            extrator.invoke(do_clique)
+            extrair.assert_not_called()
+            extrator.invoke(atual)
+            extrair.assert_called_once()
+
     def test_nao_agenda_quando_nao_ha_o_que_marcar(self):
         self.assertFalse(self._avalia("resposta que não está aqui", "down"))
         self.assertFalse(self._avalia("", "down"))
@@ -834,6 +868,20 @@ class AvaliacaoComoSinal(unittest.TestCase):
         chave, texto = guardar.call_args[0][1:]
         self.assertEqual(chave, feedback.inicio_comparavel("Refeito só com aprovados."))
         self.assertIn("executar_graphql", texto)
+
+    def test_o_ultimo_prompt_do_usuario_e_guardado_inteiro_e_sem_usuario_nao(self):
+        from unittest import mock
+
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        msgs = [SystemMessage(content="SYS\n## Preferências\n- gráfico de barras"), HumanMessage(content="oi" * 20000)]
+        with mock.patch.object(memoria, "guardar_prompt") as guardar:
+            memoria.registrar_prompt("321", "orquestrador", "s1", "dom.md", msgs)
+            memoria.registrar_prompt("", "orquestrador", "s1", "dom.md", msgs)
+        guardar.assert_called_once()
+        texto = guardar.call_args[0][4]
+        self.assertIn("- gráfico de barras", texto)   # o system prompt vai inteiro
+        self.assertLess(len(texto), 25000)            # a mensagem enorme do usuário sai cortada
 
 
 class DataDeHojeNosPrompts(unittest.TestCase):

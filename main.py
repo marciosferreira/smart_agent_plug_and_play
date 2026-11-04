@@ -47,6 +47,7 @@ from typing import Literal
 
 import feedback
 import memoria
+import memoria_admin
 
 _CHART_RE = re.compile(r'\[chart:([a-f0-9\-]{36})\]')
 _PDF_RE   = re.compile(r'\[pdf:([a-f0-9\-]{36})\]')
@@ -150,6 +151,7 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+app.include_router(memoria_admin.router)
 
 
 @app.get("/app-info")

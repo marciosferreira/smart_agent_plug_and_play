@@ -226,6 +226,30 @@ def schedule_task(
     )
 
 
+def _validar_condition_sql(condition_sql: str) -> Optional[str]:
+    """Executa condition_sql antes de salvar (SQL direto ou spec JSON via GraphQL,
+    dependendo de database.modo — ver scheduler/condition.py). Retorna a mensagem de
+    erro para o usuário, ou None se a condição executou sem falhar."""
+    from .condition import run_condition_query, ConditionError, describe_condition_format
+
+    try:
+        run_condition_query(condition_sql)
+    except ConditionError as exc:
+        return (
+            f"❌ **condition_sql inválido:** {exc}\n\n"
+            f"Formato esperado: {describe_condition_format()}"
+        )
+    except Exception as exc:
+        dica = db_config.get_secao("Dica para condition_sql") or "consulte o schema em config/dominio.md."
+        return (
+            f"❌ **condition_sql inválido:** a consulta falhou com o erro abaixo.\n"
+            f"Corrija antes de salvar.\n\n"
+            f"Erro: `{exc}`\n\n"
+            f"Dica: {dica}"
+        )
+    return None
+
+
 def _default_monitor_code(name: str, condition_sql: str) -> str:
     """task_code padrão de um monitor recém-criado — repete a leitura feita por
     condition_sql (SQL direto ou spec JSON via GraphQL, ver scheduler/condition.py)
@@ -352,25 +376,9 @@ def schedule_monitor(
     if condition_operator not in ("is_empty", "is_not_empty") and condition_threshold is None:
         return f"❌ condition_threshold obrigatório para operador '{condition_operator}'."
 
-    # Valida condition_sql executando antes de salvar (SQL direto ou spec JSON via
-    # GraphQL, dependendo de database.modo — ver scheduler/condition.py)
-    from .condition import run_condition_query, ConditionError, describe_condition_format
-
-    try:
-        run_condition_query(condition_sql)
-    except ConditionError as exc:
-        return (
-            f"❌ **condition_sql inválido:** {exc}\n\n"
-            f"Formato esperado: {describe_condition_format()}"
-        )
-    except Exception as exc:
-        dica = db_config.get_secao("Dica para condition_sql") or "consulte o schema em config/dominio.md."
-        return (
-            f"❌ **condition_sql inválido:** a consulta falhou com o erro abaixo.\n"
-            f"Corrija antes de criar o monitor.\n\n"
-            f"Erro: `{exc}`\n\n"
-            f"Dica: {dica}"
-        )
+    err = _validar_condition_sql(condition_sql)
+    if err:
+        return err
 
     return _create_monitor(
         name, description, frequency, condition_sql, condition_operator, condition_threshold,
@@ -613,6 +621,10 @@ def update_scheduled_task(
         condition_threshold: Novo threshold numérico.
     """
     dominio = db_config.dominio_filename()
+    if condition_sql:  # string vazia remove a condição — nada a validar
+        err = _validar_condition_sql(condition_sql)
+        if err:
+            return err
     with get_db() as conn:
         row = conn.execute(
             f"SELECT * FROM scheduled_tasks WHERE id = ? AND {_DOMINIO_CLAUSE}", (task_id, dominio)

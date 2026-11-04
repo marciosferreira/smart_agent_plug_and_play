@@ -1,0 +1,451 @@
+import { BadRequestException } from '@nestjs/common';
+import { Args, Int, Query, Resolver } from '@nestjs/graphql';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+import { GraphQLJSONObject } from 'graphql-type-json';
+import { TableRelation } from './table-relation.type';
+import { SchemaInfo } from './schema-info.type';
+import {
+  ExpandInput,
+  FilterInput,
+  ReportAggregateInput,
+  SortInput,
+} from './report-aggregate.inputs';
+import {
+  FilterOperator,
+  SortDirection,
+  SQL_AGGREGATE_FUNCTION,
+  SQL_FILTER_OPERATOR,
+} from './report-aggregate.enums';
+
+const BRAZIL_SCHEMA = 'brazil';
+const MAX_AGGREGATE_LIMIT = 500;
+
+@Resolver()
+export class ReportResolver {
+  constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
+
+  @Query(() => [String], {
+    description:
+      'Lista as tabelas do schema brazil disponíveis para consulta de relatórios.',
+  })
+  async reportTables(): Promise<string[]> {
+    const rows: { table_name: string }[] = await this.dataSource.query(
+      `SELECT table_name
+       FROM information_schema.tables
+       WHERE table_schema = $1
+         AND table_type = 'BASE TABLE'
+         AND table_name <> 'migrations'
+       ORDER BY table_name`,
+      [BRAZIL_SCHEMA],
+    );
+
+    return rows.map((row) => row.table_name);
+  }
+
+  @Query(() => [GraphQLJSONObject], {
+    description:
+      'Retorna os registros de uma tabela do schema brazil, com filtros/ordenação/paginação opcionais e, opcionalmente, colunas de tabelas relacionadas (via foreign key) já juntadas em cada linha. Sem "limit", traz tudo (sem paginação) — útil para montagem de gráficos e relatórios.',
+  })
+  async reportTable(
+    @Args('table', { type: () => String }) table: string,
+    @Args('where', { type: () => [FilterInput], nullable: true })
+    where?: FilterInput[],
+    @Args('orderBy', { type: () => SortInput, nullable: true })
+    orderBy?: SortInput,
+    @Args('limit', { type: () => Int, nullable: true }) limit?: number,
+    @Args('offset', { type: () => Int, nullable: true }) offset?: number,
+    @Args('expand', { type: () => [ExpandInput], nullable: true })
+    expand?: ExpandInput[],
+  ): Promise<Record<string, unknown>[]> {
+    await this.assertTableExists(table);
+
+    const columns = await this.getColumns(table);
+    for (const filter of where ?? []) {
+      this.assertColumnExists(table, filter.field, columns);
+    }
+    if (orderBy) {
+      this.assertColumnExists(table, orderBy.field, columns);
+    }
+
+    const { joinSql, selectSql } = await this.buildExpandJoins(
+      table,
+      columns,
+      expand,
+      't',
+    );
+
+    const params: unknown[] = [];
+    const whereSql = this.buildWhereClause('t', where, params);
+    const orderSql = orderBy
+      ? `ORDER BY t."${orderBy.field}" ${orderBy.direction}`
+      : '';
+
+    let limitSql = '';
+    if (limit !== undefined) {
+      params.push(limit);
+      limitSql = `LIMIT $${params.length}`;
+    }
+
+    let offsetSql = '';
+    if (offset !== undefined) {
+      params.push(offset);
+      offsetSql = `OFFSET $${params.length}`;
+    }
+
+    const sql = `
+      SELECT t.*${selectSql} FROM "${BRAZIL_SCHEMA}"."${table}" t
+      ${joinSql}
+      ${whereSql}
+      ${orderSql}
+      ${limitSql}
+      ${offsetSql}
+    `;
+
+    return this.dataSource.query(sql, params);
+  }
+
+  @Query(() => [TableRelation], {
+    description:
+      'Lista os relacionamentos (foreign keys) de uma tabela do schema brazil, nos dois sentidos: colunas dessa tabela que referenciam outras, e colunas de outras tabelas que referenciam essa.',
+  })
+  async reportTableRelations(
+    @Args('table', { type: () => String }) table: string,
+  ): Promise<TableRelation[]> {
+    await this.assertTableExists(table);
+
+    return this.getRelations(table);
+  }
+
+  @Query(() => SchemaInfo, {
+    description:
+      'Retorna de uma vez a estrutura completa do schema brazil, agrupada por tabela: cada tabela já vem com suas colunas (nome, tipo, se aceita nulo) e seus relacionamentos (foreign keys de saída e de entrada). Use isso primeiro para entender o modelo de dados antes de montar consultas.',
+  })
+  async reportSchema(): Promise<SchemaInfo> {
+    const [tableNames, allColumns, allRelations] = await Promise.all([
+      this.reportTables(),
+      this.getAllColumns(),
+      this.getRelations(),
+    ]);
+
+    const tables = tableNames.map((table) => ({
+      table,
+      columns: allColumns
+        .filter((c) => c.table === table)
+        .map(({ column, dataType, nullable }) => ({
+          column,
+          dataType,
+          nullable,
+        })),
+      relations: allRelations.filter(
+        (r) => r.fromTable === table || r.toTable === table,
+      ),
+    }));
+
+    return { tables };
+  }
+
+  @Query(() => [GraphQLJSONObject], {
+    description:
+      'Agrega uma tabela do schema brazil (GROUP BY + SUM/COUNT/AVG/MIN/MAX), com filtros opcionais e, se o campo de agrupamento for uma foreign key, junta colunas da tabela relacionada automaticamente. Não aceita SQL livre: tabela, colunas e função de agregação são sempre validadas contra o catálogo do banco.',
+  })
+  async reportAggregate(
+    @Args('input', { type: () => ReportAggregateInput })
+    input: ReportAggregateInput,
+  ): Promise<Record<string, unknown>[]> {
+    const { table, groupBy, metric, where, expand } = input;
+    const orderBy = input.orderBy ?? SortDirection.DESC;
+    const limit = Math.min(input.limit ?? 20, MAX_AGGREGATE_LIMIT);
+
+    await this.assertTableExists(table);
+
+    const columns = await this.getColumns(table);
+    this.assertColumnExists(table, groupBy, columns);
+    this.assertColumnExists(table, metric.field, columns);
+    for (const filter of where ?? []) {
+      this.assertColumnExists(table, filter.field, columns);
+    }
+
+    let joinClause = '';
+    const selectExpandColumns: string[] = [];
+    const groupByExpandColumns: string[] = [];
+
+    if (expand && expand.length > 0) {
+      const relation = await this.findOutgoingRelation(table, groupBy);
+
+      if (!relation) {
+        throw new BadRequestException(
+          `A coluna "${groupBy}" de "${table}" não é uma foreign key conhecida, não é possível usar "expand".`,
+        );
+      }
+
+      const relatedColumns = await this.getColumns(relation.toTable);
+      for (const column of expand) {
+        this.assertColumnExists(relation.toTable, column, relatedColumns);
+      }
+
+      joinClause = `JOIN "${BRAZIL_SCHEMA}"."${relation.toTable}" j ON g."${groupBy}" = j."${relation.toColumn}"`;
+      for (const column of expand) {
+        selectExpandColumns.push(`j."${column}" AS "${column}"`);
+        groupByExpandColumns.push(`j."${column}"`);
+      }
+    }
+
+    const params: unknown[] = [];
+    const whereSql = this.buildWhereClause('g', where, params);
+
+    params.push(limit);
+    const limitParamIndex = params.length;
+
+    const sqlFunction = SQL_AGGREGATE_FUNCTION[metric.op];
+    const selectExpand =
+      selectExpandColumns.length > 0
+        ? `, ${selectExpandColumns.join(', ')}`
+        : '';
+    const groupByExpand =
+      groupByExpandColumns.length > 0
+        ? `, ${groupByExpandColumns.join(', ')}`
+        : '';
+
+    const sql = `
+      SELECT
+        g."${groupBy}" AS "groupKey"${selectExpand},
+        ${sqlFunction}(g."${metric.field}") AS "metricValue"
+      FROM "${BRAZIL_SCHEMA}"."${table}" g
+      ${joinClause}
+      ${whereSql}
+      GROUP BY g."${groupBy}"${groupByExpand}
+      ORDER BY "metricValue" ${orderBy}
+      LIMIT $${limitParamIndex}
+    `;
+
+    return this.dataSource.query(sql, params);
+  }
+
+  private buildWhereClause(
+    alias: string,
+    filters: FilterInput[] | undefined,
+    params: unknown[],
+  ): string {
+    const clauses: string[] = [];
+
+    for (const filter of filters ?? []) {
+      switch (filter.op) {
+        case FilterOperator.IN:
+          params.push(filter.value);
+          clauses.push(`${alias}."${filter.field}" = ANY($${params.length})`);
+          break;
+        case FilterOperator.NOT_IN:
+          params.push(filter.value);
+          clauses.push(`${alias}."${filter.field}" <> ALL($${params.length})`);
+          break;
+        case FilterOperator.IS_NULL:
+          clauses.push(`${alias}."${filter.field}" IS NULL`);
+          break;
+        case FilterOperator.IS_NOT_NULL:
+          clauses.push(`${alias}."${filter.field}" IS NOT NULL`);
+          break;
+        default: {
+          const sqlOperator = SQL_FILTER_OPERATOR[filter.op];
+          params.push(filter.value);
+          clauses.push(
+            `${alias}."${filter.field}" ${sqlOperator} $${params.length}`,
+          );
+        }
+      }
+    }
+
+    return clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+  }
+
+  private async buildExpandJoins(
+    table: string,
+    baseColumns: Set<string>,
+    expand: ExpandInput[] | undefined,
+    baseAlias: string,
+  ): Promise<{ joinSql: string; selectSql: string }> {
+    if (!expand || expand.length === 0) {
+      return { joinSql: '', selectSql: '' };
+    }
+
+    const joins: string[] = [];
+    const selects: string[] = [];
+
+    for (let i = 0; i < expand.length; i++) {
+      const { viaColumn, columns } = expand[i];
+      const alias = `e${i}`;
+
+      this.assertColumnExists(table, viaColumn, baseColumns);
+
+      const relation = await this.findOutgoingRelation(table, viaColumn);
+      if (!relation) {
+        throw new BadRequestException(
+          `A coluna "${viaColumn}" de "${table}" não é uma foreign key conhecida, não é possível usar "expand".`,
+        );
+      }
+
+      const relatedColumns = await this.getColumns(relation.toTable);
+      for (const column of columns) {
+        this.assertColumnExists(relation.toTable, column, relatedColumns);
+      }
+
+      joins.push(
+        `LEFT JOIN "${BRAZIL_SCHEMA}"."${relation.toTable}" ${alias} ON ${baseAlias}."${viaColumn}" = ${alias}."${relation.toColumn}"`,
+      );
+
+      for (const column of columns) {
+        selects.push(`${alias}."${column}" AS "${viaColumn}__${column}"`);
+      }
+    }
+
+    return {
+      joinSql: joins.join('\n'),
+      selectSql: selects.length > 0 ? `, ${selects.join(', ')}` : '',
+    };
+  }
+
+  private async getAllColumns(): Promise<
+    { table: string; column: string; dataType: string; nullable: boolean }[]
+  > {
+    const rows: {
+      table_name: string;
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+    }[] = await this.dataSource.query(
+      `SELECT
+         c.table_name,
+         c.column_name,
+         c.data_type,
+         c.is_nullable
+       FROM information_schema.columns c
+       JOIN information_schema.tables t
+         ON t.table_schema = c.table_schema
+         AND t.table_name = c.table_name
+       WHERE c.table_schema = $1
+         AND t.table_type = 'BASE TABLE'
+         AND c.table_name <> 'migrations'
+       ORDER BY c.table_name, c.ordinal_position`,
+      [BRAZIL_SCHEMA],
+    );
+
+    return rows.map((row) => ({
+      table: row.table_name,
+      column: row.column_name,
+      dataType: row.data_type,
+      nullable: row.is_nullable === 'YES',
+    }));
+  }
+
+  private async getColumns(table: string): Promise<Set<string>> {
+    const rows: { column_name: string }[] = await this.dataSource.query(
+      `SELECT column_name
+       FROM information_schema.columns
+       WHERE table_schema = $1
+         AND table_name = $2`,
+      [BRAZIL_SCHEMA, table],
+    );
+
+    return new Set(rows.map((row) => row.column_name));
+  }
+
+  private assertColumnExists(
+    table: string,
+    column: string,
+    columns: Set<string>,
+  ): void {
+    if (!columns.has(column)) {
+      throw new BadRequestException(
+        `Coluna "${column}" não encontrada na tabela "${table}".`,
+      );
+    }
+  }
+
+  private async getRelations(table?: string): Promise<TableRelation[]> {
+    const params: unknown[] = [BRAZIL_SCHEMA];
+    let tableFilter = '';
+
+    if (table) {
+      params.push(table);
+      tableFilter = `AND (tc.table_name = $${params.length} OR ccu.table_name = $${params.length})`;
+    }
+
+    const rows: {
+      from_table: string;
+      from_column: string;
+      to_table: string;
+      to_column: string;
+    }[] = await this.dataSource.query(
+      `SELECT
+         tc.table_name AS from_table,
+         kcu.column_name AS from_column,
+         ccu.table_name AS to_table,
+         ccu.column_name AS to_column
+       FROM information_schema.table_constraints tc
+       JOIN information_schema.key_column_usage kcu
+         ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+       JOIN information_schema.constraint_column_usage ccu
+         ON tc.constraint_name = ccu.constraint_name
+         AND tc.table_schema = ccu.table_schema
+       WHERE tc.constraint_type = 'FOREIGN KEY'
+         AND tc.table_schema = $1
+         ${tableFilter}
+       ORDER BY from_table, from_column`,
+      params,
+    );
+
+    return rows.map((row) => ({
+      fromTable: row.from_table,
+      fromColumn: row.from_column,
+      toTable: row.to_table,
+      toColumn: row.to_column,
+    }));
+  }
+
+  private async findOutgoingRelation(
+    table: string,
+    column: string,
+  ): Promise<{ toTable: string; toColumn: string } | null> {
+    const rows: { to_table: string; to_column: string }[] =
+      await this.dataSource.query(
+        `SELECT ccu.table_name AS to_table, ccu.column_name AS to_column
+         FROM information_schema.table_constraints tc
+         JOIN information_schema.key_column_usage kcu
+           ON tc.constraint_name = kcu.constraint_name
+           AND tc.table_schema = kcu.table_schema
+         JOIN information_schema.constraint_column_usage ccu
+           ON tc.constraint_name = ccu.constraint_name
+           AND tc.table_schema = ccu.table_schema
+         WHERE tc.constraint_type = 'FOREIGN KEY'
+           AND tc.table_schema = $1
+           AND tc.table_name = $2
+           AND kcu.column_name = $3
+         LIMIT 1`,
+        [BRAZIL_SCHEMA, table, column],
+      );
+
+    if (rows.length === 0) {
+      return null;
+    }
+
+    return { toTable: rows[0].to_table, toColumn: rows[0].to_column };
+  }
+
+  private async assertTableExists(table: string): Promise<void> {
+    const rows: { table_name: string }[] = await this.dataSource.query(
+      `SELECT table_name
+       FROM information_schema.tables
+       WHERE table_schema = $1
+         AND table_name = $2
+         AND table_type = 'BASE TABLE'`,
+      [BRAZIL_SCHEMA, table],
+    );
+
+    if (rows.length === 0) {
+      throw new BadRequestException(
+        `Tabela "${table}" não encontrada no schema ${BRAZIL_SCHEMA}.`,
+      );
+    }
+  }
+}

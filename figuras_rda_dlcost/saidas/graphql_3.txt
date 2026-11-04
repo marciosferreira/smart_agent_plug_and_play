@@ -1,0 +1,10 @@
+
+3. Limite de proteção: pedido de 5.000 linhas
+=============================================
+Pedido (reportTable):
+{
+  "table": "fact_hourly_rate",
+  "limit": 5000
+}
+
+Resposta: erro do servidor -> O "limit" excede o máximo permitido (1000).

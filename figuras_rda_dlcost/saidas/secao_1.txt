@@ -1,0 +1,16 @@
+Verificação da base New Age (DL Cost) via GraphQL — 15/10/2026
+Tabelas lidas: bridge_final_dl_cost_sales_model (380), dim_calendar (36), dim_product (222), dim_product_family (20), dim_sales_model (5665), dim_site (10), fact_dl_discount (2529), fact_final_dl_cost (22), fact_hourly_rate (2527), fact_standard_time (1969)
+
+1. Integridade e cálculos
+=========================
+  [OK]    Chaves primárias duplicadas (9 tabelas com id)                 0 duplicadas
+  [OK]    Registros órfãos (14 relacionamentos)                          0 órfãos
+  [OK]    Soma das 4 áreas = custo total (custo final)                   22 de 22 corretos
+  [OK]    Custo em dólar = custo local / câmbio                          22 de 22 corretos
+  [OK]    Rótulo do trimestre coerente com a janela de datas             22 de 22 corretos
+  [OK]    Trimestre fiscal do calendário (abr-jun = Q1)                  36 de 36 corretos
+  [OK]    Descontos com data final anterior à inicial                    0
+  [OK]    Descontos percentuais acima de 100%                            0
+  [OK]    Produtividade (upph) = 1 / tempo padrão                        1879 de 1879 corretos
+
+  Resultado: 9 de 9 testes aprovados
