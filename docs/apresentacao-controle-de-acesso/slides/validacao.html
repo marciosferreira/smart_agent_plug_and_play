@@ -1,0 +1,16 @@
+<section id="validacao" style="background:#F6F8F8;color:#1B2A33;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-family:'Source Serif 4', Georgia, serif;font-size:72px;font-weight:600;line-height:1.1;color:#0B3C49">O que a política valida em cada consulta</h2>
+<table style="font-size:30px">
+<tr><th style="width:26%;text-align:left">Ponto</th><th style="width:14%;text-align:left">Quando</th><th style="width:60%;text-align:left">Regra aplicada</th></tr>
+<tr><td><b>Tabela</b></td><td>Pedido</td><td>Fora da allowlist do papel: negada</td></tr>
+<tr><td><b>where, orderBy</b></td><td>Pedido</td><td>Coluna negada: negada (evita inferir o valor por filtro)</td></tr>
+<tr><td><b>groupBy, metric</b></td><td>Pedido</td><td>Coluna negada: negada</td></tr>
+<tr><td><b>expand</b></td><td>Pedido</td><td>Relação declarada e colunas liberadas na tabela alvo; senão, negado</td></tr>
+<tr><td><b>Linhas</b></td><td>Pedido</td><td>Filtro do papel entra em AND no where, antes do GROUP BY</td></tr>
+<tr><td><b>Colunas devolvidas</b></td><td>Resposta</td><td>Colunas negadas são apagadas das linhas; o reportSchema também vem filtrado</td></tr>
+</table>
+<div style="background:#F8ECE9;padding:28px 40px;border-radius:16px">
+<p style="font-size:30px;line-height:1.35"><b>Fail-closed:</b> usuário desconhecido ou sem papel não enxerga nenhuma tabela.</p>
+</div>
+<aside>A negação sobe como AcessoNegado antes de qualquer chamada ao backend e as tools devolvem a mensagem ao LLM, que deve explicar ao usuário. O reportTable não tem projeção de colunas, por isso as colunas negadas são removidas depois da busca. Nas agregações só existe a checagem do pedido.</aside>
+</section>

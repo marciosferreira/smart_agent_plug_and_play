@@ -1,0 +1,15 @@
+<section id="onde-aplicar" style="background:#F6F8F8;color:#1B2A33;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-family:'Source Serif 4', Georgia, serif;font-size:72px;font-weight:600;line-height:1.1;color:#0B3C49">Onde aplicar as regras: cliente ou servidor</h2>
+<table style="font-size:26px">
+<tr><th style="width:20%;text-align:left"></th><th style="width:40%;text-align:left">No cliente (POC)</th><th style="width:40%;text-align:left">No servidor GraphQL</th></tr>
+<tr><td><b>Onde roda</b></td><td>No app, em graphql_config</td><td>No resolver do backend (mdsc-capex-br)</td></tr>
+<tr><td><b>Coluna negada</b></td><td>Chega ao app e é apagada da resposta</td><td>Nem sai do servidor: o resolver não a lê</td></tr>
+<tr><td><b>Filtro de linhas em joins</b></td><td>Não dá: o expand é negado nas tabelas com rows</td><td>Dá: o filtro entra também na tabela alvo</td></tr>
+<tr><td><b>Quem fica protegido</b></td><td>Só o tráfego que passa pelo app</td><td>Todo cliente do backend</td></tr>
+<tr><td><b>Vários apps no mesmo backend</b></td><td>Cada app tem a sua política, em arquivo local, e a atualiza sozinho</td><td>As políticas de todos os apps ficam no servidor, separadas por app</td></tr>
+</table>
+<div style="background:#F6E9CC;padding:22px 36px;border-radius:14px">
+<p style="font-size:26px;line-height:1.4"><b>Hoje:</b> política no cliente. O mesmo servidor atende vários apps, cada um com as suas regras, e mudá-las é mais simples por serem locais. O que o servidor precisaria ter está no próximo slide.</p>
+</div>
+<aside>Duas opções para a equipe. No cliente (o que a POC implementa): a política roda em graphql_config, o backend não muda e o dado negado chega ao app antes de ser removido. No servidor: o app envia a identidade do usuário (JWT ou header), o backend descobre o papel e o resolver aplica a política: recusa tabelas e colunas fora dela, soma o filtro de linhas ao where e seleciona só as colunas permitidas, o que elimina o passo de apagar colunas da resposta. Com várias aplicações no mesmo backend, as regras teriam de ser identificadas por app, já que hoje cada app tem o seu acl.yml. Reaproveitar o formato do acl.yml e a lógica de acesso.py no servidor é uma sugestão, ainda não avaliada.</aside>
+</section>

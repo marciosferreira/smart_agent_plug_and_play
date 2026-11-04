@@ -1,0 +1,26 @@
+<section id="principios" style="background:#F6F8F8;color:#1B2A33;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:48px">
+<h2 style="font-family:'Source Serif 4', Georgia, serif;font-size:72px;font-weight:600;line-height:1.1;color:#0B3C49">Duas formas de bloquear dados por papel</h2>
+<div style="display:flex;gap:40px">
+<div style="flex:1;display:flex;flex-direction:column;gap:20px;background:#E3F0F1;padding:44px;border-radius:20px">
+<h3 style="font-size:44px;font-weight:600;color:#0B6A73">1 · No pedido</h3>
+<ul style="font-size:30px;line-height:1.4">
+<li>Tabela fora da política: recusada</li>
+<li>Coluna negada usada em filtro, ordenação, agrupamento ou join: recusada</li>
+<li>Filtro de linhas do papel entra no where: o banco só devolve linhas permitidas</li>
+</ul>
+<p style="font-size:28px;line-height:1.4;font-weight:600;color:#0B6A73">O backend aceita isso: dá para restringir antes de consultar.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:20px;background:#F6E9CC;padding:44px;border-radius:20px">
+<h3 style="font-size:44px;font-weight:600;color:#8A5A00">2 · Na resposta</h3>
+<ul style="font-size:30px;line-height:1.4">
+<li>O backend não permite escolher quais colunas voltam: devolve todas</li>
+<li>Nosso código apaga as colunas negadas de cada linha antes de entregar o resultado ao LLM</li>
+</ul>
+<p style="font-size:28px;line-height:1.4;font-weight:600;color:#8A5A00">Não dá para impedir no pedido: é preciso remover depois.</p>
+</div>
+</div>
+<div style="background:#F8ECE9;padding:28px 40px;border-radius:16px">
+<p style="font-size:30px;line-height:1.4"><b>Consequência:</b> a coluna negada chega ao app antes de ser removida. É um limite aceito: as regras são de cada app e ficam no cliente, sem mudar o backend.</p>
+</div>
+<aside>Este é o ponto central da apresentação. No pedido: tabelas, colunas usadas em where, orderBy, groupBy, metric e expand (o join de um salto), e linhas, com o predicado do papel somado ao where. Na resposta: o reportTable não tem projeção de colunas, então todas voltam e as negadas são removidas por código (limpar_linhas). Nas agregações só existe a checagem do pedido. A remoção acontece no cliente, depois da resposta do backend: o dado negado trafega até o nosso código.</aside>
+</section>

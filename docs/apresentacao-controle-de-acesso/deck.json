@@ -1,0 +1,18 @@
+{
+  "v": 4,
+  "createdOnFiles": { "v": 1, "at": "2026-11-04T12:00:00Z" },
+  "lists": "css",
+  "title": "Restrição de dados por papel no GraphQL",
+  "order": ["cover", "principios", "arquitetura", "como-funciona", "politica", "validacao", "fluxo-opcoes", "onde-aplicar", "servidor-precisa", "autenticacao", "estado"],
+  "sections": {
+    "s1": { "description": "A ideia central: o que se bloqueia no pedido, o que se remove da resposta e como é feito.", "start": "cover" },
+    "s2": { "description": "A política por papel, as regras aplicadas, onde aplicá-las (cliente ou servidor) e de onde vem o user_id.", "start": "politica" },
+    "s3": { "description": "O que falta para levar a política à produção.", "start": "estado" }
+  },
+  "faces": {
+    "source-serif-4": { "family": "Source Serif 4", "href": "https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@400..700&display=swap" },
+    "ibm-plex-sans": { "family": "IBM Plex Sans", "href": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" },
+    "jetbrains-mono": { "family": "JetBrains Mono", "href": "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap" }
+  },
+  "designSystems": []
+}

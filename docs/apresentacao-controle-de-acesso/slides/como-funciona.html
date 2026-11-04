@@ -1,0 +1,29 @@
+<section id="como-funciona" style="background:#F6F8F8;color:#1B2A33;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:48px">
+<h2 style="font-family:'Source Serif 4', Georgia, serif;font-size:72px;font-weight:600;line-height:1.1;color:#0B3C49">Como é feito, em código</h2>
+<div style="display:flex;gap:48px">
+<div style="width:900px;display:flex;flex-direction:column;gap:20px;background:#14242C;padding:44px;border-radius:20px">
+<p style="font-size:26px;font-weight:600;color:#E0A030">graphql_config.run_query_table (simplificado)</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px;line-height:1.6;color:#F6F8F8">pol = politica_para(user_id)<br><span style="color:#8FD3DA"># 1. no pedido: valida e soma o filtro</span><br>where = pol.preparar_tabela(<br>&#160;&#160;table, where, order_by, expand)<br>data = _post(query, variables)<br><span style="color:#E0A030"># 2. na resposta: apaga colunas negadas</span><br>return pol.limpar_linhas(<br>&#160;&#160;table, data["reportTable"])</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px">
+<div style="background:#E3F0F1;padding:20px 32px;border-radius:14px;display:flex;flex-direction:column;gap:6px">
+<p style="font-size:26px;font-weight:600;color:#0B6A73">O LLM pede</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px">where site_id = 7</p>
+</div>
+<div style="background:#E3F0F1;padding:20px 32px;border-radius:14px;display:flex;flex-direction:column;gap:6px">
+<p style="font-size:26px;font-weight:600;color:#0B6A73">Vai ao backend</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px">where site_id = 7 AND is_forecast = false</p>
+</div>
+<div style="background:#F6E9CC;padding:20px 32px;border-radius:14px;display:flex;flex-direction:column;gap:6px">
+<p style="font-size:26px;font-weight:600;color:#8A5A00">O backend devolve</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px">site_id, rate, approved_at</p>
+</div>
+<div style="background:#E3EFE8;padding:20px 32px;border-radius:14px;display:flex;flex-direction:column;gap:6px">
+<p style="font-size:26px;font-weight:600;color:#1B2A33">O LLM recebe</p>
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:26px">site_id, rate</p>
+</div>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;font-size:24px;color:#6a7179">Exemplo para o papel colaborador; site_id e rate são ilustrativas, approved_at e is_forecast vêm do acl.yml</p>
+<aside>O código real está em graphql_config.run_query_table e run_aggregate. Em preparar_tabela a política recusa o que não é permitido (AcessoNegado) e devolve o where com o filtro do papel somado em AND. Em limpar_linhas ela percorre as linhas devolvidas e apaga as colunas negadas, inclusive as vindas de expand. Os nomes site_id e rate do exemplo são ilustrativos.</aside>
+</section>

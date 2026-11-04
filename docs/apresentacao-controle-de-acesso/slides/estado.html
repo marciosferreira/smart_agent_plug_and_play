@@ -1,0 +1,21 @@
+<section id="estado" style="background:#0B3C49;color:#F6F8F8;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:48px">
+<h2 style="font-family:'Source Serif 4', Georgia, serif;font-size:72px;font-weight:600;line-height:1.1">O que falta para produção</h2>
+<div style="display:flex;gap:48px">
+<div style="flex:1;display:flex;flex-direction:column;gap:24px;background:#14525F;padding:44px;border-radius:20px">
+<h3 style="font-size:44px;font-weight:600;color:#E0A030">Decisão: política no cliente</h3>
+<ul style="font-size:28px;line-height:1.4">
+<li>O backend GraphQL não muda: segue com a chave única, guardada só no servidor do app</li>
+<li>Cada app define as próprias regras no seu acl.yml</li>
+<li>Limite aceito: o dado negado chega ao app antes de ser removido</li>
+</ul></div>
+<div style="flex:1;display:flex;flex-direction:column;gap:24px;background:#14525F;padding:44px;border-radius:20px">
+<h3 style="font-size:44px;font-weight:600;color:#E0A030">A implementar</h3>
+<ol style="font-size:28px;line-height:1.4">
+<li>Trocar o dev-login pelo gateway real: o app só valida o JWT</li>
+<li>Ler o papel da tabela user_role no banco, não do acl.yml</li>
+<li>Definir com o negócio os papéis e as regras de cada app e conferi-las com os dados reais</li>
+<li>Cobrir os outros caminhos de dados: o modo sql não passa pela política</li></ol>
+</div>
+</div>
+<aside>Decisão: as restrições são de cada app, então a política continua no cliente (neste app) e o servidor GraphQL não muda. O custo é que o dado negado trafega até o app e é removido ali; por isso a api_key única fica só no servidor do app e nunca vai ao front. Itens a implementar: (1) o dev-login é só da POC; em produção o token vem do gateway e o app valida com o mesmo AUTH_SECRET. (2) Hoje users: no acl.yml faz o papel da tabela user_role. (3) Os papéis de exemplo usam as colunas do dominio.md do pack New Age e não foram conferidos contra os dados reais. (4) A política hoje só é aplicada em graphql_config (reportTable, reportAggregate e reportSchema); o modo sql (db_config.run_select) não passa por ela.</aside>
+</section>

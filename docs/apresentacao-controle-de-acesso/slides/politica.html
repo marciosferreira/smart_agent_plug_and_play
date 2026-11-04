@@ -1,0 +1,21 @@
+<section id="politica" style="background:#F6F8F8;color:#1B2A33;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:36px">
+<h2 style="font-family:'Source Serif 4', Georgia, serif;font-size:72px;font-weight:600;line-height:1.1;color:#0B3C49">O acl.yml define o que cada papel consulta</h2>
+<div style="display:flex;gap:40px">
+<div style="flex:1;display:flex;flex-direction:column;gap:16px">
+<div style="background:#14242C;padding:36px 40px;border-radius:20px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.5;color:#F6F8F8">gerente:<br>&#160;&#160;tables:<br>&#160;&#160;&#160;&#160;fact_hourly_rate: {}<br>&#160;&#160;&#160;&#160;fact_dl_discount: {}<br>&#160;&#160;&#160;&#160;fact_final_dl_cost: {}<br>&#160;&#160;&#160;&#160;...</p>
+</div>
+<p style="font-size:26px;line-height:1.35"><b>Gerente:</b> as tabelas listadas, sem restrição de coluna nem de linha. Tabela fora da lista é recusada.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:16px">
+<div style="background:#14242C;padding:36px 40px;border-radius:20px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px;line-height:1.5;color:#F6F8F8">colaborador:<br>&#160;&#160;tables:<br>&#160;&#160;&#160;&#160;fact_hourly_rate:<br><span style="color:#E0A030">&#160;&#160;&#160;&#160;&#160;&#160;columns: {deny: [approved_at]}</span><br><span style="color:#8FD3DA">&#160;&#160;&#160;&#160;&#160;&#160;rows:<br>&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;- {field: is_forecast,<br>&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;op: EQ, value: false}</span><br>&#160;&#160;&#160;&#160;dim_site: {}<br>&#160;&#160;&#160;&#160;...</p>
+</div>
+<p style="font-size:26px;line-height:1.35"><b style="color:#8A5A00">deny:</b> coluna barrada no pedido e apagada da resposta. <b style="color:#0B6A73">rows:</b> só as linhas que cumprem a condição (aqui, is_forecast = false). São independentes. <b>dim_site: {}</b> é liberada por inteiro. Só as tabelas listadas valem.</p>
+</div>
+</div>
+<div style="background:#F8ECE9;padding:22px 36px;border-radius:14px">
+<p style="font-size:26px;line-height:1.4"><b>Recusa:</b> o colaborador consulta fact_dl_discount e o LLM recebe <span style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:24px">Acesso negado: o papel 'colaborador' não tem acesso à tabela 'fact_dl_discount'.</span> O gerente consulta normalmente.</p>
+</div>
+<aside>Trechos reais do config/new_age/acl.yml, simplificados: as reticências indicam outras tabelas na lista (no arquivo real o gerente tem 10, entre dimensões e fatos; o colaborador também tem outras além das mostradas). O tables é uma allowlist: só as tabelas declaradas podem ser consultadas e as demais somem também do schema que o LLM vê. O arquivo tem três partes: users (user_id → papel; é a tabela user_role da POC), roles (as regras de cada papel) e relations (chaves estrangeiras, usadas para validar o expand; sem a relação declarada o expand é negado, e também é negado para tabelas com restrição de linhas). Papéis: admin (tables: "*", tudo), gerente (todo o custo), colaborador (o custo com as restrições acima) e consulta_basica (só as dimensões, com allow: [id, name, country, status] em dim_site). O nome do papel não tem relação com os agentes do sistema, como o agente analista. rows é uma condição somada em AND ao where do usuário: o usuário ainda filtra por outras colunas, e se pedir is_forecast = true o resultado vem vazio (não é recusado). Vários itens em rows entram todos em AND. columns (deny ou allow) e rows são chaves independentes: uma tabela pode ter só deny, só allow, só rows ou combinações; sem columns nenhuma coluna é bloqueada e sem rows nenhuma linha é filtrada. As regras não foram conferidas contra os dados reais.</aside>
+</section>

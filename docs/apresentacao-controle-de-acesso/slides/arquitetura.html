@@ -1,0 +1,31 @@
+<section id="arquitetura" style="background:#F6F8F8;color:#1B2A33;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:40px">
+<h2 style="font-family:'Source Serif 4', Georgia, serif;font-size:72px;font-weight:600;line-height:1.1;color:#0B3C49">O caminho de uma consulta</h2>
+<div style="display:flex;flex-direction:column;gap:16px">
+<div style="display:flex;align-items:center;gap:40px">
+<div style="width:640px;background:#5E7480;padding:18px 32px;border-radius:14px"><p style="font-size:34px;font-weight:600;color:#FFFFFF">1 · Usuário autenticado</p></div>
+<p style="flex:1;font-size:30px">O JWT identifica o usuário; o middleware impõe o user_id</p>
+</div>
+<div style="display:flex;align-items:center;gap:40px">
+<div style="width:640px;background:#5E7480;padding:18px 32px;border-radius:14px"><p style="font-size:34px;font-weight:600;color:#FFFFFF">2 · Tool do analista</p></div>
+<p style="flex:1;font-size:30px">Pede a consulta (tabela, where, expand…) ao graphql_config</p>
+</div>
+<div style="display:flex;align-items:center;gap:40px">
+<div style="width:640px;background:#0B6A73;padding:18px 32px;border-radius:14px"><p style="font-size:34px;font-weight:600;color:#FFFFFF">3 · Controle no pedido</p></div>
+<p style="flex:1;font-size:30px">Confere tabelas e colunas e soma o filtro de linhas do papel. Negou: o LLM recebe o erro</p>
+</div>
+<div style="display:flex;align-items:center;gap:40px">
+<div style="width:640px;background:#5E7480;padding:18px 32px;border-radius:14px"><p style="font-size:34px;font-weight:600;color:#FFFFFF">4 · Backend GraphQL</p></div>
+<p style="flex:1;font-size:30px">Executa e devolve todas as colunas</p>
+</div>
+<div style="display:flex;align-items:center;gap:40px">
+<div style="width:640px;background:#E0A030;padding:18px 32px;border-radius:14px"><p style="font-size:34px;font-weight:600;color:#1B2A33">5 · Controle na resposta</p></div>
+<p style="flex:1;font-size:30px">Apaga as colunas negadas de cada linha</p>
+</div>
+<div style="display:flex;align-items:center;gap:40px">
+<div style="width:640px;background:#5E7480;padding:18px 32px;border-radius:14px"><p style="font-size:34px;font-weight:600;color:#FFFFFF">6 · Código do analista</p></div>
+<p style="flex:1;font-size:30px">Só recebe o que o papel permite</p>
+</div>
+</div>
+<p style="font-size:28px;color:#4A5D66;line-height:1.4">Verde-azulado e âmbar são os dois pontos de controle; os cinzas não restringem nada por si.</p>
+<aside>Os dois controles ficam em graphql_config, por onde passam todas as tools do analista. O backend segue com a api_key única e não muda: as regras são de cada app, então a política fica no cliente. Por isso o dado negado chega a graphql_config no passo 4 e só some no passo 5.</aside>
+</section>
